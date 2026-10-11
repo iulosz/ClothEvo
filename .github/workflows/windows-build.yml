@@ -1,0 +1,79 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build ClothEvo for Windows x64
+    runs-on: windows-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Test workspace
+        run: cargo test --workspace
+
+      - name: Build release executable
+        run: cargo build --release -p cloth-app
+
+      - name: Package portable ZIP
+        shell: pwsh
+        run: |
+          $package = "dist/ClothEvo-Windows-x64"
+          New-Item -ItemType Directory -Force -Path $package | Out-Null
+          Copy-Item "target/release/clothevo.exe" "$package/ClothEvo.exe"
+
+          @'
+          ClothEvo — Windows x64 preview
+
+          Como executar:
+          1. Extraia todo o conteúdo deste ZIP para uma pasta.
+          2. Execute ClothEvo.exe.
+          3. Se o Windows SmartScreen aparecer, confira se o arquivo veio do repositório
+             oficial https://github.com/iulosz/ClothEvo antes de decidir executar.
+
+          Esta é uma build de desenvolvimento, ainda sem instalador e sem assinatura digital.
+          Requer Windows x64 atualizado e drivers gráficos compatíveis com WGPU.
+
+          Atalhos e recursos principais:
+          - Use o workspace "Moldes 2D" para desenhar peças.
+          - Mude para "Editar" para mover vértices e alças Bézier.
+          - Use a roda do mouse para zoom.
+          - Use o botão direito ou do meio para mover a viewport.
+          - Os projetos de molde são salvos/abertos em clothevo-pattern.json no diretório
+            de trabalho atual do aplicativo.
+          '@ | Set-Content -Encoding utf8 "$package/LEIA-ME-WINDOWS.txt"
+
+          Compress-Archive -Path "$package/*" -DestinationPath "dist/ClothEvo-Windows-x64.zip" -Force
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClothEvo-Windows-x64
+          path: dist/ClothEvo-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish preview release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: windows-preview-${{ github.run_number }}
+          name: ClothEvo Windows Preview #${{ github.run_number }}
+          body: |
+            Build de prévia para testar no Windows x64.
+
+            O ZIP contém o executável ClothEvo.exe e instruções em português.
+            Este artefato não é assinado digitalmente e ainda não tem instalador.
+          draft: false
+          prerelease: true
+          files: dist/ClothEvo-Windows-x64.zip
+          fail_on_unmatched_files: true
