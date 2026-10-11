@@ -107,6 +107,8 @@ struct ClothEvoApp {
     seam_b_piece: usize,
     seam_a_segment: usize,
     seam_b_segment: usize,
+    seam_a_reversed: bool,
+    seam_b_reversed: bool,
     seam_ease_m: f64,
     pattern_message: String,
     using_pattern_sim: bool,
@@ -187,6 +189,8 @@ impl ClothEvoApp {
             seam_b_piece: 1,
             seam_a_segment: 0,
             seam_b_segment: 0,
+            seam_a_reversed: false,
+            seam_b_reversed: false,
             seam_ease_m: 0.0,
             pattern_message: String::new(),
             using_pattern_sim: false,
@@ -424,6 +428,10 @@ impl ClothEvoApp {
                     && ui.button("Inserir vértice").clicked() {
                     self.insert_selected_vertex();
                 }
+                if matches!(target, PatternEditTarget::Edge { .. })
+                    && ui.button("Converter em Bézier").clicked() {
+                    self.convert_selected_edge_to_bezier();
+                }
                 if matches!(target, PatternEditTarget::Anchor { .. })
                     && ui.button("Excluir vértice").clicked() {
                     self.delete_selected_vertex();
@@ -526,6 +534,8 @@ impl ClothEvoApp {
                     }
                 });
             ui.add(egui::DragValue::new(&mut self.seam_ease_m).speed(0.001).prefix("Folga (m) "));
+            ui.checkbox(&mut self.seam_a_reversed, "Inverter orientação da borda A");
+            ui.checkbox(&mut self.seam_b_reversed, "Inverter orientação da borda B");
             ui.weak("A folga é salva no projeto; o solver ainda não a aplica como ease diferencial.");
             if ui.button("Adicionar costura").clicked() { self.add_seam_from_controls(); }
             ui.label(format!("Costuras no projeto: {}", self.pattern_project.seams.len()));
@@ -651,6 +661,22 @@ impl ClothEvoApp {
         }
     }
 
+    fn convert_selected_edge_to_bezier(&mut self) {
+        let Some(PatternEditTarget::Edge { piece, segment, .. }) = self.selected_target else {
+            self.pattern_message = "Selecione um segmento para convertê-lo em Bézier.".into();
+            return;
+        };
+        let Some(piece_data) = self.pattern_project.pieces.get(piece) else { return; };
+        let id = piece_data.id;
+        match convert_project_segment_to_bezier(&mut self.pattern_project, id, segment) {
+            Ok(()) => {
+                self.selected_target = Some(PatternEditTarget::Control1 { piece, segment });
+                self.pattern_message = "Segmento convertido. Arraste as alças roxas para editar a curva.".into();
+            }
+            Err(e) => self.pattern_message = e,
+        }
+    }
+
     fn delete_selected_vertex(&mut self) {
         let Some(PatternEditTarget::Anchor { piece, index }) = self.selected_target else { return; };
         let Some(piece_data) = self.pattern_project.pieces.get(piece) else { return; };
@@ -707,11 +733,15 @@ impl ClothEvoApp {
         let a_segment = self.seam_a_segment.min(a_piece.outline.segment_count().saturating_sub(1)) as u32;
         let b_segment = self.seam_b_segment.min(b_piece.outline.segment_count().saturating_sub(1)) as u32;
         let next_id = self.pattern_project.seams.iter().map(|seam| seam.id).max().unwrap_or(0) + 1;
+        let mut edge_a = EdgeRef::single_segment(a_piece.id, a_segment);
+        let mut edge_b = EdgeRef::single_segment(b_piece.id, b_segment);
+        edge_a.reversed = self.seam_a_reversed;
+        edge_b.reversed = self.seam_b_reversed;
         let seam = SeamDefinition {
             id: next_id,
             name: format!("Costura {next_id}"),
-            a: EdgeRef::single_segment(a_piece.id, a_segment),
-            b: EdgeRef::single_segment(b_piece.id, b_segment),
+            a: edge_a,
+            b: edge_b,
             ease_meters: self.seam_ease_m,
         };
         self.pattern_project.seams.push(seam);
@@ -1245,6 +1275,35 @@ fn split_project_segment(
     Ok(segment_index + 1)
 }
 
+fn convert_project_segment_to_bezier(
+    project: &mut PatternProject,
+    piece_id: u64,
+    segment_index: usize,
+) -> Result<(), String> {
+    let piece = project.pieces.iter_mut().find(|p| p.id == piece_id)
+        .ok_or_else(|| "Peça não encontrada.".to_string())?;
+    let curve = &mut piece.outline;
+    let segment = curve.segments.get(segment_index)
+        .ok_or_else(|| "Segmento selecionado fora do contorno.".to_string())?;
+    let end = segment.endpoint();
+    let start = if segment_index == 0 {
+        curve.start
+    } else {
+        curve.segments[segment_index - 1].endpoint()
+    };
+    let one_third = |a: PatternPoint2, b: PatternPoint2, t: f64| PatternPoint2::new(
+        a.x + (b.x - a.x) * t,
+        a.y + (b.y - a.y) * t,
+    );
+    curve.segments[segment_index] = CurveSegment::CubicBezier {
+        control1: one_third(start, end, 1.0 / 3.0),
+        control2: one_third(start, end, 2.0 / 3.0),
+        to: end,
+    };
+    project.validate()?;
+    Ok(())
+}
+
 fn delete_project_anchor(
     project: &mut PatternProject,
     piece_id: u64,
@@ -1465,6 +1524,18 @@ mod pattern_editor_tests {
         assert_eq!(project.pieces[0].outline.segments.len(), 3);
         assert_eq!(project.seams[0].a.segment_start, 0);
         assert_eq!(project.seams[0].a.segment_end, 1);
+        project.validate().unwrap();
+    }
+
+    #[test]
+    fn converting_line_to_bezier_preserves_straight_shape_and_seam_indices() {
+        let mut project = square_project();
+        convert_project_segment_to_bezier(&mut project, 1, 1).unwrap();
+        let segment = &project.pieces[0].outline.segments[1];
+        assert!(matches!(segment, CurveSegment::CubicBezier { .. }));
+        assert_eq!(project.seams[0].a.segment_start, 1);
+        assert_eq!(project.seams[0].a.segment_end, 2);
+        assert!((pattern_geom::curve_length(&project.pieces[0].outline, 64) - 4.0).abs() < 1.0e-4);
         project.validate().unwrap();
     }
 
