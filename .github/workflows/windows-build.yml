@@ -32,7 +32,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $package | Out-Null
           Copy-Item "target/release/clothevo.exe" "$package/ClothEvo.exe"
 
-          @'
+          $instructions = @'
           ClothEvo — Windows x64 preview
 
           Como executar:
@@ -51,7 +51,8 @@ jobs:
           - Use o botão direito ou do meio para mover a viewport.
           - Os projetos de molde são salvos/abertos em clothevo-pattern.json no diretório
             de trabalho atual do aplicativo.
-          '@ | Set-Content -Encoding utf8 "$package/LEIA-ME-WINDOWS.txt"
+          '@
+          Set-Content -Encoding utf8 -Path "$package/LEIA-ME-WINDOWS.txt" -Value $instructions
 
           Compress-Archive -Path "$package/*" -DestinationPath "dist/ClothEvo-Windows-x64.zip" -Force
 
@@ -67,7 +68,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: windows-preview-${{ github.run_number }}
-          name: ClothEvo Windows Preview #${{ github.run_number }}
+          name: "ClothEvo Windows Preview #${{ github.run_number }}"
           body: |
             Build de prévia para testar no Windows x64.
 
