@@ -8,12 +8,21 @@ use cloth_render::{
     primitives, ClothTopology, OrbitCamera, SceneRenderer, StaticMeshData, Vertex,
     ViewStyle, ViewportCallback,
 };
-use cloth_sim::{build_scene, Collider, FabricPreset, SceneKind, Simulation, SimParams};
+use cloth_sim::{
+    build_scene, ClothBuilder, Collider, FabricPreset, PanelMesh, Placement, SceneKind,
+    Simulation, SimParams,
+};
 use eframe::{egui, egui_wgpu};
-use glam::Vec3;
+use glam::{Quat, Vec2, Vec3};
+use pattern_core::{
+    BoundaryCurve, EdgeRef, PatternPiece, PatternProject, Point2 as PatternPoint2, SeamDefinition,
+};
+use pattern_geom::{sample_curve, sample_curve_with_ranges, validate_simple_polygon};
+use pattern_mesh::triangulate_outline;
 
 const FIXED_DT: f32 = 1.0 / 60.0;
 const DEFAULT_RES: u32 = 40;
+const PATTERN_PIXELS_PER_METER: f32 = 360.0;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -40,6 +49,12 @@ struct Capture {
     requested: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspaceMode {
+    Simulation,
+    Pattern,
+}
+
 struct ClothEvoApp {
     sim: Simulation,
     kind: SceneKind,
@@ -55,6 +70,18 @@ struct ClothEvoApp {
     diverged: bool,
     last_step_ms: f32,
     capture: Option<Capture>,
+    workspace: WorkspaceMode,
+    pattern_project: PatternProject,
+    draft_points: Vec<PatternPoint2>,
+    pattern_spacing: f64,
+    pattern_show_mesh: bool,
+    seam_a_piece: usize,
+    seam_b_piece: usize,
+    seam_a_segment: usize,
+    seam_b_segment: usize,
+    seam_ease_m: f64,
+    pattern_message: String,
+    using_pattern_sim: bool,
 }
 
 fn statics_from(colliders: &[Collider]) -> Vec<StaticMeshData> {
@@ -116,6 +143,18 @@ impl ClothEvoApp {
             diverged: false,
             last_step_ms: 0.0,
             capture,
+            workspace: WorkspaceMode::Simulation,
+            pattern_project: PatternProject::new("Novo projeto"),
+            draft_points: Vec::new(),
+            pattern_spacing: 0.08,
+            pattern_show_mesh: true,
+            seam_a_piece: 0,
+            seam_b_piece: 1,
+            seam_a_segment: 0,
+            seam_b_segment: 0,
+            seam_ease_m: 0.0,
+            pattern_message: String::new(),
+            using_pattern_sim: false,
         };
         app.upload_scene();
         app
@@ -125,6 +164,7 @@ impl ClothEvoApp {
     fn load_scene(&mut self, kind: SceneKind, res: u32) {
         let params = self.sim.params.clone();
         self.kind = kind;
+        self.using_pattern_sim = false;
         self.res = res;
         self.sim = build_scene(kind, res, params);
         self.seam_pairs = self.sim.seam_pairs();
@@ -182,8 +222,30 @@ impl ClothEvoApp {
         let mut new_scene: Option<(SceneKind, u32)> = None;
 
         ui.heading("ClothEvo");
-        ui.label("Fase 0 · validação do solver XPBD");
+        ui.horizontal(|ui| {
+            if ui.selectable_label(self.workspace == WorkspaceMode::Simulation, "Simulação 3D").clicked() {
+                self.workspace = WorkspaceMode::Simulation;
+            }
+            if ui.selectable_label(self.workspace == WorkspaceMode::Pattern, "Moldes 2D").clicked() {
+                self.workspace = WorkspaceMode::Pattern;
+            }
+        });
         ui.separator();
+        if self.workspace == WorkspaceMode::Pattern {
+            self.pattern_controls(ui);
+            return;
+        }
+        if self.using_pattern_sim {
+            ui.strong("Cena atual: moldes personalizados");
+            ui.label("A malha 2D foi convertida para o solver XPBD.");
+            if ui.button("Restaurar cena de teste").clicked() {
+                self.load_scene(self.kind, self.res);
+            }
+            ui.separator();
+        } else {
+            ui.label("Simulação XPBD · cenas de validação");
+            ui.separator();
+        }
 
         // ----- Cena
         ui.strong("Cena");
@@ -289,6 +351,320 @@ impl ClothEvoApp {
         }
     }
 
+    fn pattern_controls(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Pattern Studio");
+        ui.label("Desenhe contornos clicando na área 2D. As medidas internas são em metros.");
+        ui.horizontal(|ui| {
+            if ui.button("Desfazer ponto").clicked() { self.draft_points.pop(); }
+            if ui.button("Limpar rascunho").clicked() { self.draft_points.clear(); }
+        });
+        if ui.button("Fechar peça a partir dos pontos").clicked() {
+            self.create_piece_from_draft();
+        }
+        ui.label(format!("Pontos no rascunho: {}", self.draft_points.len()));
+
+        ui.separator();
+        ui.strong("Malha 2D");
+        ui.add(egui::Slider::new(&mut self.pattern_spacing, 0.025..=0.20).text("espaçamento (m)"));
+        ui.checkbox(&mut self.pattern_show_mesh, "Mostrar triangulação");
+        if ui.button("Salvar projeto JSON").clicked() {
+            match self.pattern_project.to_json().and_then(|json| {
+                std::fs::write("clothevo-pattern.json", json)
+                    .map_err(|e| format!("Falha ao salvar: {e}"))
+            }) {
+                Ok(()) => self.pattern_message = "Projeto salvo em clothevo-pattern.json.".into(),
+                Err(e) => self.pattern_message = e,
+            }
+        }
+        if ui.button("Abrir projeto JSON").clicked() {
+            match std::fs::read_to_string("clothevo-pattern.json")
+                .map_err(|e| format!("Falha ao abrir arquivo: {e}"))
+                .and_then(|json| PatternProject::from_json(&json))
+            {
+                Ok(project) => {
+                    self.pattern_project = project;
+                    self.draft_points.clear();
+                    self.pattern_message = "Projeto carregado.".into();
+                }
+                Err(e) => self.pattern_message = e,
+            }
+        }
+
+        ui.separator();
+        ui.strong(format!("Peças ({})", self.pattern_project.pieces.len()));
+        for piece in &self.pattern_project.pieces {
+            ui.label(format!("{} · {} segmentos", piece.name, piece.outline.segment_count()));
+        }
+
+        if self.pattern_project.pieces.len() >= 2 {
+            ui.separator();
+            ui.strong("Costura entre bordas");
+            let options: Vec<(u64, String)> = self.pattern_project.pieces.iter()
+                .map(|piece| (piece.id, piece.name.clone())).collect();
+            self.seam_a_piece = self.seam_a_piece.min(options.len() - 1);
+            self.seam_b_piece = self.seam_b_piece.min(options.len() - 1);
+
+            egui::ComboBox::from_id_salt("seam_piece_a")
+                .selected_text(format!("A: {}", options[self.seam_a_piece].1))
+                .show_ui(ui, |ui| {
+                    for (index, (_, name)) in options.iter().enumerate() {
+                        ui.selectable_value(&mut self.seam_a_piece, index, name);
+                    }
+                });
+            egui::ComboBox::from_id_salt("seam_piece_b")
+                .selected_text(format!("B: {}", options[self.seam_b_piece].1))
+                .show_ui(ui, |ui| {
+                    for (index, (_, name)) in options.iter().enumerate() {
+                        ui.selectable_value(&mut self.seam_b_piece, index, name);
+                    }
+                });
+
+            let a_count = self.pattern_project.pieces[self.seam_a_piece].outline.segment_count().max(1);
+            let b_count = self.pattern_project.pieces[self.seam_b_piece].outline.segment_count().max(1);
+            self.seam_a_segment = self.seam_a_segment.min(a_count - 1);
+            self.seam_b_segment = self.seam_b_segment.min(b_count - 1);
+            egui::ComboBox::from_id_salt("seam_edge_a")
+                .selected_text(format!("Borda A: {}", self.seam_a_segment + 1))
+                .show_ui(ui, |ui| {
+                    for index in 0..a_count {
+                        ui.selectable_value(&mut self.seam_a_segment, index, format!("Segmento {}", index + 1));
+                    }
+                });
+            egui::ComboBox::from_id_salt("seam_edge_b")
+                .selected_text(format!("Borda B: {}", self.seam_b_segment + 1))
+                .show_ui(ui, |ui| {
+                    for index in 0..b_count {
+                        ui.selectable_value(&mut self.seam_b_segment, index, format!("Segmento {}", index + 1));
+                    }
+                });
+            ui.add(egui::DragValue::new(&mut self.seam_ease_m).speed(0.001).prefix("Folga (m) "));
+            if ui.button("Adicionar costura").clicked() { self.add_seam_from_controls(); }
+            ui.label(format!("Costuras no projeto: {}", self.pattern_project.seams.len()));
+        } else {
+            ui.weak("Crie ao menos duas peças para configurar uma costura.");
+        }
+
+        ui.separator();
+        if ui.button("Simular moldes na viewport 3D").clicked() {
+            match self.start_pattern_simulation() {
+                Ok(()) => self.pattern_message = "Moldes enviados à simulação 3D.".into(),
+                Err(e) => self.pattern_message = e,
+            }
+        }
+        if !self.pattern_message.is_empty() {
+            ui.separator();
+            ui.label(&self.pattern_message);
+        }
+        ui.separator();
+        ui.weak("Canvas: clique para adicionar pontos; as peças fechadas aparecem com contorno azul.");
+    }
+
+    fn create_piece_from_draft(&mut self) {
+        if self.draft_points.len() < 3 {
+            self.pattern_message = "Uma peça precisa de pelo menos 3 pontos.".into();
+            return;
+        }
+        let next_id = self.pattern_project.pieces.iter().map(|piece| piece.id).max().unwrap_or(0) + 1;
+        let piece_name = format!("Peça {next_id}");
+        match PatternPiece::from_polygon(next_id, piece_name, &self.draft_points) {
+            Ok(piece) => {
+                self.pattern_project.pieces.push(piece);
+                self.draft_points.clear();
+                self.pattern_message = "Peça criada. Configure costuras e salve o projeto.".into();
+            }
+            Err(e) => self.pattern_message = e,
+        }
+    }
+
+    fn add_seam_from_controls(&mut self) {
+        let count = self.pattern_project.pieces.len();
+        if count < 2 { return; }
+        let a_index = self.seam_a_piece.min(count - 1);
+        let b_index = self.seam_b_piece.min(count - 1);
+        let a_piece = &self.pattern_project.pieces[a_index];
+        let b_piece = &self.pattern_project.pieces[b_index];
+        let a_segment = self.seam_a_segment.min(a_piece.outline.segment_count().saturating_sub(1)) as u32;
+        let b_segment = self.seam_b_segment.min(b_piece.outline.segment_count().saturating_sub(1)) as u32;
+        let next_id = self.pattern_project.seams.iter().map(|seam| seam.id).max().unwrap_or(0) + 1;
+        let seam = SeamDefinition {
+            id: next_id,
+            name: format!("Costura {next_id}"),
+            a: EdgeRef::single_segment(a_piece.id, a_segment),
+            b: EdgeRef::single_segment(b_piece.id, b_segment),
+            ease_meters: self.seam_ease_m,
+        };
+        self.pattern_project.seams.push(seam);
+        if let Err(e) = self.pattern_project.validate() {
+            self.pattern_project.seams.pop();
+            self.pattern_message = e;
+        } else {
+            self.pattern_message = "Costura adicionada ao projeto.".into();
+        }
+    }
+
+    fn pattern_viewport(&mut self, ui: &mut egui::Ui) {
+        let rect = ui.available_rect_before_wrap();
+        let response = ui.allocate_rect(rect, egui::Sense::click());
+        let painter = ui.painter_at(rect);
+        let center = rect.center();
+        let scale = PATTERN_PIXELS_PER_METER;
+
+        painter.rect_filled(rect, 0.0, egui::Color32::from_gray(23));
+        for i in -30..=30 {
+            let offset = i as f32 * 0.1 * scale;
+            let x = center.x + offset;
+            let y = center.y + offset;
+            if x >= rect.left() && x <= rect.right() {
+                painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                    egui::Stroke::new(1.0, egui::Color32::from_gray(39)));
+            }
+            if y >= rect.top() && y <= rect.bottom() {
+                painter.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+                    egui::Stroke::new(1.0, egui::Color32::from_gray(39)));
+            }
+        }
+        painter.line_segment([egui::pos2(rect.left(), center.y), egui::pos2(rect.right(), center.y)],
+            egui::Stroke::new(1.0, egui::Color32::from_gray(88)));
+        painter.line_segment([egui::pos2(center.x, rect.top()), egui::pos2(center.x, rect.bottom())],
+            egui::Stroke::new(1.0, egui::Color32::from_gray(88)));
+        painter.text(rect.left_top() + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP,
+            "PATTERN 2D · clique para criar pontos", egui::FontId::proportional(14.0),
+            egui::Color32::from_gray(205));
+
+        let to_screen = |p: PatternPoint2| {
+            egui::pos2(center.x + p.x as f32 * scale, center.y - p.y as f32 * scale)
+        };
+
+        for piece in &self.pattern_project.pieces {
+            let points = sample_curve(&piece.outline, 10);
+            if points.len() < 3 { continue; }
+            if self.pattern_show_mesh {
+                if let Ok(mesh) = triangulate_outline(&points, self.pattern_spacing) {
+                    for triangle in &mesh.triangles {
+                        let a = to_screen(mesh.vertices[triangle[0] as usize]);
+                        let b = to_screen(mesh.vertices[triangle[1] as usize]);
+                        let c = to_screen(mesh.vertices[triangle[2] as usize]);
+                        let stroke = egui::Stroke::new(0.7, egui::Color32::from_rgb(63, 91, 105));
+                        painter.line_segment([a, b], stroke);
+                        painter.line_segment([b, c], stroke);
+                        painter.line_segment([c, a], stroke);
+                    }
+                }
+            }
+
+            for i in 0..points.len() {
+                let a = to_screen(points[i]);
+                let b = to_screen(points[(i + 1) % points.len()]);
+                painter.line_segment([a, b], egui::Stroke::new(2.0, egui::Color32::from_rgb(91, 183, 245)));
+            }
+            let centroid = points.iter().fold(PatternPoint2::new(0.0, 0.0), |sum, point| {
+                PatternPoint2::new(sum.x + point.x / points.len() as f64, sum.y + point.y / points.len() as f64)
+            });
+            painter.text(to_screen(centroid), egui::Align2::CENTER_CENTER, &piece.name,
+                egui::FontId::proportional(13.0), egui::Color32::WHITE);
+        }
+
+        if self.draft_points.len() >= 2 {
+            let polyline = self.draft_points.iter().copied().map(to_screen).collect::<Vec<_>>();
+            painter.add(egui::Shape::line(polyline, egui::Stroke::new(2.0, egui::Color32::from_rgb(245, 180, 65))));
+        }
+        for point in &self.draft_points {
+            painter.circle_filled(to_screen(*point), 4.5, egui::Color32::from_rgb(255, 194, 75));
+        }
+
+        if response.clicked() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                self.draft_points.push(PatternPoint2::new(
+                    (pos.x - center.x) as f64 / scale as f64,
+                    (center.y - pos.y) as f64 / scale as f64,
+                ));
+            }
+        }
+    }
+
+    fn start_pattern_simulation(&mut self) -> Result<(), String> {
+        self.pattern_project.validate()?;
+        if self.pattern_project.pieces.is_empty() {
+            return Err("O projeto não contém peças.".into());
+        }
+
+        let mut builder = ClothBuilder::new();
+        builder.add_collider(Collider::ground());
+        builder.add_collider(Collider::Cylinder {
+            a: Vec3::new(0.0, 0.0, 0.0),
+            b: Vec3::new(0.0, 1.5, 0.0),
+            radius: 0.14,
+        });
+
+        struct PieceBuildInfo {
+            id: u64,
+            handle: cloth_sim::PanelHandle,
+            ranges: Vec<(usize, usize)>,
+            boundary_count: usize,
+        }
+        let mut infos: Vec<PieceBuildInfo> = Vec::new();
+        let piece_count = self.pattern_project.pieces.len();
+
+        for (piece_index, piece) in self.pattern_project.pieces.iter().enumerate() {
+            let sampled = sample_curve_with_ranges(&piece.outline, 8);
+            validate_simple_polygon(&sampled.points)
+                .map_err(|e| format!("Contorno inválido em '{}': {e}", piece.name))?;
+            let mesh = triangulate_outline(&sampled.points, self.pattern_spacing)
+                .map_err(|e| format!("Não foi possível triangular '{}': {e}", piece.name))?;
+            if mesh.boundary_vertex_count != sampled.points.len() {
+                return Err(format!("Mapeamento de contorno inválido na peça '{}'.", piece.name));
+            }
+
+            let min_x = mesh.vertices.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+            let min_y = mesh.vertices.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+            let max_x = mesh.vertices.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+            let width = (max_x - min_x) as f32;
+            let uv = mesh.vertices.iter()
+                .map(|p| Vec2::new((p.x - min_x) as f32, (p.y - min_y) as f32))
+                .collect();
+            let panel_mesh = PanelMesh { uv, triangles: mesh.triangles.clone() };
+            let centered_x = -width * 0.5;
+            let z = (piece_index as f32 - (piece_count.saturating_sub(1)) as f32 * 0.5) * 0.24;
+            let handle = builder.add_panel_with_grain(
+                &panel_mesh,
+                Placement::new(Vec3::new(centered_x, 0.9, z), Quat::IDENTITY),
+                Vec2::Y,
+            );
+            infos.push(PieceBuildInfo {
+                id: piece.id,
+                handle,
+                ranges: sampled.segment_vertex_ranges,
+                boundary_count: mesh.boundary_vertex_count,
+            });
+        }
+
+        for seam in &self.pattern_project.seams {
+            if seam.a.curve != BoundaryCurve::Outline || seam.b.curve != BoundaryCurve::Outline {
+                return Err(format!("A costura '{}' usa uma linha de costura interna; a simulação atual suporta bordas do contorno.", seam.name));
+            }
+            let info_a = infos.iter().find(|info| info.id == seam.a.piece_id)
+                .ok_or_else(|| format!("Peça A ausente na costura '{}'.", seam.name))?;
+            let info_b = infos.iter().find(|info| info.id == seam.b.piece_id)
+                .ok_or_else(|| format!("Peça B ausente na costura '{}'.", seam.name))?;
+            let locals_a = sampled_edge_indices(&seam.a, &info_a.ranges, info_a.boundary_count)?;
+            let locals_b = sampled_edge_indices(&seam.b, &info_b.ranges, info_b.boundary_count)?;
+            let globals_a = info_a.handle.globals(&locals_a);
+            let globals_b = info_b.handle.globals(&locals_b);
+            builder.sew(&globals_a, &globals_b);
+        }
+
+        builder.perturb(0.001);
+        self.sim = builder.build(self.sim.params.clone());
+        self.seam_pairs = self.sim.seam_pairs();
+        self.diverged = false;
+        self.accumulator = 0.0;
+        self.playing = true;
+        self.using_pattern_sim = true;
+        self.workspace = WorkspaceMode::Simulation;
+        self.upload_scene();
+        Ok(())
+    }
+
     fn viewport(&mut self, ui: &mut egui::Ui) {
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
@@ -366,12 +742,51 @@ impl ClothEvoApp {
     }
 }
 
+fn sampled_edge_indices(
+    edge: &EdgeRef,
+    ranges: &[(usize, usize)],
+    boundary_count: usize,
+  ) -> Result<Vec<u32>, String> {
+    if boundary_count < 2 || edge.segment_start >= edge.segment_end {
+        return Err("Intervalo de costura sem vértices suficientes.".into());
+    }
+    if edge.segment_end as usize > ranges.len() {
+        return Err("Intervalo de costura fora da curva amostrada.".into());
+    }
+    let mut indices: Vec<u32> = Vec::new();
+    for segment_index in edge.segment_start as usize..edge.segment_end as usize {
+        let (start, end) = ranges[segment_index];
+        if indices.last().copied() != Some(start as u32) {
+            indices.push(start as u32);
+        }
+        if end >= start {
+            for index in (start + 1)..=end {
+                let wrapped = (index % boundary_count) as u32;
+                if indices.last().copied() != Some(wrapped) { indices.push(wrapped); }
+            }
+        } else {
+            for index in (start + 1)..boundary_count {
+                let wrapped = index as u32;
+                if indices.last().copied() != Some(wrapped) { indices.push(wrapped); }
+            }
+            let wrapped = (end % boundary_count) as u32;
+            if indices.last().copied() != Some(wrapped) { indices.push(wrapped); }
+        }
+    }
+    if edge.reversed { indices.reverse(); }
+    indices.dedup();
+    if indices.len() < 2 {
+        return Err("A borda selecionada contém menos de dois vértices.".into());
+    }
+    Ok(indices)
+}
+
 impl eframe::App for ClothEvoApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Em captura, simula em passos fixos independentemente do tempo real.
         let dt = if self.capture.is_some() { FIXED_DT } else { ui.input(|i| i.stable_dt) };
         let steps_before = self.sim.stats.steps;
-        self.advance(dt);
+        if self.workspace == WorkspaceMode::Simulation { self.advance(dt); }
         if self.sim.stats.steps != steps_before {
             self.last_step_ms = self.sim.stats.step_ms;
         }
@@ -379,10 +794,16 @@ impl eframe::App for ClothEvoApp {
         egui::Panel::left("controls").default_size(310.0).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui));
         });
-        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.viewport(ui));
+        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
+            if self.workspace == WorkspaceMode::Pattern {
+                self.pattern_viewport(ui);
+            } else {
+                self.viewport(ui);
+            }
+        });
 
         self.handle_capture(ui);
-        if self.playing || self.capture.is_some() {
+        if (self.playing && self.workspace == WorkspaceMode::Simulation) || self.capture.is_some() {
             ui.ctx().request_repaint();
         }
     }
