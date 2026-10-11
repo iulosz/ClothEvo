@@ -99,3 +99,20 @@ booleanas robustas, furos na triangulação e margem variável por aresta contin
 
 Comandos de validação após obter dependências Rust:
 cargo test -p pattern-core -p pattern-geom -p pattern-mesh
+
+
+## Pattern Studio 0.2 — edição do canvas
+
+O editor 2D agora oferece dois modos: **Desenhar** (adicionar pontos ao rascunho) e **Editar**
+(selecionar/arrastar vértices e alças Bézier). No modo Editar, clicar perto de uma borda seleciona
+o segmento; **Inserir vértice** subdivide linhas ou curvas cúbicas, preservando a forma Bézier por
+De Casteljau e atualizando as referências de intervalos de costura.
+
+A viewport 2D aceita zoom pela roda do mouse ancorado no cursor e pan com botão direito ou do meio.
+A opção **Ajustar à grade (1 cm)** aplica snap ao desenhar e mover pontos. **Excluir vértice**
+funciona em contornos poligonais lineares com pelo menos quatro vértices; contornos Bézier precisam
+ser editados por subdivisão/alças, para evitar alterações silenciosas de forma. Exclusões que
+tornariam um intervalo de costura descontínuo são recusadas sem modificar o projeto.
+
+O editor ainda é uma base de produção inicial: ferramentas de seleção de peça inteira, undo/redo,
+edição de margem por aresta e janelas de diálogo para arquivos estão planejadas para etapas futuras.

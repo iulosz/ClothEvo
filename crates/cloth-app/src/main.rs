@@ -950,7 +950,7 @@ impl ClothEvoApp {
                     }
                 }
             }
-            if ui.input(|i| i.key_pressed(egui::Key::Delete)) {
+            if response.hovered() && ui.input(|i| i.key_pressed(egui::Key::Delete)) {
                 self.delete_selected_vertex();
             }
         } else if response.clicked() {
@@ -1387,5 +1387,97 @@ impl eframe::App for ClothEvoApp {
         if (self.playing && self.workspace == WorkspaceMode::Simulation) || self.capture.is_some() {
             ui.ctx().request_repaint();
         }
+    }
+}
+
+
+#[cfg(test)]
+mod pattern_editor_tests {
+    use super::*;
+
+    fn square_project() -> PatternProject {
+        let mut project = PatternProject::new("Teste de edição");
+        let square = [
+            PatternPoint2::new(0.0, 0.0),
+            PatternPoint2::new(1.0, 0.0),
+            PatternPoint2::new(1.0, 1.0),
+            PatternPoint2::new(0.0, 1.0),
+        ];
+        project.pieces.push(PatternPiece::from_polygon(1, "A", &square).unwrap());
+        project.pieces.push(PatternPiece::from_polygon(
+            2,
+            "B",
+            &[
+                PatternPoint2::new(1.0, 0.0),
+                PatternPoint2::new(2.0, 0.0),
+                PatternPoint2::new(2.0, 1.0),
+                PatternPoint2::new(1.0, 1.0),
+            ],
+        ).unwrap());
+        project.seams.push(SeamDefinition {
+            id: 1,
+            name: "A-B".into(),
+            a: EdgeRef::single_segment(1, 1),
+            b: EdgeRef::single_segment(2, 3),
+            ease_meters: 0.0,
+        });
+        project
+    }
+
+    #[test]
+    fn moving_first_anchor_keeps_closed_curve_closed() {
+        let mut curve = PatternPiece::from_polygon(
+            1,
+            "Quadrado",
+            &[
+                PatternPoint2::new(0.0, 0.0),
+                PatternPoint2::new(1.0, 0.0),
+                PatternPoint2::new(1.0, 1.0),
+                PatternPoint2::new(0.0, 1.0),
+            ],
+        ).unwrap().outline;
+        let moved = PatternPoint2::new(-0.25, 0.15);
+        set_curve_anchor(&mut curve, 0, moved);
+        assert_eq!(curve.start, moved);
+        assert_eq!(curve.segments.last().unwrap().endpoint(), moved);
+        assert_eq!(outline_anchors(&curve).len(), 4);
+    }
+
+    #[test]
+    fn splitting_seam_edge_updates_segment_ranges_and_keeps_geometry_length() {
+        let mut project = square_project();
+        let before = pattern_geom::curve_length(&project.pieces[0].outline, 32);
+        split_project_segment(&mut project, 1, 1, 0.35).unwrap();
+        let after = pattern_geom::curve_length(&project.pieces[0].outline, 32);
+        assert!((before - after).abs() < 1.0e-6);
+        assert_eq!(project.pieces[0].outline.segments.len(), 5);
+        assert_eq!(project.seams[0].a.segment_start, 1);
+        assert_eq!(project.seams[0].a.segment_end, 3);
+        assert_eq!(project.seams[0].b.segment_start, 3);
+        assert_eq!(project.seams[0].b.segment_end, 4);
+        project.validate().unwrap();
+    }
+
+    #[test]
+    fn deleting_polygon_anchor_keeps_project_valid_and_seam_reference_valid() {
+        let mut project = square_project();
+        delete_project_anchor(&mut project, 1, 1).unwrap();
+        assert_eq!(project.pieces[0].outline.segments.len(), 3);
+        assert_eq!(project.seams[0].a.segment_start, 0);
+        assert_eq!(project.seams[0].a.segment_end, 1);
+        project.validate().unwrap();
+    }
+
+    #[test]
+    fn deleting_anchor_on_bezier_outline_is_rejected_without_mutating_project() {
+        let mut project = square_project();
+        project.pieces[0].outline.segments[0] = CurveSegment::CubicBezier {
+            control1: PatternPoint2::new(0.2, -0.1),
+            control2: PatternPoint2::new(0.7, -0.1),
+            to: PatternPoint2::new(1.0, 0.0),
+        };
+        let before = project.clone();
+        assert!(delete_project_anchor(&mut project, 1, 1).is_err());
+        assert_eq!(project, before);
     }
 }
