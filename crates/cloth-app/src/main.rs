@@ -625,6 +625,31 @@ impl ClothEvoApp {
             return Err("O projeto não contém peças.".into());
         }
 
+        // Prepara as malhas antes de posicionar os painéis para preservar o layout relativo
+        // que o usuário desenhou no editor 2D.
+        let mut prepared = Vec::with_capacity(self.pattern_project.pieces.len());
+        for piece in &self.pattern_project.pieces {
+            let sampled = sample_curve_with_ranges(&piece.outline, 8);
+            validate_simple_polygon(&sampled.points)
+                .map_err(|e| format!("Contorno inválido em '{}': {e}", piece.name))?;
+            let mesh = triangulate_outline(&sampled.points, self.pattern_spacing)
+                .map_err(|e| format!("Não foi possível triangular '{}': {e}", piece.name))?;
+            if mesh.boundary_vertex_count != sampled.points.len() {
+                return Err(format!("Mapeamento de contorno inválido na peça '{}'.", piece.name));
+            }
+            prepared.push((piece.id, sampled.segment_vertex_ranges, mesh));
+        }
+
+        let min_x = prepared.iter()
+            .flat_map(|(_, _, mesh)| mesh.vertices.iter().map(|p| p.x))
+            .fold(f64::INFINITY, f64::min);
+        let max_x = prepared.iter()
+            .flat_map(|(_, _, mesh)| mesh.vertices.iter().map(|p| p.x))
+            .fold(f64::NEG_INFINITY, f64::max);
+        let min_y = prepared.iter()
+            .flat_map(|(_, _, mesh)| mesh.vertices.iter().map(|p| p.y))
+            .fold(f64::INFINITY, f64::min);
+
         let mut builder = ClothBuilder::new();
         builder.add_collider(Collider::ground());
         builder.add_collider(Collider::Cylinder {
@@ -640,37 +665,27 @@ impl ClothEvoApp {
             boundary_count: usize,
         }
         let mut infos: Vec<PieceBuildInfo> = Vec::new();
-        let piece_count = self.pattern_project.pieces.len();
+        let piece_count = prepared.len();
+        let origin_x = (-0.5 * (min_x + max_x)) as f32;
+        let origin_y = (0.9 - min_y) as f32;
 
-        for (piece_index, piece) in self.pattern_project.pieces.iter().enumerate() {
-            let sampled = sample_curve_with_ranges(&piece.outline, 8);
-            validate_simple_polygon(&sampled.points)
-                .map_err(|e| format!("Contorno inválido em '{}': {e}", piece.name))?;
-            let mesh = triangulate_outline(&sampled.points, self.pattern_spacing)
-                .map_err(|e| format!("Não foi possível triangular '{}': {e}", piece.name))?;
-            if mesh.boundary_vertex_count != sampled.points.len() {
-                return Err(format!("Mapeamento de contorno inválido na peça '{}'.", piece.name));
-            }
-
-            let min_x = mesh.vertices.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
-            let min_y = mesh.vertices.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
-            let max_x = mesh.vertices.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
-            let width = (max_x - min_x) as f32;
+        for (piece_index, (id, ranges, mesh)) in prepared.into_iter().enumerate() {
+            // Mantém as coordenadas relativas entre peças; só aplica uma translação global.
+            // Uma pequena separação em Z evita coincidência perfeita das superfícies no frame inicial.
             let uv = mesh.vertices.iter()
-                .map(|p| Vec2::new((p.x - min_x) as f32, (p.y - min_y) as f32))
+                .map(|p| Vec2::new(p.x as f32, p.y as f32))
                 .collect();
-            let panel_mesh = PanelMesh { uv, triangles: mesh.triangles.clone() };
-            let centered_x = -width * 0.5;
-            let z = (piece_index as f32 - (piece_count.saturating_sub(1)) as f32 * 0.5) * 0.24;
+            let panel_mesh = PanelMesh { uv, triangles: mesh.triangles };
+            let z = (piece_index as f32 - (piece_count.saturating_sub(1)) as f32 * 0.5) * 0.04;
             let handle = builder.add_panel_with_grain(
                 &panel_mesh,
-                Placement::new(Vec3::new(centered_x, 0.9, z), Quat::IDENTITY),
+                Placement::new(Vec3::new(origin_x, origin_y, z), Quat::IDENTITY),
                 Vec2::Y,
             );
             infos.push(PieceBuildInfo {
-                id: piece.id,
+                id,
                 handle,
-                ranges: sampled.segment_vertex_ranges,
+                ranges,
                 boundary_count: mesh.boundary_vertex_count,
             });
         }
