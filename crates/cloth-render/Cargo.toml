@@ -1,0 +1,18 @@
+[package]
+name = "cloth-render"
+description = "Renderer wgpu próprio do ClothEvo (malha de tecido, colisores, grade), integrado ao egui via paint callback"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+glam = { workspace = true }
+bytemuck = { workspace = true }
+# O wgpu é usado pelo re-export do egui-wgpu para garantir exatamente a mesma versão da UI.
+egui = "0.36"
+egui-wgpu = "0.36"
+
+[dev-dependencies]
+# Valida o shader WGSL sem precisar de GPU (mesma versão do naga usada pelo wgpu).
+naga = { version = "30", features = ["wgsl-in"] }
