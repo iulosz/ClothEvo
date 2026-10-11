@@ -17,7 +17,7 @@ use glam::{Quat, Vec2, Vec3};
 use pattern_core::{
     BoundaryCurve, EdgeRef, PatternPiece, PatternProject, Point2 as PatternPoint2, SeamDefinition,
 };
-use pattern_geom::{sample_curve, sample_curve_with_ranges, validate_simple_polygon};
+use pattern_geom::{offset_polygon, sample_curve, sample_curve_with_ranges, validate_simple_polygon};
 use pattern_mesh::triangulate_outline;
 
 const FIXED_DT: f32 = 1.0 / 60.0;
@@ -27,7 +27,7 @@ const PATTERN_PIXELS_PER_METER: f32 = 360.0;
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("ClothEvo — Fase 0 (simulação XPBD)")
+            .with_title("ClothEvo — Pattern Studio + XPBD")
             .with_inner_size([1360.0, 840.0])
             .with_min_inner_size([900.0, 600.0]),
         renderer: eframe::Renderer::Wgpu,
@@ -75,6 +75,7 @@ struct ClothEvoApp {
     draft_points: Vec<PatternPoint2>,
     pattern_spacing: f64,
     pattern_show_mesh: bool,
+    selected_piece: usize,
     seam_a_piece: usize,
     seam_b_piece: usize,
     seam_a_segment: usize,
@@ -148,6 +149,7 @@ impl ClothEvoApp {
             draft_points: Vec::new(),
             pattern_spacing: 0.08,
             pattern_show_mesh: true,
+            selected_piece: 0,
             seam_a_piece: 0,
             seam_b_piece: 1,
             seam_a_segment: 0,
@@ -395,6 +397,22 @@ impl ClothEvoApp {
         for piece in &self.pattern_project.pieces {
             ui.label(format!("{} · {} segmentos", piece.name, piece.outline.segment_count()));
         }
+        if !self.pattern_project.pieces.is_empty() {
+            let options: Vec<(u64, String)> = self.pattern_project.pieces.iter()
+                .map(|piece| (piece.id, piece.name.clone())).collect();
+            self.selected_piece = self.selected_piece.min(options.len() - 1);
+            egui::ComboBox::from_id_salt("allowance_piece")
+                .selected_text(format!("Margem: {}", options[self.selected_piece].1))
+                .show_ui(ui, |ui| {
+                    for (index, (_, name)) in options.iter().enumerate() {
+                        ui.selectable_value(&mut self.selected_piece, index, name);
+                    }
+                });
+            ui.add(egui::Slider::new(
+                &mut self.pattern_project.pieces[self.selected_piece].seam_allowance_meters,
+                0.0..=0.05,
+            ).text("margem (m)"));
+        }
 
         if self.pattern_project.pieces.len() >= 2 {
             ui.separator();
@@ -438,6 +456,7 @@ impl ClothEvoApp {
                     }
                 });
             ui.add(egui::DragValue::new(&mut self.seam_ease_m).speed(0.001).prefix("Folga (m) "));
+            ui.weak("A folga é salva no projeto; o solver ainda não a aplica como ease diferencial.");
             if ui.button("Adicionar costura").clicked() { self.add_seam_from_controls(); }
             ui.label(format!("Costuras no projeto: {}", self.pattern_project.seams.len()));
         } else {
@@ -447,7 +466,13 @@ impl ClothEvoApp {
         ui.separator();
         if ui.button("Simular moldes na viewport 3D").clicked() {
             match self.start_pattern_simulation() {
-                Ok(()) => self.pattern_message = "Moldes enviados à simulação 3D.".into(),
+                Ok(()) => {
+                    self.pattern_message = if self.pattern_project.seams.iter().any(|seam| seam.ease_meters.abs() > 1.0e-6) {
+                        "Moldes simulando em 3D. A folga foi preservada no projeto, mas ainda não é aplicada fisicamente.".into()
+                    } else {
+                        "Moldes enviados à simulação 3D.".into()
+                    };
+                },
                 Err(e) => self.pattern_message = e,
             }
         }
@@ -538,6 +563,18 @@ impl ClothEvoApp {
         for piece in &self.pattern_project.pieces {
             let points = sample_curve(&piece.outline, 10);
             if points.len() < 3 { continue; }
+            // Contorno de corte em azul; margem de costura independente em verde.
+            if piece.seam_allowance_meters > 0.0 {
+                if let Ok(margin) = offset_polygon(&points, piece.seam_allowance_meters) {
+                    for i in 0..margin.len() {
+                        painter.line_segment(
+                            [to_screen(margin[i]), to_screen(margin[(i + 1) % margin.len()])],
+                            egui::Stroke::new(1.5, egui::Color32::from_rgb(104, 196, 131)),
+                        );
+                    }
+                }
+            }
+
             if self.pattern_show_mesh {
                 if let Ok(mesh) = triangulate_outline(&points, self.pattern_spacing) {
                     for triangle in &mesh.triangles {
