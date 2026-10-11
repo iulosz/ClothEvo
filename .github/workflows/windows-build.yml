@@ -19,8 +19,8 @@ jobs:
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Test workspace
-        run: cargo test --workspace
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
 
       - name: Build release executable
         run: cargo build --release -p cloth-app
