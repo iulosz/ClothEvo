@@ -15,7 +15,7 @@ use cloth_sim::{
 use eframe::{egui, egui_wgpu};
 use glam::{Quat, Vec2, Vec3};
 use pattern_core::{
-    BoundaryCurve, EdgeRef, PatternPiece, PatternProject, Point2 as PatternPoint2, SeamDefinition,
+    BoundaryCurve, Curve2D, CurveSegment, EdgeRef, PatternPiece, PatternProject, Point2 as PatternPoint2, SeamDefinition,
 };
 use pattern_geom::{offset_polygon, sample_curve, sample_curve_with_ranges, validate_simple_polygon};
 use pattern_mesh::triangulate_outline;
@@ -55,6 +55,33 @@ enum WorkspaceMode {
     Pattern,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PatternTool {
+    Draw,
+    Select,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PatternEditTarget {
+    Anchor { piece: usize, index: usize },
+    Control1 { piece: usize, segment: usize },
+    Control2 { piece: usize, segment: usize },
+    Edge { piece: usize, segment: usize, t: f64 },
+}
+
+impl PatternEditTarget {
+    fn piece(self) -> usize {
+        match self {
+            Self::Anchor { piece, .. } | Self::Control1 { piece, .. }
+            | Self::Control2 { piece, .. } | Self::Edge { piece, .. } => piece,
+        }
+    }
+
+    fn is_movable(self) -> bool {
+        !matches!(self, Self::Edge { .. })
+    }
+}
+
 struct ClothEvoApp {
     sim: Simulation,
     kind: SceneKind,
@@ -83,6 +110,12 @@ struct ClothEvoApp {
     seam_ease_m: f64,
     pattern_message: String,
     using_pattern_sim: bool,
+    pattern_tool: PatternTool,
+    pattern_zoom: f32,
+    pattern_pan: egui::Vec2,
+    pattern_snap: bool,
+    selected_target: Option<PatternEditTarget>,
+    dragging_target: Option<PatternEditTarget>,
 }
 
 fn statics_from(colliders: &[Collider]) -> Vec<StaticMeshData> {
@@ -157,6 +190,12 @@ impl ClothEvoApp {
             seam_ease_m: 0.0,
             pattern_message: String::new(),
             using_pattern_sim: false,
+            pattern_tool: PatternTool::Draw,
+            pattern_zoom: PATTERN_PIXELS_PER_METER,
+            pattern_pan: egui::Vec2::ZERO,
+            pattern_snap: false,
+            selected_target: None,
+            dragging_target: None,
         };
         app.upload_scene();
         app
@@ -355,15 +394,46 @@ impl ClothEvoApp {
 
     fn pattern_controls(&mut self, ui: &mut egui::Ui) {
         ui.heading("Pattern Studio");
-        ui.label("Desenhe contornos clicando na área 2D. As medidas internas são em metros.");
+        ui.label("Editor 2D · unidades internas em metros");
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.pattern_tool, PatternTool::Draw, "Desenhar");
+            ui.selectable_value(&mut self.pattern_tool, PatternTool::Select, "Editar");
+        });
         ui.horizontal(|ui| {
             if ui.button("Desfazer ponto").clicked() { self.draft_points.pop(); }
             if ui.button("Limpar rascunho").clicked() { self.draft_points.clear(); }
         });
+        ui.checkbox(&mut self.pattern_snap, "Ajustar a grade (1 cm)");
+        if ui.button("Enquadrar / redefinir zoom").clicked() {
+            self.pattern_zoom = PATTERN_PIXELS_PER_METER;
+            self.pattern_pan = egui::Vec2::ZERO;
+        }
         if ui.button("Fechar peça a partir dos pontos").clicked() {
             self.create_piece_from_draft();
         }
         ui.label(format!("Pontos no rascunho: {}", self.draft_points.len()));
+        if let Some(target) = self.selected_target {
+            ui.label(format!("Selecionado: {}", match target {
+                PatternEditTarget::Anchor { index, .. } => format!("vértice {}", index + 1),
+                PatternEditTarget::Control1 { segment, .. } => format!("alça 1 · segmento {}", segment + 1),
+                PatternEditTarget::Control2 { segment, .. } => format!("alça 2 · segmento {}", segment + 1),
+                PatternEditTarget::Edge { segment, .. } => format!("borda · segmento {}", segment + 1),
+            }));
+            ui.horizontal(|ui| {
+                if matches!(target, PatternEditTarget::Edge { .. })
+                    && ui.button("Inserir vértice").clicked() {
+                    self.insert_selected_vertex();
+                }
+                if matches!(target, PatternEditTarget::Anchor { .. })
+                    && ui.button("Excluir vértice").clicked() {
+                    self.delete_selected_vertex();
+                }
+            });
+        }
+        if !self.pattern_project.pieces.is_empty()
+            && ui.button("Excluir peça selecionada").clicked() {
+            self.delete_selected_piece();
+        }
 
         ui.separator();
         ui.strong("Malha 2D");
@@ -484,6 +554,129 @@ impl ClothEvoApp {
         ui.weak("Canvas: clique para adicionar pontos; as peças fechadas aparecem com contorno azul.");
     }
 
+    fn hit_test_pattern(&self, pointer: egui::Pos2, center: egui::Pos2) -> Option<PatternEditTarget> {
+        let origin = center + self.pattern_pan;
+        let scale = self.pattern_zoom;
+        let to_screen = |p: PatternPoint2| {
+            egui::pos2(origin.x + p.x as f32 * scale, origin.y - p.y as f32 * scale)
+        };
+
+        let mut best_point: Option<(f32, PatternEditTarget)> = None;
+        for (piece_index, piece) in self.pattern_project.pieces.iter().enumerate() {
+            for (index, point) in outline_anchors(&piece.outline).iter().enumerate() {
+                let d = to_screen(*point).distance(pointer);
+                if d <= 12.0 && best_point.map(|best| d < best.0).unwrap_or(true) {
+                    best_point = Some((d, PatternEditTarget::Anchor { piece: piece_index, index }));
+                }
+            }
+            for (segment_index, segment) in piece.outline.segments.iter().enumerate() {
+                if let CurveSegment::CubicBezier { control1, control2, .. } = segment {
+                    for (point, target) in [
+                        (*control1, PatternEditTarget::Control1 { piece: piece_index, segment: segment_index }),
+                        (*control2, PatternEditTarget::Control2 { piece: piece_index, segment: segment_index }),
+                    ] {
+                        let d = to_screen(point).distance(pointer);
+                        if d <= 12.0 && best_point.map(|best| d < best.0).unwrap_or(true) {
+                            best_point = Some((d, target));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((_, target)) = best_point { return Some(target); }
+
+        // Hit-test das bordas usando amostras de Bézier; o parâmetro local permite subdividir
+        // o segmento selecionado sem alterar a forma original da curva.
+        let mut best_edge: Option<(f32, PatternEditTarget)> = None;
+        for (piece_index, piece) in self.pattern_project.pieces.iter().enumerate() {
+            let sampled = sample_curve_with_ranges(&piece.outline, 16);
+            let count = sampled.points.len();
+            for (segment_index, &(start, end)) in sampled.segment_vertex_ranges.iter().enumerate() {
+                if count < 2 { continue; }
+                let sample_count = if end >= start { end - start } else { count - start };
+                if sample_count == 0 { continue; }
+                for step in 0..sample_count {
+                    let ia = (start + step) % count;
+                    let ib = (ia + 1) % count;
+                    let a = to_screen(sampled.points[ia]);
+                    let b = to_screen(sampled.points[ib]);
+                    let (distance, segment_t) = closest_segment_parameter(pointer, a, b);
+                    if distance <= 8.0 && best_edge.map(|best| distance < best.0).unwrap_or(true) {
+                        let t = ((step as f64 + segment_t as f64) / sample_count as f64).clamp(0.02, 0.98);
+                        best_edge = Some((distance, PatternEditTarget::Edge {
+                            piece: piece_index,
+                            segment: segment_index,
+                            t,
+                        }));
+                    }
+                }
+            }
+        }
+        best_edge.map(|(_, target)| target)
+    }
+
+    fn move_pattern_target(&mut self, target: PatternEditTarget, point: PatternPoint2) {
+        let Some(piece) = self.pattern_project.pieces.get_mut(target.piece()) else { return; };
+        match target {
+            PatternEditTarget::Anchor { index, .. } => {
+                set_curve_anchor(&mut piece.outline, index, point);
+            }
+            PatternEditTarget::Control1 { segment, .. } => {
+                if let Some(CurveSegment::CubicBezier { control1, .. }) = piece.outline.segments.get_mut(segment) {
+                    *control1 = point;
+                }
+            }
+            PatternEditTarget::Control2 { segment, .. } => {
+                if let Some(CurveSegment::CubicBezier { control2, .. }) = piece.outline.segments.get_mut(segment) {
+                    *control2 = point;
+                }
+            }
+            PatternEditTarget::Edge { .. } => {}
+        }
+    }
+
+    fn insert_selected_vertex(&mut self) {
+        let Some(PatternEditTarget::Edge { piece, segment, t }) = self.selected_target else {
+            self.pattern_message = "Selecione uma borda no modo Editar antes de inserir um vértice.".into();
+            return;
+        };
+        let Some(piece_data) = self.pattern_project.pieces.get(piece) else { return; };
+        let id = piece_data.id;
+        match split_project_segment(&mut self.pattern_project, id, segment, t) {
+            Ok(new_anchor) => {
+                self.selected_target = Some(PatternEditTarget::Anchor { piece, index: new_anchor });
+                self.pattern_message = "Vértice inserido; a curva mantém sua forma original.".into();
+            }
+            Err(e) => self.pattern_message = e,
+        }
+    }
+
+    fn delete_selected_vertex(&mut self) {
+        let Some(PatternEditTarget::Anchor { piece, index }) = self.selected_target else { return; };
+        let Some(piece_data) = self.pattern_project.pieces.get(piece) else { return; };
+        let id = piece_data.id;
+        match delete_project_anchor(&mut self.pattern_project, id, index) {
+            Ok(()) => {
+                self.selected_target = None;
+                self.dragging_target = None;
+                self.pattern_message = "Vértice removido.".into();
+            }
+            Err(e) => self.pattern_message = e,
+        }
+    }
+
+    fn delete_selected_piece(&mut self) {
+        if self.pattern_project.pieces.is_empty() { return; }
+        self.selected_piece = self.selected_piece.min(self.pattern_project.pieces.len() - 1);
+        let id = self.pattern_project.pieces[self.selected_piece].id;
+        self.pattern_project.pieces.remove(self.selected_piece);
+        self.pattern_project.seams.retain(|seam| seam.a.piece_id != id && seam.b.piece_id != id);
+        self.selected_piece = self.selected_piece.min(self.pattern_project.pieces.len().saturating_sub(1));
+        self.selected_target = None;
+        self.dragging_target = None;
+        self.pattern_message = "Peça excluída; costuras dependentes também foram removidas.".into();
+    }
+
     fn create_piece_from_draft(&mut self) {
         if self.draft_points.len() < 3 {
             self.pattern_message = "Uma peça precisa de pelo menos 3 pontos.".into();
@@ -494,8 +687,11 @@ impl ClothEvoApp {
         match PatternPiece::from_polygon(next_id, piece_name, &self.draft_points) {
             Ok(piece) => {
                 self.pattern_project.pieces.push(piece);
+                self.selected_piece = self.pattern_project.pieces.len() - 1;
+                self.selected_target = None;
                 self.draft_points.clear();
-                self.pattern_message = "Peça criada. Configure costuras e salve o projeto.".into();
+                self.pattern_tool = PatternTool::Select;
+                self.pattern_message = "Peça criada. Use Editar para mover vértices e alças Bézier.".into();
             }
             Err(e) => self.pattern_message = e,
         }
@@ -529,43 +725,79 @@ impl ClothEvoApp {
 
     fn pattern_viewport(&mut self, ui: &mut egui::Ui) {
         let rect = ui.available_rect_before_wrap();
-        let response = ui.allocate_rect(rect, egui::Sense::click());
+        let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         let center = rect.center();
-        let scale = PATTERN_PIXELS_PER_METER;
 
-        painter.rect_filled(rect, 0.0, egui::Color32::from_gray(23));
-        for i in -30..=30 {
-            let offset = i as f32 * 0.1 * scale;
-            let x = center.x + offset;
-            let y = center.y + offset;
-            if x >= rect.left() && x <= rect.right() {
-                painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                    egui::Stroke::new(1.0, egui::Color32::from_gray(39)));
-            }
-            if y >= rect.top() && y <= rect.bottom() {
-                painter.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                    egui::Stroke::new(1.0, egui::Color32::from_gray(39)));
-            }
-        }
-        painter.line_segment([egui::pos2(rect.left(), center.y), egui::pos2(rect.right(), center.y)],
-            egui::Stroke::new(1.0, egui::Color32::from_gray(88)));
-        painter.line_segment([egui::pos2(center.x, rect.top()), egui::pos2(center.x, rect.bottom())],
-            egui::Stroke::new(1.0, egui::Color32::from_gray(88)));
-        painter.text(rect.left_top() + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP,
-            "PATTERN 2D · clique para criar pontos", egui::FontId::proportional(14.0),
-            egui::Color32::from_gray(205));
-
+        // O zoom é medido em pixels por metro; a translação fica em pixels da viewport.
+        let origin = center + self.pattern_pan;
+        let scale = self.pattern_zoom;
         let to_screen = |p: PatternPoint2| {
-            egui::pos2(center.x + p.x as f32 * scale, center.y - p.y as f32 * scale)
+            egui::pos2(origin.x + p.x as f32 * scale, origin.y - p.y as f32 * scale)
+        };
+        let to_world = |p: egui::Pos2| {
+            PatternPoint2::new(
+                (p.x - origin.x) as f64 / scale as f64,
+                (origin.y - p.y) as f64 / scale as f64,
+            )
         };
 
-        for piece in &self.pattern_project.pieces {
-            let points = sample_curve(&piece.outline, 10);
+        painter.rect_filled(rect, 0.0, egui::Color32::from_gray(23));
+        let grid_step = (scale * 0.1).max(4.0);
+        let first_x = origin.x + ((rect.left() - origin.x) / grid_step).ceil() * grid_step;
+        let first_y = origin.y + ((rect.top() - origin.y) / grid_step).ceil() * grid_step;
+        let mut x = first_x;
+        while x <= rect.right() {
+            painter.line_segment(
+                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                egui::Stroke::new(1.0, egui::Color32::from_gray(39)),
+            );
+            x += grid_step;
+        }
+        let mut y = first_y;
+        while y <= rect.bottom() {
+            painter.line_segment(
+                [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+                egui::Stroke::new(1.0, egui::Color32::from_gray(39)),
+            );
+            y += grid_step;
+        }
+        painter.line_segment(
+            [egui::pos2(rect.left(), origin.y), egui::pos2(rect.right(), origin.y)],
+            egui::Stroke::new(1.0, egui::Color32::from_gray(88)),
+        );
+        painter.line_segment(
+            [egui::pos2(origin.x, rect.top()), egui::pos2(origin.x, rect.bottom())],
+            egui::Stroke::new(1.0, egui::Color32::from_gray(88)),
+        );
+
+        let tool_label = if self.pattern_tool == PatternTool::Draw {
+            "DESENHAR · clique para adicionar pontos"
+        } else {
+            "EDITAR · arraste vértices/alças · botão direito/meio move a vista"
+        };
+        painter.text(
+            rect.left_top() + egui::vec2(12.0, 12.0),
+            egui::Align2::LEFT_TOP,
+            tool_label,
+            egui::FontId::proportional(14.0),
+            egui::Color32::from_gray(205),
+        );
+
+        for (piece_index, piece) in self.pattern_project.pieces.iter().enumerate() {
+            let sampled = sample_curve_with_ranges(&piece.outline, 12);
+            let points = &sampled.points;
             if points.len() < 3 { continue; }
+            let selected_piece = self.selected_target.map(|t| t.piece()) == Some(piece_index);
+            let outline_color = if selected_piece {
+                egui::Color32::from_rgb(108, 205, 255)
+            } else {
+                egui::Color32::from_rgb(91, 183, 245)
+            };
+
             // Contorno de corte em azul; margem de costura independente em verde.
             if piece.seam_allowance_meters > 0.0 {
-                if let Ok(margin) = offset_polygon(&points, piece.seam_allowance_meters) {
+                if let Ok(margin) = offset_polygon(points, piece.seam_allowance_meters) {
                     for i in 0..margin.len() {
                         painter.line_segment(
                             [to_screen(margin[i]), to_screen(margin[(i + 1) % margin.len()])],
@@ -576,7 +808,7 @@ impl ClothEvoApp {
             }
 
             if self.pattern_show_mesh {
-                if let Ok(mesh) = triangulate_outline(&points, self.pattern_spacing) {
+                if let Ok(mesh) = triangulate_outline(points, self.pattern_spacing) {
                     for triangle in &mesh.triangles {
                         let a = to_screen(mesh.vertices[triangle[0] as usize]);
                         let b = to_screen(mesh.vertices[triangle[1] as usize]);
@@ -590,31 +822,145 @@ impl ClothEvoApp {
             }
 
             for i in 0..points.len() {
-                let a = to_screen(points[i]);
-                let b = to_screen(points[(i + 1) % points.len()]);
-                painter.line_segment([a, b], egui::Stroke::new(2.0, egui::Color32::from_rgb(91, 183, 245)));
+                painter.line_segment(
+                    [to_screen(points[i]), to_screen(points[(i + 1) % points.len()])],
+                    egui::Stroke::new(2.0, outline_color),
+                );
             }
+
             let centroid = points.iter().fold(PatternPoint2::new(0.0, 0.0), |sum, point| {
-                PatternPoint2::new(sum.x + point.x / points.len() as f64, sum.y + point.y / points.len() as f64)
+                PatternPoint2::new(
+                    sum.x + point.x / points.len() as f64,
+                    sum.y + point.y / points.len() as f64,
+                )
             });
-            painter.text(to_screen(centroid), egui::Align2::CENTER_CENTER, &piece.name,
-                egui::FontId::proportional(13.0), egui::Color32::WHITE);
+            painter.text(
+                to_screen(centroid),
+                egui::Align2::CENTER_CENTER,
+                &piece.name,
+                egui::FontId::proportional(13.0),
+                egui::Color32::WHITE,
+            );
+
+            if self.pattern_tool == PatternTool::Select {
+                // Alças Bézier e linhas de controlo são exibidas apenas para a peça selecionada.
+                if selected_piece {
+                    let mut previous = piece.outline.start;
+                    for (segment_index, segment) in piece.outline.segments.iter().enumerate() {
+                        if let CurveSegment::CubicBezier { control1, control2, .. } = segment {
+                            painter.line_segment(
+                                [to_screen(previous), to_screen(*control1)],
+                                egui::Stroke::new(1.0, egui::Color32::from_rgb(175, 119, 225)),
+                            );
+                            painter.line_segment(
+                                [to_screen(segment.endpoint()), to_screen(*control2)],
+                                egui::Stroke::new(1.0, egui::Color32::from_rgb(175, 119, 225)),
+                            );
+                            let c1 = to_screen(*control1);
+                            let c2 = to_screen(*control2);
+                            painter.circle_filled(c1, 4.0, egui::Color32::from_rgb(201, 151, 247));
+                            painter.circle_filled(c2, 4.0, egui::Color32::from_rgb(201, 151, 247));
+                            if self.selected_target == Some(PatternEditTarget::Control1 { piece: piece_index, segment: segment_index }) {
+                                painter.circle_stroke(c1, 7.0, egui::Stroke::new(2.0, egui::Color32::WHITE));
+                            }
+                            if self.selected_target == Some(PatternEditTarget::Control2 { piece: piece_index, segment: segment_index }) {
+                                painter.circle_stroke(c2, 7.0, egui::Stroke::new(2.0, egui::Color32::WHITE));
+                            }
+                        }
+                        previous = segment.endpoint();
+                    }
+                }
+                let anchors = outline_anchors(&piece.outline);
+                for (anchor_index, anchor) in anchors.iter().enumerate() {
+                    let screen = to_screen(*anchor);
+                    let selected = self.selected_target == Some(PatternEditTarget::Anchor {
+                        piece: piece_index,
+                        index: anchor_index,
+                    });
+                    painter.circle_filled(
+                        screen,
+                        if selected { 6.0 } else { 4.0 },
+                        if selected { egui::Color32::WHITE } else { egui::Color32::from_rgb(255, 190, 75) },
+                    );
+                    if selected {
+                        painter.circle_stroke(screen, 9.0, egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 190, 75)));
+                    }
+                }
+            }
         }
 
         if self.draft_points.len() >= 2 {
             let polyline = self.draft_points.iter().copied().map(to_screen).collect::<Vec<_>>();
-            painter.add(egui::Shape::line(polyline, egui::Stroke::new(2.0, egui::Color32::from_rgb(245, 180, 65))));
+            painter.add(egui::Shape::line(
+                polyline,
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(245, 180, 65)),
+            ));
         }
         for point in &self.draft_points {
             painter.circle_filled(to_screen(*point), 4.5, egui::Color32::from_rgb(255, 194, 75));
         }
 
-        if response.clicked() {
+        // Botão direito/meio arrasta a viewport; a roda aproxima/afasta ao redor do cursor.
+        if response.dragged_by(egui::PointerButton::Secondary)
+            || response.dragged_by(egui::PointerButton::Middle)
+        {
+            self.pattern_pan += ui.input(|i| i.pointer.delta());
+        }
+        if response.hovered() {
+            let (scroll, pointer) = ui.input(|i| (i.smooth_scroll_delta.y, i.pointer.hover_pos()));
+            if scroll != 0.0 {
+                let pointer = pointer.unwrap_or(rect.center());
+                let before = to_world(pointer);
+                self.pattern_zoom = (self.pattern_zoom * (scroll * 0.0015).exp()).clamp(80.0, 1800.0);
+                self.pattern_pan.x = pointer.x - center.x - before.x as f32 * self.pattern_zoom;
+                self.pattern_pan.y = pointer.y - center.y + before.y as f32 * self.pattern_zoom;
+            }
+        }
+
+        if self.pattern_tool == PatternTool::Select {
+            if response.drag_started_by(egui::PointerButton::Primary) {
+                if let Some(pointer) = response.interact_pointer_pos() {
+                    self.selected_target = self.hit_test_pattern(pointer, center);
+                    if let Some(target) = self.selected_target {
+                        self.selected_piece = target.piece().min(self.pattern_project.pieces.len().saturating_sub(1));
+                        self.dragging_target = if target.is_movable() { Some(target) } else { None };
+                    } else {
+                        self.dragging_target = None;
+                    }
+                }
+            }
+            if response.dragged_by(egui::PointerButton::Primary) {
+                if let (Some(target), Some(pointer)) = (self.dragging_target, response.interact_pointer_pos()) {
+                    let mut world = to_world(pointer);
+                    if self.pattern_snap {
+                        world.x = (world.x * 100.0).round() / 100.0;
+                        world.y = (world.y * 100.0).round() / 100.0;
+                    }
+                    self.move_pattern_target(target, world);
+                }
+            }
+            if response.drag_stopped_by(egui::PointerButton::Primary) {
+                self.dragging_target = None;
+            }
+            if response.clicked() && self.dragging_target.is_none() {
+                if let Some(pointer) = response.interact_pointer_pos() {
+                    self.selected_target = self.hit_test_pattern(pointer, center);
+                    if let Some(target) = self.selected_target {
+                        self.selected_piece = target.piece().min(self.pattern_project.pieces.len().saturating_sub(1));
+                    }
+                }
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Delete)) {
+                self.delete_selected_vertex();
+            }
+        } else if response.clicked() {
             if let Some(pos) = response.interact_pointer_pos() {
-                self.draft_points.push(PatternPoint2::new(
-                    (pos.x - center.x) as f64 / scale as f64,
-                    (center.y - pos.y) as f64 / scale as f64,
-                ));
+                let mut world = to_world(pos);
+                if self.pattern_snap {
+                    world.x = (world.x * 100.0).round() / 100.0;
+                    world.y = (world.y * 100.0).round() / 100.0;
+                }
+                self.draft_points.push(world);
             }
         }
     }
@@ -792,6 +1138,189 @@ impl ClothEvoApp {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
+}
+
+fn outline_anchors(curve: &Curve2D) -> Vec<PatternPoint2> {
+    let mut anchors = vec![curve.start];
+    let count = if curve.closed {
+        curve.segments.len().saturating_sub(1)
+    } else {
+        curve.segments.len()
+    };
+    anchors.extend(curve.segments.iter().take(count).map(CurveSegment::endpoint));
+    anchors
+}
+
+fn set_curve_anchor(curve: &mut Curve2D, index: usize, point: PatternPoint2) {
+    if index == 0 {
+        curve.start = point;
+        if curve.closed {
+            if let Some(last) = curve.segments.last_mut() {
+                match last {
+                    CurveSegment::Line { to } | CurveSegment::CubicBezier { to, .. } => *to = point,
+                }
+            }
+        }
+    } else if let Some(segment) = curve.segments.get_mut(index - 1) {
+        match segment {
+            CurveSegment::Line { to } | CurveSegment::CubicBezier { to, .. } => *to = point,
+        }
+    }
+}
+
+fn closest_segment_parameter(point: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> (f32, f32) {
+    let ab = b - a;
+    let length_squared = ab.length_sq();
+    let t = if length_squared <= f32::EPSILON {
+        0.0
+    } else {
+        ((point - a).dot(ab) / length_squared).clamp(0.0, 1.0)
+    };
+    (point.distance(a + ab * t), t)
+}
+
+fn split_project_segment(
+    project: &mut PatternProject,
+    piece_id: u64,
+    segment_index: usize,
+    t: f64,
+) -> Result<usize, String> {
+    let piece = project.pieces.iter_mut().find(|p| p.id == piece_id)
+        .ok_or_else(|| "Peça não encontrada.".to_string())?;
+    let curve = &mut piece.outline;
+    if segment_index >= curve.segments.len() {
+        return Err("Segmento selecionado fora do contorno.".into());
+    }
+    let t = t.clamp(0.001, 0.999);
+    let p0 = if segment_index == 0 {
+        curve.start
+    } else {
+        curve.segments[segment_index - 1].endpoint()
+    };
+    let original = curve.segments[segment_index].clone();
+    let (left, right, split_point) = match original {
+        CurveSegment::Line { to } => {
+            let split = PatternPoint2::new(
+                p0.x + (to.x - p0.x) * t,
+                p0.y + (to.y - p0.y) * t,
+            );
+            (CurveSegment::Line { to: split }, CurveSegment::Line { to }, split)
+        }
+        CurveSegment::CubicBezier { control1, control2, to } => {
+            let lerp = |a: PatternPoint2, b: PatternPoint2| PatternPoint2::new(
+                a.x + (b.x - a.x) * t,
+                a.y + (b.y - a.y) * t,
+            );
+            let p01 = lerp(p0, control1);
+            let p12 = lerp(control1, control2);
+            let p23 = lerp(control2, to);
+            let p012 = lerp(p01, p12);
+            let p123 = lerp(p12, p23);
+            let split = lerp(p012, p123);
+            (
+                CurveSegment::CubicBezier { control1: p01, control2: p012, to: split },
+                CurveSegment::CubicBezier { control1: p123, control2: p23, to },
+                split,
+            )
+        }
+    };
+    curve.segments[segment_index] = left;
+    curve.segments.insert(segment_index + 1, right);
+
+    // Atualiza os intervalos de costura que referenciam a curva subdividida.
+    for seam in &mut project.seams {
+        for edge in [&mut seam.a, &mut seam.b] {
+            if edge.piece_id != piece_id || edge.curve != BoundaryCurve::Outline { continue; }
+            if edge.segment_start as usize > segment_index {
+                edge.segment_start += 1;
+                edge.segment_end += 1;
+            } else if edge.segment_end as usize > segment_index {
+                edge.segment_end += 1;
+            }
+        }
+    }
+    // O vértice novo é o endpoint do segmento à esquerda.
+    let _ = split_point;
+    project.validate()?;
+    Ok(segment_index + 1)
+}
+
+fn delete_project_anchor(
+    project: &mut PatternProject,
+    piece_id: u64,
+    anchor_index: usize,
+) -> Result<(), String> {
+    // Usa uma cópia transacional: se o remapeamento de costuras não puder ser representado
+    // como intervalo contíguo, o projeto original permanece intacto.
+    let mut staged = project.clone();
+    let piece = staged.pieces.iter_mut().find(|p| p.id == piece_id)
+        .ok_or_else(|| "Peça não encontrada.".to_string())?;
+    let curve = &mut piece.outline;
+    if !curve.closed || curve.segments.len() < 4 {
+        return Err("O contorno deve ter pelo menos quatro vértices para excluir um ponto.".into());
+    }
+    if curve.segments.iter().any(|s| !matches!(s, CurveSegment::Line { .. })) {
+        return Err("A exclusão de vértices está disponível para contornos lineares; em Bézier use Inserir vértice e edite as alças.".into());
+    }
+    let n = curve.segments.len();
+    if anchor_index >= n { return Err("Vértice selecionado fora do contorno.".into()); }
+
+    let map_segment = |old: usize| -> usize {
+        if anchor_index == 0 {
+            if old == 0 || old == n - 1 { n - 2 } else { old - 1 }
+        } else if old < anchor_index - 1 {
+            old
+        } else if old <= anchor_index {
+            anchor_index - 1
+        } else {
+            old - 1
+        }
+    };
+
+    for seam in &mut staged.seams {
+        for edge in [&mut seam.a, &mut seam.b] {
+            if edge.piece_id != piece_id || edge.curve != BoundaryCurve::Outline { continue; }
+            let original: Vec<usize> = (edge.segment_start as usize..edge.segment_end as usize)
+                .filter(|&i| i < n)
+                .map(map_segment)
+                .collect();
+            if original.is_empty() {
+                return Err("Uma costura referencia o segmento que seria removido.".into());
+            }
+            let mut unique = original.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            let min = *unique.first().unwrap();
+            let max = *unique.last().unwrap();
+            if max - min + 1 != unique.len() {
+                return Err("Não é possível excluir esse vértice sem fragmentar um intervalo de costura. Ajuste a costura primeiro.".into());
+            }
+            edge.segment_start = min as u32;
+            edge.segment_end = (max + 1) as u32;
+        }
+    }
+
+    let curve = &mut staged.pieces.iter_mut().find(|p| p.id == piece_id).unwrap().outline;
+    if anchor_index == 0 {
+        let new_start = curve.segments[0].endpoint();
+        curve.start = new_start;
+        curve.segments.remove(0);
+        if let Some(last) = curve.segments.last_mut() {
+            match last {
+                CurveSegment::Line { to } | CurveSegment::CubicBezier { to, .. } => *to = new_start,
+            }
+        }
+    } else {
+        let next = curve.segments[anchor_index].endpoint();
+        match &mut curve.segments[anchor_index - 1] {
+            CurveSegment::Line { to } => *to = next,
+            _ => unreachable!("contornos Bézier foram rejeitados acima"),
+        }
+        curve.segments.remove(anchor_index);
+    }
+    staged.validate()?;
+    *project = staged;
+    Ok(())
 }
 
 fn sampled_edge_indices(
