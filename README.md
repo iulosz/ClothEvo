@@ -79,3 +79,23 @@ Medidos num ambiente de 2 vCPUs, 20 substeps por frame de 1/60 s, release:
 * Sem auto-colisão tecido–tecido.
 * Colisores analíticos apenas; avatar com BVH/SDF entra na Fase 4.
 * A malha vem de grades; a triangulação CDT de moldes reais entra na Fase 1/2.
+
+
+## Fase 1 — base do Pattern Studio
+
+A primeira tranche do editor de moldes cria três crates independentes:
+
+- pattern-core: modelo serializável do projeto, peças, contorno de corte, linha de costura,
+  margem de costura, linhas internas, pences, entalhes, furos, linha de fio, anotações e costuras.
+- pattern-geom: amostragem de Bézier, comprimento de arco, validação de contorno,
+  ponto-no-polígono e offset poligonal com junção miter.
+- pattern-mesh: triangulação Delaunay restrita (CDT), refinamento simples por pontos internos
+  e preservação dos índices de borda para futura correspondência de costura.
+
+Os três módulos não dependem do app ou do renderer. As medidas geométricas internas são em metros;
+a unidade escolhida no projeto é informação de apresentação/conversão. O offset atual trata
+polígonos simples e pode rejeitar casos degenerados ou offsets que se autointersectem; operações
+booleanas robustas, furos na triangulação e margem variável por aresta continuam como trabalho futuro.
+
+Comandos de validação após obter dependências Rust:
+cargo test -p pattern-core -p pattern-geom -p pattern-mesh

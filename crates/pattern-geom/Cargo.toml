@@ -1,0 +1,10 @@
+[package]
+name = "pattern-geom"
+description = "Geometria 2D de moldes: curvas, comprimentos, polígonos e offsets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pattern-core = { path = "../pattern-core" }

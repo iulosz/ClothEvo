@@ -1,0 +1,11 @@
+[package]
+name = "pattern-core"
+description = "Modelo de dados e persistência de moldes 2D do ClothEvo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

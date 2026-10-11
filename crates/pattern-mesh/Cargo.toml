@@ -1,0 +1,12 @@
+[package]
+name = "pattern-mesh"
+description = "Triangulação restrita e conversão de moldes 2D em malhas triangulares"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pattern-core = { path = "../pattern-core" }
+pattern-geom = { path = "../pattern-geom" }
+spade = { workspace = true }

@@ -1,0 +1,311 @@
+//! Modelo de domínio para moldes de vestuário.
+//! Esta crate não depende de UI, renderização, geometria computacional ou física.
+//! As medidas lineares internas são armazenadas em metros.
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+
+pub type PieceId = u64;
+pub type SeamId = u64;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Point2 { pub x: f64, pub y: f64 }
+
+impl Point2 {
+    pub const fn new(x: f64, y: f64) -> Self { Self { x, y } }
+    pub fn distance(self, other: Self) -> f64 {
+        let dx = self.x - other.x;
+        let dy = self.y - other.y;
+        (dx * dx + dy * dy).sqrt()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LengthUnit { Millimeter, Centimeter, Meter, Inch }
+
+impl Default for LengthUnit {
+    fn default() -> Self { Self::Centimeter }
+}
+
+impl LengthUnit {
+    pub fn meters_per_unit(self) -> f64 {
+        match self {
+            Self::Millimeter => 0.001,
+            Self::Centimeter => 0.01,
+            Self::Meter => 1.0,
+            Self::Inch => 0.0254,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Millimeter => "mm",
+            Self::Centimeter => "cm",
+            Self::Meter => "m",
+            Self::Inch => "in",
+        }
+    }
+}
+
+/// Segmento cujo ponto inicial é o fim do segmento anterior (ou Curve2D::start).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum CurveSegment {
+    Line { to: Point2 },
+    CubicBezier { control1: Point2, control2: Point2, to: Point2 },
+}
+
+impl CurveSegment {
+    pub fn endpoint(&self) -> Point2 {
+        match self {
+            Self::Line { to } | Self::CubicBezier { to, .. } => *to,
+        }
+    }
+}
+
+/// Caminho 2D com segmentos explícitos. Contornos fechados devem terminar no ponto inicial.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Curve2D {
+    pub start: Point2,
+    pub segments: Vec<CurveSegment>,
+    pub closed: bool,
+}
+
+impl Curve2D {
+    pub fn polyline(points: &[Point2], closed: bool) -> Result<Self, String> {
+        let minimum = if closed { 3 } else { 2 };
+        if points.len() < minimum {
+            return Err(format!("São necessários ao menos {minimum} pontos."));
+        }
+        if points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+            return Err("A curva contém coordenadas não finitas.".into());
+        }
+        let mut segments = points.iter().skip(1)
+            .map(|p| CurveSegment::Line { to: *p })
+            .collect::<Vec<_>>();
+        if closed {
+            segments.push(CurveSegment::Line { to: points[0] });
+        }
+        Ok(Self { start: points[0], segments, closed })
+    }
+
+    pub fn segment_count(&self) -> usize { self.segments.len() }
+    pub fn endpoint(&self) -> Option<Point2> {
+        self.segments.last().map(CurveSegment::endpoint).or(Some(self.start))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BoundaryCurve { Outline, SewingLine }
+
+/// Intervalo de segmentos; segment_end é exclusivo.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EdgeRef {
+    pub piece_id: PieceId,
+    pub curve: BoundaryCurve,
+    pub segment_start: u32,
+    pub segment_end: u32,
+    pub reversed: bool,
+}
+
+impl EdgeRef {
+    pub fn single_segment(piece_id: PieceId, segment_index: u32) -> Self {
+        Self {
+            piece_id,
+            curve: BoundaryCurve::Outline,
+            segment_start: segment_index,
+            segment_end: segment_index + 1,
+            reversed: false,
+        }
+    }
+}
+
+/// Duas bordas costuradas. A folga é armazenada em metros; sua aplicação física fica a cargo
+/// do sistema de costura, não do formato de dados.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SeamDefinition {
+    pub id: SeamId,
+    pub name: String,
+    pub a: EdgeRef,
+    pub b: EdgeRef,
+    pub ease_meters: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GrainLine { pub start: Point2, pub end: Point2 }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Dart {
+    pub apex: Point2,
+    pub leg_a: Point2,
+    pub leg_b: Point2,
+    pub intake_meters: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Notch {
+    pub id: u64,
+    pub segment_index: u32,
+    pub t: f64,
+    pub depth_meters: f64,
+    pub width_meters: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Hole { pub center: Point2, pub radius_meters: f64 }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Annotation {
+    pub text: String,
+    pub position: Point2,
+    pub rotation_degrees: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PatternPiece {
+    pub id: PieceId,
+    pub name: String,
+    /// Contorno de corte, separado da linha de costura e da margem.
+    pub outline: Curve2D,
+    pub sewing_line: Option<Curve2D>,
+    pub seam_allowance_meters: f64,
+    pub grain_line: Option<GrainLine>,
+    pub internal_lines: Vec<Curve2D>,
+    pub darts: Vec<Dart>,
+    pub notches: Vec<Notch>,
+    pub holes: Vec<Hole>,
+    pub annotations: Vec<Annotation>,
+}
+
+impl PatternPiece {
+    pub fn from_polygon(id: PieceId, name: impl Into<String>, points: &[Point2]) -> Result<Self, String> {
+        Ok(Self {
+            id,
+            name: name.into(),
+            outline: Curve2D::polyline(points, true)?,
+            sewing_line: None,
+            seam_allowance_meters: 0.01,
+            grain_line: None,
+            internal_lines: Vec::new(),
+            darts: Vec::new(),
+            notches: Vec::new(),
+            holes: Vec::new(),
+            annotations: Vec::new(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PatternProject {
+    pub schema_version: u32,
+    pub name: String,
+    pub units: LengthUnit,
+    pub pieces: Vec<PatternPiece>,
+    pub seams: Vec<SeamDefinition>,
+}
+
+impl PatternProject {
+    pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            schema_version: Self::CURRENT_SCHEMA_VERSION,
+            name: name.into(),
+            units: LengthUnit::Centimeter,
+            pieces: Vec::new(),
+            seams: Vec::new(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != Self::CURRENT_SCHEMA_VERSION {
+            return Err(format!(
+                "Versão de projeto {} não suportada (esperada {}).",
+                self.schema_version, Self::CURRENT_SCHEMA_VERSION
+            ));
+        }
+        let mut piece_ids = HashSet::new();
+        for piece in &self.pieces {
+            if !piece_ids.insert(piece.id) {
+                return Err(format!("ID de peça duplicado: {}.", piece.id));
+            }
+            if !piece.seam_allowance_meters.is_finite() || piece.seam_allowance_meters < 0.0 {
+                return Err(format!("Margem de costura inválida na peça '{}'.", piece.name));
+            }
+            if !piece.outline.closed || piece.outline.segments.len() < 3 {
+                return Err(format!("O contorno da peça '{}' precisa ser fechado e ter ao menos 3 segmentos.", piece.name));
+            }
+            if piece.outline.segments.iter().any(|s| {
+                let p = s.endpoint();
+                !p.x.is_finite() || !p.y.is_finite()
+            }) {
+                return Err(format!("O contorno da peça '{}' contém coordenadas não finitas.", piece.name));
+            }
+        }
+
+        let mut seam_ids = HashSet::new();
+        for seam in &self.seams {
+            if !seam_ids.insert(seam.id) {
+                return Err(format!("ID de costura duplicado: {}.", seam.id));
+            }
+            if !seam.ease_meters.is_finite() {
+                return Err(format!("Folga inválida na costura '{}'.", seam.name));
+            }
+            for edge in [&seam.a, &seam.b] {
+                let piece = self.pieces.iter().find(|p| p.id == edge.piece_id)
+                    .ok_or_else(|| format!("A costura '{}' referencia uma peça inexistente.", seam.name))?;
+                let curve = match edge.curve {
+                    BoundaryCurve::Outline => Some(&piece.outline),
+                    BoundaryCurve::SewingLine => piece.sewing_line.as_ref(),
+                }.ok_or_else(|| format!("A costura '{}' referencia uma linha de costura inexistente.", seam.name))?;
+                if edge.segment_start >= edge.segment_end
+                    || edge.segment_end as usize > curve.segments.len()
+                {
+                    return Err(format!("Intervalo de borda inválido na costura '{}'.", seam.name));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn to_json(&self) -> Result<String, String> {
+        self.validate()?;
+        serde_json::to_string_pretty(self).map_err(|e| format!("Falha ao serializar projeto: {e}"))
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        let project: Self = serde_json::from_str(json)
+            .map_err(|e| format!("Arquivo de projeto inválido: {e}"))?;
+        project.validate()?;
+        Ok(project)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_round_trip_preserves_piece_and_units() {
+        let mut project = PatternProject::new("Camisa");
+        project.units = LengthUnit::Millimeter;
+        project.pieces.push(PatternPiece::from_polygon(
+            1, "Frente",
+            &[
+                Point2::new(0.0, 0.0), Point2::new(0.4, 0.0),
+                Point2::new(0.35, 0.6), Point2::new(0.05, 0.6),
+            ],
+        ).unwrap());
+        let decoded = PatternProject::from_json(&project.to_json().unwrap()).unwrap();
+        assert_eq!(decoded, project);
+    }
+
+    #[test]
+    fn validation_rejects_seam_with_missing_piece() {
+        let mut project = PatternProject::new("Teste");
+        project.seams.push(SeamDefinition {
+            id: 1, name: "Costura inválida".into(),
+            a: EdgeRef::single_segment(7, 0),
+            b: EdgeRef::single_segment(8, 0), ease_meters: 0.0,
+        });
+        assert!(project.validate().is_err());
+    }
+}
