@@ -2039,6 +2039,56 @@ fn translate_curve(curve: &mut Curve2D, dx: f64, dy: f64) {
     }
 }
 
+fn symmetry_counterpart_id(project: &PatternProject, piece_id: u64) -> Option<u64> {
+    project.symmetry_links.iter().find_map(|link| {
+        if link.piece_a_id == piece_id { Some(link.piece_b_id) }
+        else if link.piece_b_id == piece_id { Some(link.piece_a_id) }
+        else { None }
+    })
+}
+
+fn mirror_pattern_piece(
+    source: &PatternPiece,
+    target_id: u64,
+    target_name: String,
+    axis_x: f64,
+) -> Result<PatternPiece, String> {
+    let mirror = |curve: &Curve2D| {
+        mirror_curve_x(curve, axis_x).map_err(|error| error.to_string())
+    };
+    let mut piece = source.clone();
+    piece.id = target_id;
+    piece.name = target_name;
+    piece.outline = mirror(&source.outline)?;
+    piece.sewing_line = source.sewing_line.as_ref().map(mirror).transpose()?;
+    piece.internal_lines = source.internal_lines.iter().map(mirror).collect::<Result<Vec<_>, _>>()?;
+    for fold in &mut piece.fold_lines {
+        fold.curve = mirror(&fold.curve)?;
+    }
+    for pleat in &mut piece.pleats {
+        pleat.axis = mirror(&pleat.axis)?;
+    }
+    if let Some(grain) = &mut piece.grain_line {
+        grain.start.x = 2.0 * axis_x - grain.start.x;
+        grain.end.x = 2.0 * axis_x - grain.end.x;
+    }
+    for dart in &mut piece.darts {
+        dart.apex.x = 2.0 * axis_x - dart.apex.x;
+        dart.leg_a.x = 2.0 * axis_x - dart.leg_a.x;
+        dart.leg_b.x = 2.0 * axis_x - dart.leg_b.x;
+    }
+    for hole in &mut piece.holes {
+        hole.center.x = 2.0 * axis_x - hole.center.x;
+    }
+    for annotation in &mut piece.annotations {
+        annotation.position.x = 2.0 * axis_x - annotation.position.x;
+        annotation.rotation_degrees = 180.0 - annotation.rotation_degrees;
+    }
+    // Segment indexing is stable through reflection, so notches and seam intervals retain
+    // their local indices. Fabric and grading-related physical values are copied unchanged.
+    Ok(piece)
+}
+
 fn dense_curve_samples(curve: &Curve2D, steps: usize) -> Vec<PatternPoint2> {
     let steps = steps.max(1);
     let mut points = vec![curve.start];
