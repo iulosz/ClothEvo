@@ -76,7 +76,6 @@ struct PatternEditorSnapshot {
     draft_points: Vec<PatternPoint2>,
     selected_piece: usize,
     selected_target: Option<PatternEditTarget>,
-    saved_path: Option<std::path::PathBuf>,
 }
 
 impl PatternEditTarget {
@@ -426,7 +425,6 @@ impl ClothEvoApp {
             draft_points: self.draft_points.clone(),
             selected_piece: self.selected_piece,
             selected_target: self.selected_target,
-            saved_path: self.pattern_saved_path.clone(),
         }
     }
 
@@ -449,7 +447,6 @@ impl ClothEvoApp {
         self.selected_target = snapshot.selected_target.filter(|target| {
             target.piece() < self.pattern_project.pieces.len()
         });
-        self.pattern_saved_path = snapshot.saved_path;
         self.dragging_target = None;
         self.dragging_before = None;
         self.drag_last_world = None;
@@ -478,15 +475,30 @@ impl ClothEvoApp {
         self.pattern_message = "Edição refeita.".into();
     }
 
+    fn confirm_discard_unsaved_changes(&self) -> bool {
+        if !self.pattern_dirty { return true; }
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title("Alterações não salvas")
+            .set_description("O projeto atual tem alterações não salvas. Descartar essas alterações?")
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show() == rfd::MessageDialogResult::Yes
+    }
+
     fn new_pattern_project(&mut self) {
-        let before = self.editor_snapshot();
+        if !self.confirm_discard_unsaved_changes() { return; }
         self.pattern_project = PatternProject::new("Novo projeto");
         self.draft_points.clear();
         self.selected_piece = 0;
         self.selected_target = None;
         self.pattern_saved_path = None;
+        self.pattern_undo.clear();
+        self.pattern_redo.clear();
+        self.dragging_target = None;
+        self.dragging_before = None;
+        self.drag_last_world = None;
+        self.pattern_dirty = false;
         self.pattern_message = "Novo projeto criado.".into();
-        self.remember_pattern_change(before);
     }
 
     fn open_pattern_project_dialog(&mut self) {
@@ -501,16 +513,19 @@ impl ClothEvoApp {
             .and_then(|json| PatternProject::from_json(&json));
         match loaded {
             Ok(project) => {
-                let before = self.editor_snapshot();
+                if !self.confirm_discard_unsaved_changes() { return; }
                 self.pattern_project = project;
                 self.draft_points.clear();
                 self.selected_piece = 0;
                 self.selected_target = None;
                 self.pattern_saved_path = Some(path.clone());
+                self.pattern_undo.clear();
+                self.pattern_redo.clear();
+                self.dragging_target = None;
+                self.dragging_before = None;
+                self.drag_last_world = None;
                 self.pattern_dirty = false;
                 self.pattern_message = format!("Projeto carregado: {}", path.display());
-                self.remember_pattern_change(before);
-                self.pattern_dirty = false;
             }
             Err(error) => self.pattern_message = error,
         }
@@ -1882,7 +1897,6 @@ mod pattern_editor_tests {
             draft_points: vec![PatternPoint2::new(0.0, 0.0)],
             selected_piece: 0,
             selected_target: None,
-            saved_path: None,
         };
         let mut b = a.clone();
         assert_eq!(a, b);
