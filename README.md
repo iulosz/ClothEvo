@@ -114,8 +114,9 @@ funciona em contornos poligonais lineares com pelo menos quatro vértices; conto
 ser editados por subdivisão/alças, para evitar alterações silenciosas de forma. Exclusões que
 tornariam um intervalo de costura descontínuo são recusadas sem modificar o projeto.
 
-O editor ainda é uma base de produção inicial: ferramentas de seleção de peça inteira, undo/redo,
-edição de margem por aresta e janelas de diálogo para arquivos estão planejadas para etapas futuras.
+Esta base foi expandida nas versões seguintes com seleção de peças, histórico de edição, operações
+topológicas de contorno, linhas internas, simetria vinculada e Cut & Sew. A seção Pattern Studio 0.4
+abaixo descreve o fluxo atual e seus limites deliberados para preservar a integridade dos projetos.
 
 
 ## ClothEvo 0.3 — histórico, seleção de peças e arquivos
@@ -144,3 +145,33 @@ uma cópia porque é necessário definir explicitamente a nova correspondência.
 - Use **Duplicar peça selecionada** para criar uma cópia deslocada; as costuras não são clonadas.
 - Clique em uma borda (destacada em amarelo) e use **Usar borda selecionada como A/B** para configurar uma costura visualmente.
 - Abrir um projeto com alterações não salvas mostra uma confirmação antes de descartá-las. O histórico é reiniciado quando outro projeto é aberto ou criado, evitando que o caminho de arquivo mude ao desfazer edições antigas.
+
+## Pattern Studio 0.4 — geometria vetorial, simetria e Cut & Sew
+
+### Geometria vetorial
+
+- **Adicionar retângulo** e **Adicionar polígono regular** criam moldes editáveis; o controle de lados vai de 3 a 12.
+- A camada `pattern-geom` expõe primitivas, translação, reflexão vertical, projeção de pontos, extração reversível de intervalos, reamostragem e inserção de vértices em Bézier por De Casteljau.
+- O contorno mantém segmentos lineares e Bézier cúbicos. As operações geométricas são independentes do canvas e podem ser reutilizadas por importadores, ferramentas de traçado e futuras operações booleanas.
+- O modelo persistente inclui propriedades do tecido por molde, linha de fio, linhas internas, linhas de dobra, pregas, pences, entalhes, furos e anotações. Linhas, dobras, pregas e linha de fio têm ferramentas próprias no canvas.
+
+### Simetria vinculada
+
+1. Selecione um molde e ajuste **Eixo X (m)**. **Usar X mínimo do molde** define o eixo a partir da menor coordenada X do contorno.
+2. Clique em **Criar par espelhado**. O projeto mantém uma relação de simetria serializada entre as duas peças.
+3. Arrastar a peça, mover vértices/alças, converter segmentos em Bézier, inserir/excluir vértices e adicionar linhas internas, dobras, pregas, linha de fio ou alterar a margem sincroniza o molde correspondente.
+4. **Desvincular par** mantém ambas as peças, mas transforma-as em peças independentes.
+
+A simetria mantém a correspondência de índices nas operações topológicas suportadas. Costuras existentes são espelhadas quando as duas peças de suas extremidades possuem pares vinculados. As relações são validadas ao salvar/abrir e fazem parte do histórico de desfazer/refazer.
+
+### Cut & Sew
+
+1. Selecione o molde de origem e use o modo **Desenhar**.
+2. Clique para desenhar o caminho de corte pelo interior do molde. A primeira e a última posições devem encostar no contorno; a tolerância de encaixe é de 3,5 cm.
+3. Clique em **Cut & Sew**. O ClothEvo valida o caminho, divide o contorno em dois, preserva os segmentos Bézier, cria as duas peças e adiciona automaticamente uma costura entre as novas bordas de corte.
+4. O vínculo de simetria é preservado: se a peça tem um par, o caminho é refletido e o corte é executado nos dois moldes na mesma operação. As duas novas peças também formam um novo par vinculado.
+
+O sistema remapeia referências de costura e entalhes em trechos de borda que continuam íntegros. Se uma costura existente usa um segmento dividido pelo corte, ou se um detalhe interno, pence, furo, linha de fio ou prega atravessa a nova divisão, a operação é cancelada sem alterar o projeto. Nesse caso, reposicione/refaça o detalhe ou a costura e tente novamente. O corte não divide automaticamente esses detalhes que atravessam a linha.
+
+As novas costuras conectam as bordas recém-criadas no grafo do projeto. A aplicação de folga diferencial (*ease*) continua sendo uma etapa separada do solver físico.
+
