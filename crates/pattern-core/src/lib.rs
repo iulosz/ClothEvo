@@ -609,6 +609,19 @@ mod tests {
     }
 
     #[test]
+    fn legacy_fold_line_defaults_physical_target_angle() {
+        let json = r#"{
+            "curve":{"start":{"x":0.1,"y":0.1},"segments":[
+                {"Line":{"to":{"x":0.9,"y":0.9}}}
+            ],"closed":false},
+            "kind":"Valley",
+            "stiffness":0.35
+        }"#;
+        let fold: FoldLine = serde_json::from_str(json).unwrap();
+        assert!((fold.angle_radians - std::f64::consts::FRAC_PI_6).abs() < 1.0e-12);
+    }
+
+    #[test]
     fn old_project_json_defaults_symmetry_links_to_empty() {
         let json = r#"{
             "schema_version":1,"name":"Legado","units":"Centimeter",
