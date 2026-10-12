@@ -2812,6 +2812,129 @@ impl ClothEvoApp {
     }
 }
 
+/// Início geométrico de um segmento na curva.
+fn curve_segment_start(curve: &Curve2D, segment_index: usize) -> Option<PatternPoint2> {
+    if segment_index >= curve.segments.len() { return None; }
+    if segment_index == 0 { Some(curve.start) }
+    else { Some(curve.segments[segment_index - 1].endpoint()) }
+}
+
+/// Avalia um segmento linear ou Bézier cúbico no parâmetro local t ∈ [0, 1].
+fn curve_segment_point(curve: &Curve2D, segment_index: usize, t: f64) -> Option<PatternPoint2> {
+    let start = curve_segment_start(curve, segment_index)?;
+    let segment = curve.segments.get(segment_index)?;
+    let t = t.clamp(0.0, 1.0);
+    let lerp = |a: PatternPoint2, b: PatternPoint2, t: f64| PatternPoint2::new(
+        a.x + (b.x - a.x) * t,
+        a.y + (b.y - a.y) * t,
+    );
+    Some(match segment {
+        CurveSegment::Line { to } => lerp(start, *to, t),
+        CurveSegment::CubicBezier { control1, control2, to } => {
+            let a = lerp(start, *control1, t);
+            let b = lerp(*control1, *control2, t);
+            let c = lerp(*control2, *to, t);
+            lerp(lerp(a, b, t), lerp(b, c, t), t)
+        }
+    })
+}
+
+/// Comprimento de arco aproximado até t; linear é exato e Bézier usa amostragem uniforme.
+fn curve_segment_arc_length(curve: &Curve2D, segment_index: usize, end_t: f64) -> f64 {
+    let Some(start) = curve_segment_point(curve, segment_index, 0.0) else { return 0.0; };
+    let Some(segment) = curve.segments.get(segment_index) else { return 0.0; };
+    let end_t = end_t.clamp(0.0, 1.0);
+    if let CurveSegment::Line { to } = segment {
+        return start.distance(curve_segment_point(curve, segment_index, end_t).unwrap_or(*to));
+    }
+    let steps = 32usize;
+    let mut previous = start;
+    let mut length = 0.0;
+    for step in 1..=steps {
+        let t = end_t * step as f64 / steps as f64;
+        let Some(point) = curve_segment_point(curve, segment_index, t) else { continue; };
+        length += previous.distance(point);
+        previous = point;
+    }
+    length
+}
+
+fn edge_curve<'a>(project: &'a PatternProject, edge: &EdgeRef) -> Option<&'a Curve2D> {
+    let piece = project.pieces.iter().find(|piece| piece.id == edge.piece_id)?;
+    match edge.curve {
+        BoundaryCurve::Outline => Some(&piece.outline),
+        BoundaryCurve::SewingLine => piece.sewing_line.as_ref(),
+    }
+}
+
+/// Mede a extensão real do intervalo de segmentos, inclusive para intervalos Bézier.
+fn edge_length_meters(project: &PatternProject, edge: &EdgeRef) -> f64 {
+    let Some(curve) = edge_curve(project, edge) else { return 0.0; };
+    let start = edge.segment_start as usize;
+    let end = (edge.segment_end as usize).min(curve.segments.len());
+    if start >= end { return 0.0; }
+    (start..end).map(|index| curve_segment_arc_length(curve, index, 1.0)).sum()
+}
+
+/// Posição de cada pique como progresso de arco normalizado na borda de costura.
+fn edge_notch_positions(project: &PatternProject, edge: &EdgeRef) -> Vec<f32> {
+    if edge.curve != BoundaryCurve::Outline { return Vec::new(); }
+    let Some(piece) = project.pieces.iter().find(|piece| piece.id == edge.piece_id) else {
+        return Vec::new();
+    };
+    let curve = &piece.outline;
+    let start = edge.segment_start as usize;
+    let end = (edge.segment_end as usize).min(curve.segments.len());
+    if start >= end { return Vec::new(); }
+    let lengths: Vec<f64> = (start..end)
+        .map(|index| curve_segment_arc_length(curve, index, 1.0)).collect();
+    let total: f64 = lengths.iter().sum();
+    if total <= 1e-9 { return Vec::new(); }
+
+    let mut out = piece.notches.iter().filter_map(|notch| {
+        let index = notch.segment_index as usize;
+        if index < start || index >= end || !notch.t.is_finite() { return None; }
+        let prefix: f64 = lengths.iter().take(index - start).sum();
+        let partial = curve_segment_arc_length(curve, index, notch.t);
+        let mut progress = ((prefix + partial) / total).clamp(0.0, 1.0);
+        if edge.reversed { progress = 1.0 - progress; }
+        Some(progress as f32)
+    }).collect::<Vec<_>>();
+    out.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
+/// Gera marcadores de notch para que cada pique pareado receba uma restrição explícita do solver.
+fn paired_notch_markers(
+    project: &PatternProject,
+    edge_a: &EdgeRef,
+    edge_b: &EdgeRef,
+) -> Vec<(f32, f32)> {
+    edge_notch_positions(project, edge_a).into_iter()
+        .zip(edge_notch_positions(project, edge_b))
+        .collect()
+}
+
+/// Amostra apenas o intervalo de segmentos referenciado pela costura, para o overlay do canvas.
+fn edge_path_points(project: &PatternProject, edge: &EdgeRef, steps: usize) -> Vec<PatternPoint2> {
+    let Some(curve) = edge_curve(project, edge) else { return Vec::new(); };
+    let start = edge.segment_start as usize;
+    let end = (edge.segment_end as usize).min(curve.segments.len());
+    if start >= end { return Vec::new(); }
+    let steps = steps.max(1);
+    let mut points = Vec::new();
+    for index in start..end {
+        for step in 0..=steps {
+            if index > start && step == 0 { continue; }
+            if let Some(point) = curve_segment_point(curve, index, step as f64 / steps as f64) {
+                points.push(point);
+            }
+        }
+    }
+    if edge.reversed { points.reverse(); }
+    points
+}
+
 fn translate_curve(curve: &mut Curve2D, dx: f64, dy: f64) {
     let shift = |p: &mut PatternPoint2| {
         p.x += dx;
