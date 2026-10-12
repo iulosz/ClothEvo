@@ -21,6 +21,6 @@ pub mod solver;
 pub use builder::{ClothBuilder, PanelHandle};
 pub use collider::Collider;
 pub use mesh::{GridPanel, PanelMesh, Placement};
-pub use params::{ConstraintKind, FabricPreset, SimParams};
+pub use params::{ConstraintKind, FabricPreset, PanelMaterial, SimParams};
 pub use scenes::{build_scene, SceneKind};
 pub use solver::{Simulation, Stats};
