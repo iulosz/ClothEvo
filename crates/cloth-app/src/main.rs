@@ -5442,3 +5442,51 @@ mod placement_ui_tests {
     }
 }
 
+
+
+#[cfg(test)]
+mod cut_feature_tests {
+    use super::*;
+
+    fn point(x: f64, y: f64) -> PatternPoint2 {
+        PatternPoint2::new(x, y)
+    }
+
+    fn split_rectangles() -> (Vec<PatternPoint2>, Vec<PatternPoint2>) {
+        (
+            vec![point(-1.0, -1.0), point(0.0, -1.0), point(0.0, 1.0), point(-1.0, 1.0)],
+            vec![point(0.0, -1.0), point(1.0, -1.0), point(1.0, 1.0), point(0.0, 1.0)],
+        )
+    }
+
+    #[test]
+    fn cut_crossing_internal_curve_creates_fragments_on_both_pieces() {
+        let curve = Curve2D::polyline(&[point(-0.75, 0.2), point(0.75, 0.2)], false).unwrap();
+        let (polygon_a, polygon_b) = split_rectangles();
+
+        let fragments = split_curve_fragments_by_cut(&curve, &polygon_a, &polygon_b).unwrap();
+
+        assert_eq!(fragments[0].len(), 1);
+        assert_eq!(fragments[1].len(), 1);
+        let left_end = fragments[0][0].endpoint().unwrap();
+        let right_start = fragments[1][0].start;
+        assert!(left_end.x.abs() < 1.0e-4, "left fragment ended at {}", left_end.x);
+        assert!(right_start.x.abs() < 1.0e-4, "right fragment started at {}", right_start.x);
+        assert!((left_end.y - right_start.y).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn cut_preserves_curves_that_are_wholly_on_one_side() {
+        let curve = Curve2D::polyline(&[
+            point(-0.8, -0.5),
+            point(-0.7, 0.0),
+            point(-0.8, 0.5),
+        ], false).unwrap();
+        let (polygon_a, polygon_b) = split_rectangles();
+
+        let fragments = split_curve_fragments_by_cut(&curve, &polygon_a, &polygon_b).unwrap();
+
+        assert_eq!(fragments[0], vec![curve]);
+        assert!(fragments[1].is_empty());
+    }
+}
