@@ -171,7 +171,7 @@ A simetria mantém a correspondência de índices nas operações topológicas s
 3. Clique em **Cut & Sew**. O ClothEvo valida o caminho, divide o contorno em dois, preserva os segmentos Bézier, cria as duas peças e adiciona automaticamente uma costura entre as novas bordas de corte.
 4. O vínculo de simetria é preservado: se a peça tem um par, o caminho é refletido e o corte é executado nos dois moldes na mesma operação. As duas novas peças também formam um novo par vinculado.
 
-O sistema remapeia referências de costura e entalhes em trechos de borda que continuam íntegros. Se uma costura existente usa um segmento dividido pelo corte, ou se um detalhe interno, pence, furo, linha de fio ou prega atravessa a nova divisão, a operação é cancelada sem alterar o projeto. Nesse caso, reposicione/refaça o detalhe ou a costura e tente novamente. O corte não divide automaticamente esses detalhes que atravessam a linha.
+O sistema remapeia referências de costura e entalhes em trechos de borda que continuam íntegros. Linhas internas, dobras e eixos de pregas que cruzam o corte são divididos em fragmentos aproximados e preservados em cada peça; curvas inteiramente de um lado mantêm a representação original. Pence e furos que atravessam o corte, linha de fio ambígua e costuras existentes que dependem de segmentos divididos ainda são recusados sem alterar o projeto.
 
 As novas costuras conectam as bordas recém-criadas no grafo do projeto. A aplicação de folga diferencial (*ease*) continua sendo uma etapa separada do solver físico.
 
@@ -246,3 +246,15 @@ A inserção de um vértice subdivide parametricamente os piques do segmento: os
 Linhas de dobra do tipo **Vale** e **Montanha** agora mapeiam para arestas internas existentes da malha. Essas arestas recebem rigidez de flexão local e um ângulo diedral-alvo em repouso; linhas do tipo **Decorativa** permanecem apenas visuais. O ângulo inicial de uma dobra física é de 30° e a rigidez inicial é 35% da rigidez de flexão base. Arquivos antigos sem o campo de ângulo usam esse valor padrão.
 
 Uma **prega** gera dois vincos paralelos aproximados em lados opostos do eixo, separados pela profundidade definida e com ângulos-alvo opostos. O mapeamento usa caminhos no grafo de adjacência da malha existente: não insere vértices nem modifica a triangulação CDT. O painel de montagem informa quantas arestas de dobra/prega foram mapeadas; se nenhuma aresta interna puder ser encontrada, é preciso aumentar a resolução do molde ou revisar o traçado.
+
+### P2 — Integridade dos detalhes no Cut & Sew
+
+Ao executar um corte, o editor mantém linhas internas, dobras e eixos de pregas. Se um desses elementos cruza o caminho de corte, a curva é particionada por lado e convertida em fragmentos poligonais, com o encontro calculado por busca binária entre amostras. Curvas inteiramente contidas em uma das peças mantêm a representação original, incluindo segmentos Bézier. A aproximação usa 64 intervalos por segmento original; isso evita perder o detalhe, mas fragmentos cruzados não são uma subdivisão Bézier exata.
+
+A operação continua transacional: referências de costura existentes, pences ou furos que não podem ser reparticionados com segurança causam cancelamento sem mutar o projeto. Linhas de fio e linhas de costura ambíguas também continuam protegidas em vez de serem atribuídas arbitrariamente.
+
+### P3 — Validação preventiva dos dados de molde
+
+A validação do projeto verifica valores finitos não só no contorno, mas também em linhas de costura e internas, dobras, eixos de pregas, linha de fio, pences, furos, anotações e coeficientes de graduação. A escala de montagem precisa ser finita e positiva. Como salvar e carregar passam por PatternProject::validate, dados inválidos são rejeitados antes de serem persistidos ou usados nas próximas etapas.
+
+Os testes incluem regressões para geometria não finita, escalas inválidas, coeficientes de graduação e fragmentação de linhas cruzadas pelo Cut & Sew. P3 pode continuar com avisos de qualidade geométrica (por exemplo, autointerseções, contornos degenerados e margens de costura sem solução) sem transformar esses avisos em rejeições automáticas antes de haver regras geométricas robustas para esses casos.
