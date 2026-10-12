@@ -15,7 +15,8 @@ use cloth_sim::{
 use eframe::{egui, egui_wgpu};
 use glam::{Quat, Vec2, Vec3};
 use pattern_core::{
-    BoundaryCurve, Curve2D, CurveSegment, EdgeRef, PatternPiece, PatternProject, Point2 as PatternPoint2, SeamDefinition,
+    BoundaryCurve, Curve2D, CurveSegment, EdgeRef, FoldKind, FoldLine, GrainLine, PatternPiece,
+    PatternProject, Pleat, Point2 as PatternPoint2, SeamDefinition,
 };
 use pattern_geom::{
     offset_polygon, point_in_polygon, rectangle, regular_polygon, sample_curve,
@@ -628,7 +629,7 @@ impl ClothEvoApp {
     }
 
     fn pattern_controls(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Pattern Studio 0.3");
+        ui.heading("Pattern Studio 0.4 · Geometria vetorial");
         ui.label("Editor 2D · medidas internas em metros");
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.pattern_tool, PatternTool::Draw, "Desenhar");
@@ -688,9 +689,25 @@ impl ClothEvoApp {
             }
         });
         ui.add(egui::Slider::new(&mut self.pattern_polygon_sides, 3..=12).text("lados do polígono"));
-        if ui.button("Fechar peça a partir dos pontos").clicked() {
-            self.create_piece_from_draft();
-        }
+        ui.horizontal(|ui| {
+            if ui.button("Fechar peça a partir dos pontos").clicked() {
+                self.create_piece_from_draft();
+            }
+            if ui.button("Adicionar linha interna").clicked() {
+                self.create_internal_line_from_draft();
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Criar dobra (vale)").clicked() {
+                self.create_fold_line_from_draft();
+            }
+            if ui.button("Criar prega").clicked() {
+                self.create_pleat_from_draft();
+            }
+            if ui.button("Definir linha de fio").clicked() {
+                self.create_grainline_from_draft();
+            }
+        });
         ui.label(format!("Pontos no rascunho: {}", self.draft_points.len()));
         if let Some(target) = self.selected_target {
             ui.label(format!("Selecionado: {}", match target {
@@ -1076,6 +1093,99 @@ impl ClothEvoApp {
         }
     }
 
+    fn drafted_internal_curve(&self) -> Result<(usize, Curve2D), String> {
+        if self.draft_points.len() < 2 {
+            return Err("Desenhe ao menos dois pontos para uma linha interna.".into());
+        }
+        if self.pattern_project.pieces.is_empty() {
+            return Err("Crie ou selecione um molde antes de adicionar detalhes internos.".into());
+        }
+        let piece_index = self.selected_piece.min(self.pattern_project.pieces.len() - 1);
+        let outline = sample_curve(&self.pattern_project.pieces[piece_index].outline, 24);
+        let curve = Curve2D::polyline(&self.draft_points, false)?;
+        // Evita gravar linhas que saiam do molde. Cada segmento é amostrado para detectar
+        // trechos que atravessam o contorno, não apenas os seus pontos de controle.
+        for pair in self.draft_points.windows(2) {
+            for step in 0..=16 {
+                let t = step as f64 / 16.0;
+                let point = PatternPoint2::new(
+                    pair[0].x + (pair[1].x - pair[0].x) * t,
+                    pair[0].y + (pair[1].y - pair[0].y) * t,
+                );
+                if !point_in_polygon(point, &outline) {
+                    return Err("A linha interna precisa permanecer dentro do contorno do molde.".into());
+                }
+            }
+        }
+        Ok((piece_index, curve))
+    }
+
+    fn create_internal_line_from_draft(&mut self) {
+        let (piece_index, curve) = match self.drafted_internal_curve() {
+            Ok(value) => value,
+            Err(error) => { self.pattern_message = error; return; }
+        };
+        let before = self.editor_snapshot();
+        self.pattern_project.pieces[piece_index].internal_lines.push(curve);
+        self.draft_points.clear();
+        self.pattern_tool = PatternTool::Select;
+        self.pattern_message = "Linha interna adicionada ao molde.".into();
+        self.remember_pattern_change(before);
+    }
+
+    fn create_fold_line_from_draft(&mut self) {
+        let (piece_index, curve) = match self.drafted_internal_curve() {
+            Ok(value) => value,
+            Err(error) => { self.pattern_message = error; return; }
+        };
+        let before = self.editor_snapshot();
+        self.pattern_project.pieces[piece_index].fold_lines.push(FoldLine {
+            curve,
+            kind: FoldKind::Valley,
+            stiffness: 0.35,
+        });
+        self.draft_points.clear();
+        self.pattern_tool = PatternTool::Select;
+        self.pattern_message = "Linha de dobra (vale) adicionada; rigidez inicial 0,35.".into();
+        self.remember_pattern_change(before);
+    }
+
+    fn create_pleat_from_draft(&mut self) {
+        let (piece_index, axis) = match self.drafted_internal_curve() {
+            Ok(value) => value,
+            Err(error) => { self.pattern_message = error; return; }
+        };
+        let before = self.editor_snapshot();
+        self.pattern_project.pieces[piece_index].pleats.push(Pleat {
+            axis,
+            depth_meters: 0.02,
+            angle_radians: std::f64::consts::FRAC_PI_4,
+        });
+        self.draft_points.clear();
+        self.pattern_tool = PatternTool::Select;
+        self.pattern_message = "Prega criada com profundidade inicial de 2 cm e ângulo de 45°.".into();
+        self.remember_pattern_change(before);
+    }
+
+    fn create_grainline_from_draft(&mut self) {
+        if self.draft_points.len() != 2 {
+            self.pattern_message = "A linha de fio exige exatamente dois pontos.".into();
+            return;
+        }
+        let (piece_index, curve) = match self.drafted_internal_curve() {
+            Ok(value) => value,
+            Err(error) => { self.pattern_message = error; return; }
+        };
+        let start = curve.start;
+        let Some(end) = curve.endpoint() else { return; };
+        let before = self.editor_snapshot();
+        self.pattern_project.pieces[piece_index].grain_line = Some(GrainLine { start, end });
+        self.draft_points.clear();
+        self.pattern_tool = PatternTool::Select;
+        self.pattern_message = "Linha de fio atualizada.".into();
+        self.remember_pattern_change(before);
+    }
+
     fn create_piece_from_draft(&mut self) {
         if self.draft_points.len() < 3 {
             self.pattern_message = "Uma peça precisa de pelo menos 3 pontos.".into();
@@ -1237,6 +1347,55 @@ impl ClothEvoApp {
                 painter.line_segment(
                     [to_screen(points[i]), to_screen(points[(i + 1) % points.len()])],
                     egui::Stroke::new(2.0, outline_color),
+                );
+            }
+
+            // Linhas internas, dobras, pregas e linha de fio têm estilos distintos do contorno.
+            for line in &piece.internal_lines {
+                let detail = sample_curve(line, 12);
+                for pair in detail.windows(2) {
+                    painter.line_segment(
+                        [to_screen(pair[0]), to_screen(pair[1])],
+                        egui::Stroke::new(1.7, egui::Color32::from_rgb(245, 178, 72)),
+                    );
+                }
+            }
+            for fold in &piece.fold_lines {
+                let detail = sample_curve(&fold.curve, 12);
+                let color = match fold.kind {
+                    FoldKind::Valley => egui::Color32::from_rgb(185, 128, 255),
+                    FoldKind::Mountain => egui::Color32::from_rgb(90, 220, 210),
+                    FoldKind::Decorative => egui::Color32::from_rgb(230, 230, 230),
+                };
+                for pair in detail.windows(2) {
+                    painter.line_segment(
+                        [to_screen(pair[0]), to_screen(pair[1])],
+                        egui::Stroke::new(1.8, color),
+                    );
+                }
+            }
+            for pleat in &piece.pleats {
+                let detail = sample_curve(&pleat.axis, 12);
+                for pair in detail.windows(2) {
+                    painter.line_segment(
+                        [to_screen(pair[0]), to_screen(pair[1])],
+                        egui::Stroke::new(2.2, egui::Color32::from_rgb(255, 120, 170)),
+                    );
+                }
+            }
+            if let Some(grain) = &piece.grain_line {
+                painter.line_segment(
+                    [to_screen(grain.start), to_screen(grain.end)],
+                    egui::Stroke::new(1.6, egui::Color32::from_rgb(120, 220, 135)),
+                );
+                let center = PatternPoint2::new(
+                    (grain.start.x + grain.end.x) * 0.5,
+                    (grain.start.y + grain.end.y) * 0.5,
+                );
+                painter.text(
+                    to_screen(center), egui::Align2::CENTER_CENTER, "FIO",
+                    egui::FontId::proportional(10.0),
+                    egui::Color32::from_rgb(120, 220, 135),
                 );
             }
             if let Some(PatternEditTarget::Edge { piece: selected_index, segment, .. }) = self.selected_target {
