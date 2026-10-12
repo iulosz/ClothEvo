@@ -764,6 +764,221 @@ impl PatternProject {
     }
 }
 
+/// Parâmetros para gerar sugestões; a função é pura e não altera o projeto.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SeamSuggestionParams {
+    pub minimum_score: f64,
+    pub maximum_length_ratio: f64,
+    pub placement_distance_meters: f64,
+}
+
+impl Default for SeamSuggestionParams {
+    fn default() -> Self {
+        Self {
+            minimum_score: 0.35,
+            maximum_length_ratio: 4.0,
+            placement_distance_meters: 0.75,
+        }
+    }
+}
+
+/// Candidata à aplicação pelo usuário; gerar sugestões nunca cria costuras no projeto.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SeamSuggestion {
+    pub a: EdgePath,
+    pub b: EdgePath,
+    pub score: f64,
+    pub reasons: Vec<String>,
+}
+
+fn curve_point_at(curve: &Curve2D, segment_index: usize, t: f64) -> Option<Point2> {
+    let segment = curve.segments.get(segment_index)?;
+    let start = if segment_index == 0 { curve.start } else { curve.segments[segment_index - 1].endpoint() };
+    let t = t.clamp(0.0, 1.0);
+    match segment {
+        CurveSegment::Line { to } => Some(Point2::new(
+            start.x + (to.x - start.x) * t,
+            start.y + (to.y - start.y) * t,
+        )),
+        CurveSegment::CubicBezier { control1, control2, to } => {
+            let u = 1.0 - t;
+            Some(Point2::new(
+                u*u*u*start.x + 3.0*u*u*t*control1.x + 3.0*u*t*t*control2.x + t*t*t*to.x,
+                u*u*u*start.y + 3.0*u*u*t*control1.y + 3.0*u*t*t*control2.y + t*t*t*to.y,
+            ))
+        }
+    }
+}
+
+fn curve_segment_length_between(curve: &Curve2D, index: usize, start_t: f64, end_t: f64) -> f64 {
+    if end_t <= start_t { return 0.0; }
+    let Some(mut previous) = curve_point_at(curve, index, start_t) else { return 0.0; };
+    let mut length = 0.0;
+    for step in 1..=24 {
+        let t = start_t + (end_t - start_t) * step as f64 / 24.0;
+        let Some(point) = curve_point_at(curve, index, t) else { continue; };
+        length += previous.distance(point);
+        previous = point;
+    }
+    length
+}
+
+fn rotate_euler_xyz(point: [f64; 3], degrees: [f64; 3]) -> [f64; 3] {
+    let (sx, cx) = degrees[0].to_radians().sin_cos();
+    let (sy, cy) = degrees[1].to_radians().sin_cos();
+    let (sz, cz) = degrees[2].to_radians().sin_cos();
+    let x1 = point[0];
+    let y1 = cx * point[1] - sx * point[2];
+    let z1 = sx * point[1] + cx * point[2];
+    let x2 = cy * x1 + sy * z1;
+    let y2 = y1;
+    let z2 = -sy * x1 + cy * z1;
+    [cz * x2 - sz * y2, sz * x2 + cz * y2, z2]
+}
+
+fn edge_midpoint_3d(piece: &PatternPiece, segment: usize) -> Option<[f64; 3]> {
+    let midpoint = curve_point_at(&piece.outline, segment, 0.5)?;
+    let rotated = rotate_euler_xyz([midpoint.x, midpoint.y, 0.0], piece.assembly.rotation_degrees);
+    Some([
+        rotated[0] + piece.assembly.translation_meters[0],
+        rotated[1] + piece.assembly.translation_meters[1],
+        rotated[2] + piece.assembly.translation_meters[2],
+    ])
+}
+
+fn edge_tangent_3d(piece: &PatternPiece, segment: usize) -> Option<[f64; 3]> {
+    let p0 = curve_point_at(&piece.outline, segment, 0.49)?;
+    let p1 = curve_point_at(&piece.outline, segment, 0.51)?;
+    let direction = rotate_euler_xyz([p1.x - p0.x, p1.y - p0.y, 0.0], piece.assembly.rotation_degrees);
+    let length = (direction[0]*direction[0] + direction[1]*direction[1] + direction[2]*direction[2]).sqrt();
+    if length <= 1.0e-12 { return None; }
+    Some([direction[0]/length, direction[1]/length, direction[2]/length])
+}
+
+fn notches_for_segment(piece: &PatternPiece, segment: usize) -> Vec<f64> {
+    let mut positions = piece.notches.iter()
+        .filter(|notch| notch.segment_index as usize == segment && notch.t.is_finite() && (0.0..=1.0).contains(&notch.t))
+        .map(|notch| {
+            let total = curve_segment_length_between(&piece.outline, segment, 0.0, 1.0);
+            if total <= 1.0e-12 { notch.t } else {
+                curve_segment_length_between(&piece.outline, segment, 0.0, notch.t) / total
+            }
+        }).collect::<Vec<_>>();
+    positions.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    positions
+}
+
+fn edge_was_sewn(project: &PatternProject, piece_id: PieceId, curve: BoundaryCurve, segment: u32) -> bool {
+    project.seams.iter().any(|seam| seam.sides_a.iter().chain(seam.sides_b.iter()).any(|edge| {
+        if edge.piece_id != piece_id || edge.curve != curve { return false; }
+        let scalar = segment as f64 + 0.5;
+        edge.start_position() <= scalar && scalar < edge.end_position()
+    }))
+}
+
+/// Retorna pares de bordas candidatas ordenados por score e escolhidos de forma gulosa.
+/// Não modifica `project`: o chamador deve mostrar sugestões e pedir aplicação explícita.
+pub fn suggest_seams(
+    project: &PatternProject,
+    params: &SeamSuggestionParams,
+) -> Vec<SeamSuggestion> {
+    if !params.minimum_score.is_finite()
+        || !params.maximum_length_ratio.is_finite()
+        || !params.placement_distance_meters.is_finite()
+        || params.maximum_length_ratio < 1.0
+        || params.placement_distance_meters <= 0.0
+    {
+        return Vec::new();
+    }
+
+    let mut candidates: Vec<SeamSuggestion> = Vec::new();
+    for (index_a, piece_a) in project.pieces.iter().enumerate() {
+        for (index_b, piece_b) in project.pieces.iter().enumerate().skip(index_a + 1) {
+            for segment_a in 0..piece_a.outline.segments.len() {
+                if edge_was_sewn(project, piece_a.id, BoundaryCurve::Outline, segment_a as u32) { continue; }
+                let edge_a = EdgePath {
+                    piece_id: piece_a.id, curve: BoundaryCurve::Outline,
+                    start: CurveParam { segment: segment_a as u32, t: 0.0 },
+                    end: CurveParam { segment: segment_a as u32, t: 1.0 },
+                    reversed: false,
+                };
+                let Some(length_a) = project.edge_length_meters(&edge_a) else { continue; };
+                if length_a <= 1.0e-9 { continue; }
+                let Some(mid_a) = edge_midpoint_3d(piece_a, segment_a) else { continue; };
+                let Some(tangent_a) = edge_tangent_3d(piece_a, segment_a) else { continue; };
+                let notches_a = notches_for_segment(piece_a, segment_a);
+
+                for segment_b in 0..piece_b.outline.segments.len() {
+                    if edge_was_sewn(project, piece_b.id, BoundaryCurve::Outline, segment_b as u32) { continue; }
+                    let edge_b = EdgePath {
+                        piece_id: piece_b.id, curve: BoundaryCurve::Outline,
+                        start: CurveParam { segment: segment_b as u32, t: 0.0 },
+                        end: CurveParam { segment: segment_b as u32, t: 1.0 },
+                        reversed: false,
+                    };
+                    let Some(length_b) = project.edge_length_meters(&edge_b) else { continue; };
+                    if length_b <= 1.0e-9 { continue; }
+                    let ratio = length_a.max(length_b) / length_a.min(length_b);
+                    if ratio > params.maximum_length_ratio { continue; }
+                    let Some(mid_b) = edge_midpoint_3d(piece_b, segment_b) else { continue; };
+                    let distance = ((mid_a[0]-mid_b[0]).powi(2)
+                        + (mid_a[1]-mid_b[1]).powi(2)
+                        + (mid_a[2]-mid_b[2]).powi(2)).sqrt();
+                    let proximity_score = (-distance / params.placement_distance_meters).exp();
+                    let ratio_score = 1.0 / ratio;
+                    let tangent_b = edge_tangent_3d(piece_b, segment_b).unwrap_or([0.0, 0.0, 0.0]);
+                    let tangent_dot = (tangent_a[0]*tangent_b[0] + tangent_a[1]*tangent_b[1]
+                        + tangent_a[2]*tangent_b[2]).clamp(-1.0, 1.0);
+                    let orientation_score = (1.0 - tangent_dot) * 0.5;
+
+                    let notches_b = notches_for_segment(piece_b, segment_b);
+                    let count_similarity = 1.0 - notches_a.len().abs_diff(notches_b.len()) as f64
+                        / notches_a.len().max(notches_b.len()).max(1) as f64;
+                    let position_similarity = if notches_a.is_empty() && notches_b.is_empty() {
+                        1.0
+                    } else if notches_a.is_empty() || notches_b.is_empty() {
+                        0.35
+                    } else {
+                        let deltas = notches_a.iter().map(|a| notches_b.iter()
+                            .map(|b| (a - b).abs()).fold(f64::INFINITY, f64::min)).collect::<Vec<_>>();
+                        let mean_delta = deltas.iter().sum::<f64>() / deltas.len() as f64;
+                        (1.0 - mean_delta).clamp(0.0, 1.0)
+                    };
+                    let notch_score = 0.5 * count_similarity + 0.5 * position_similarity;
+                    let score = (0.30 * notch_score + 0.25 * ratio_score
+                        + 0.25 * proximity_score + 0.20 * orientation_score).clamp(0.0, 1.0);
+                    if score < params.minimum_score { continue; }
+
+                    let mut reasons = Vec::new();
+                    reasons.push(format!("Comprimentos: {:.2} cm e {:.2} cm (razão {:.2}:1).",
+                        length_a * 100.0, length_b * 100.0, ratio));
+                    reasons.push(format!("Proximidade de montagem: {:.1} cm.", distance * 100.0));
+                    reasons.push(format!("Orientação de bordas: {:.0}% de compatibilidade.", orientation_score * 100.0));
+                    if !notches_a.is_empty() || !notches_b.is_empty() {
+                        reasons.push(format!("Piques: {} em A e {} em B; correspondência normalizada {:.0}%.",
+                            notches_a.len(), notches_b.len(), notch_score * 100.0));
+                    } else {
+                        reasons.push("Nenhum pique nas bordas; pontuação neutra por contagem/posição.".into());
+                    }
+                    candidates.push(SeamSuggestion { a: edge_a, b: edge_b, score, reasons });
+                }
+            }
+        }
+    }
+    candidates.sort_by(|a,b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    let mut used: HashSet<(PieceId, u32)> = HashSet::new();
+    let mut result = Vec::new();
+    for candidate in candidates {
+        let key_a = (candidate.a.piece_id, candidate.a.start.segment);
+        let key_b = (candidate.b.piece_id, candidate.b.start.segment);
+        if used.contains(&key_a) || used.contains(&key_b) { continue; }
+        used.insert(key_a);
+        used.insert(key_b);
+        result.push(candidate);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
