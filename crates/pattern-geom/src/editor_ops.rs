@@ -254,3 +254,356 @@ pub fn resample_curve(curve: &Curve2D, spacing: f64) -> Result<Curve2D, Geometry
     if points.len() < minimum { return Err(GeometryError::InvalidParameter); }
     Curve2D::polyline(&points, curve.closed).map_err(|_| GeometryError::InvalidParameter)
 }
+
+
+/// Identifies one fragment of a source boundary segment after the cut.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceSegmentFragment {
+    pub piece_index: usize,
+    pub new_segment_index: usize,
+    pub t_start: f64,
+    pub t_end: f64,
+}
+
+/// Result of splitting one closed pattern outline with an open cut path.
+/// Cut segment ranges use half-open indexing, matching the pattern core edge references.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CutAndSewResult {
+    pub first: Curve2D,
+    pub second: Curve2D,
+    pub first_cut_segment_range: (usize, usize),
+    pub second_cut_segment_range: (usize, usize),
+    /// Maps every source segment to the resulting boundary fragments in parametric order.
+    pub source_segment_fragments: Vec<Vec<SourceSegmentFragment>>,
+}
+
+#[derive(Clone, Debug)]
+struct BoundaryFragment {
+    source_segment: usize,
+    t_start: f64,
+    t_end: f64,
+    scalar_start: f64,
+    scalar_end: f64,
+    geometry: CurveSegment,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CutLocation {
+    scalar: f64,
+    point: Point2,
+}
+
+fn split_cubic(
+    p0: Point2,
+    p1: Point2,
+    p2: Point2,
+    p3: Point2,
+    t: f64,
+) -> ([Point2; 4], [Point2; 4]) {
+    let p01 = lerp(p0, p1, t);
+    let p12 = lerp(p1, p2, t);
+    let p23 = lerp(p2, p3, t);
+    let p012 = lerp(p01, p12, t);
+    let p123 = lerp(p12, p23, t);
+    let split = lerp(p012, p123, t);
+    ([p0, p01, p012, split], [split, p123, p23, p3])
+}
+
+fn segment_slice(start: Point2, segment: &CurveSegment, t0: f64, t1: f64) -> CurveSegment {
+    match segment {
+        CurveSegment::Line { to } => CurveSegment::Line { to: lerp(start, *to, t1) },
+        CurveSegment::CubicBezier { control1, control2, to } => {
+            let (left, _) = split_cubic(start, *control1, *control2, *to, t1);
+            let sub = if t0 <= 1.0e-12 {
+                left
+            } else {
+                let relative = (t0 / t1).clamp(0.0, 1.0);
+                let (_, right) = split_cubic(left[0], left[1], left[2], left[3], relative);
+                right
+            };
+            CurveSegment::CubicBezier {
+                control1: sub[1],
+                control2: sub[2],
+                to: sub[3],
+            }
+        }
+    }
+}
+
+fn locate_cut_endpoint(curve: &Curve2D, query: Point2) -> Result<CutLocation, GeometryError> {
+    let projection = project_point_to_curve(curve, query)
+        .ok_or(GeometryError::InvalidParameter)?;
+    let count = curve.segments.len() as f64;
+    let mut scalar = projection.segment_index as f64 + projection.t.clamp(0.0, 1.0);
+    let nearest_integer = scalar.round();
+    if (scalar - nearest_integer).abs() <= 1.0e-5 {
+        scalar = nearest_integer;
+    }
+    if scalar >= count - 1.0e-8 { scalar = 0.0; }
+    if scalar < 0.0 { scalar = 0.0; }
+    let point = point_at_scalar(curve, scalar);
+    Ok(CutLocation { scalar, point })
+}
+
+fn point_at_scalar(curve: &Curve2D, scalar: f64) -> Point2 {
+    let count = curve.segments.len();
+    if count == 0 { return curve.start; }
+    let s = scalar.clamp(0.0, count as f64);
+    let nearest = s.round();
+    if (s - nearest).abs() <= 1.0e-8 {
+        let vertex = (nearest as usize) % count;
+        if vertex == 0 { curve.start }
+        else { curve.segments[vertex - 1].endpoint() }
+    } else {
+        let index = (s.floor() as usize).min(count - 1);
+        eval_segment(
+            segment_start(curve, index).unwrap_or(curve.start),
+            &curve.segments[index],
+            s - index as f64,
+        )
+    }
+}
+
+fn path_with_snapped_endpoints(path: &Curve2D, start: Point2, end: Point2) -> Curve2D {
+    let mut snapped = path.clone();
+    snapped.start = start;
+    if let Some(last) = snapped.segments.last_mut() {
+        match last {
+            CurveSegment::Line { to } | CurveSegment::CubicBezier { to, .. } => *to = end,
+        }
+    }
+    snapped
+}
+
+fn orientation(a: Point2, b: Point2, c: Point2) -> f64 {
+    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+}
+
+fn segment_intersects(a: Point2, b: Point2, c: Point2, d: Point2) -> bool {
+    let cross1 = orientation(a, b, c);
+    let cross2 = orientation(a, b, d);
+    let cross3 = orientation(c, d, a);
+    let cross4 = orientation(c, d, b);
+    let eps = 1.0e-9;
+    ((cross1 > eps && cross2 < -eps) || (cross1 < -eps && cross2 > eps))
+        && ((cross3 > eps && cross4 < -eps) || (cross3 < -eps && cross4 > eps))
+}
+
+fn validate_cut_path(outline: &Curve2D, path: &Curve2D) -> Result<(), GeometryError> {
+    if path.closed || path.segments.is_empty()
+        || !finite_point(path.start)
+        || path.segments.iter().any(|segment| {
+            let end = segment.endpoint();
+            !finite_point(end) || match segment {
+                CurveSegment::Line { .. } => false,
+                CurveSegment::CubicBezier { control1, control2, .. } =>
+                    !finite_point(*control1) || !finite_point(*control2),
+            }
+        })
+    {
+        return Err(GeometryError::InvalidParameter);
+    }
+
+    let polygon = sample_curve(outline, 24);
+    let sampled = sample_curve(path, 24);
+    if sampled.len() < 2 { return Err(GeometryError::InvalidParameter); }
+    for (index, point) in sampled.iter().enumerate() {
+        if index == 0 || index + 1 == sampled.len() { continue; }
+        if !crate::point_in_polygon(*point, &polygon) {
+            return Err(GeometryError::InvalidParameter);
+        }
+        if project_point_to_curve(outline, *point)
+            .map(|projection| projection.distance <= 1.0e-5).unwrap_or(true)
+        {
+            return Err(GeometryError::InvalidParameter);
+        }
+    }
+
+    // Reject self-crossing sampled cut paths.
+    for i in 0..sampled.len() - 1 {
+        for j in i + 2..sampled.len() - 1 {
+            if segment_intersects(sampled[i], sampled[i + 1], sampled[j], sampled[j + 1]) {
+                return Err(GeometryError::SelfIntersection);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn build_boundary_fragments(
+    curve: &Curve2D,
+    locations: [CutLocation; 2],
+) -> Vec<BoundaryFragment> {
+    let mut fragments = Vec::new();
+    let count = curve.segments.len();
+    for index in 0..count {
+        let mut breaks = vec![0.0, 1.0];
+        for location in locations {
+            let segment_index = location.scalar.floor() as usize;
+            let t = location.scalar - segment_index as f64;
+            if segment_index == index && t > 1.0e-8 && t < 1.0 - 1.0e-8 {
+                breaks.push(t);
+            }
+        }
+        breaks.sort_by(|a, b| a.total_cmp(b));
+        breaks.dedup_by(|a, b| (*a - *b).abs() <= 1.0e-9);
+        let start = segment_start(curve, index).unwrap_or(curve.start);
+        for pair in breaks.windows(2) {
+            let t0 = pair[0];
+            let t1 = pair[1];
+            if t1 - t0 <= 1.0e-10 { continue; }
+            fragments.push(BoundaryFragment {
+                source_segment: index,
+                t_start: t0,
+                t_end: t1,
+                scalar_start: index as f64 + t0,
+                scalar_end: index as f64 + t1,
+                geometry: segment_slice(start, &curve.segments[index], t0, t1),
+            });
+        }
+    }
+    fragments
+}
+
+fn boundary_route(
+    start: f64,
+    end: f64,
+    count: usize,
+    fragments: &[BoundaryFragment],
+) -> Vec<BoundaryFragment> {
+    let mut end_unwrapped = end;
+    if end_unwrapped <= start + 1.0e-9 { end_unwrapped += count as f64; }
+    let mut route = Vec::new();
+    for cycle in 0..=1 {
+        let shift = cycle as f64 * count as f64;
+        for fragment in fragments {
+            let a = fragment.scalar_start + shift;
+            let b = fragment.scalar_end + shift;
+            if a >= start - 1.0e-8 && b <= end_unwrapped + 1.0e-8 {
+                route.push(fragment.clone());
+            }
+        }
+    }
+    route
+}
+
+fn reverse_open_curve(curve: &Curve2D) -> Curve2D {
+    let mut current = curve.start;
+    let mut starts = Vec::with_capacity(curve.segments.len());
+    for segment in &curve.segments {
+        starts.push(current);
+        current = segment.endpoint();
+    }
+    let mut segments = Vec::with_capacity(curve.segments.len());
+    for index in (0..curve.segments.len()).rev() {
+        let start = starts[index];
+        let reversed = match &curve.segments[index] {
+            CurveSegment::Line { .. } => CurveSegment::Line { to: start },
+            CurveSegment::CubicBezier { control1, control2, .. } => CurveSegment::CubicBezier {
+                control1: *control2,
+                control2: *control1,
+                to: start,
+            },
+        };
+        segments.push(reversed);
+    }
+    Curve2D {
+        start: curve.endpoint().unwrap_or(curve.start),
+        segments,
+        closed: false,
+    }
+}
+
+/// Splits a closed outline along an open cut path whose endpoints lie on the outline.
+/// The function preserves original line/Bézier segments, snaps both endpoints to the outline,
+/// validates the resulting contours, and returns cut-edge ranges for automatic sewing.
+/// Endpoint tolerance and coordinates are expressed in meters.
+pub fn cut_closed_outline(
+    outline: &Curve2D,
+    cut_path: &Curve2D,
+    endpoint_tolerance: f64,
+) -> Result<CutAndSewResult, GeometryError> {
+    if !outline.closed || outline.segments.len() < 3
+        || !endpoint_tolerance.is_finite() || endpoint_tolerance <= 0.0
+    {
+        return Err(GeometryError::InvalidParameter);
+    }
+    let polygon = sample_curve(outline, 32);
+    crate::validate_simple_polygon(&polygon)?;
+    validate_cut_path(outline, cut_path)?;
+
+    let start = locate_cut_endpoint(outline, cut_path.start)?;
+    let end = locate_cut_endpoint(outline, cut_path.endpoint().ok_or(GeometryError::InvalidParameter)?)?;
+    if cut_path.start.distance(start.point) > endpoint_tolerance
+        || cut_path.endpoint().unwrap().distance(end.point) > endpoint_tolerance
+    {
+        return Err(GeometryError::InvalidParameter);
+    }
+    let count = outline.segments.len();
+    let mut delta = (end.scalar - start.scalar).abs();
+    delta = delta.min(count as f64 - delta);
+    if delta <= 1.0e-5 {
+        return Err(GeometryError::InvalidParameter);
+    }
+
+    // Snap only endpoints; intermediate cut geometry remains unchanged.
+    let cut = path_with_snapped_endpoints(cut_path, start.point, end.point);
+    let fragments = build_boundary_fragments(outline, [start, end]);
+    let route_a = boundary_route(start.scalar, end.scalar, count, &fragments);
+    let route_b = boundary_route(end.scalar, start.scalar, count, &fragments);
+    if route_a.is_empty() || route_b.is_empty()
+        || route_a.len() + route_b.len() != fragments.len()
+    {
+        return Err(GeometryError::InvalidParameter);
+    }
+
+    let mut source_map: Vec<Vec<SourceSegmentFragment>> =
+        (0..count).map(|_| Vec::new()).collect();
+    let mut first_segments = Vec::new();
+    for fragment in &route_a {
+        let new_index = first_segments.len();
+        first_segments.push(fragment.geometry.clone());
+        source_map[fragment.source_segment].push(SourceSegmentFragment {
+            piece_index: 0,
+            new_segment_index: new_index,
+            t_start: fragment.t_start,
+            t_end: fragment.t_end,
+        });
+    }
+    let first_cut_start = first_segments.len();
+    first_segments.extend(reverse_open_curve(&cut).segments);
+    let first_cut_end = first_segments.len();
+
+    let mut second_segments = Vec::new();
+    for fragment in &route_b {
+        let new_index = second_segments.len();
+        second_segments.push(fragment.geometry.clone());
+        source_map[fragment.source_segment].push(SourceSegmentFragment {
+            piece_index: 1,
+            new_segment_index: new_index,
+            t_start: fragment.t_start,
+            t_end: fragment.t_end,
+        });
+    }
+    let second_cut_start = second_segments.len();
+    second_segments.extend(cut.segments.clone());
+    let second_cut_end = second_segments.len();
+
+    let first = Curve2D { start: start.point, segments: first_segments, closed: true };
+    let second = Curve2D { start: end.point, segments: second_segments, closed: true };
+
+    crate::validate_simple_polygon(&sample_curve(&first, 32))?;
+    crate::validate_simple_polygon(&sample_curve(&second, 32))?;
+
+    for mapped in &mut source_map {
+        mapped.sort_by(|a, b| a.t_start.total_cmp(&b.t_start));
+    }
+
+    Ok(CutAndSewResult {
+        first,
+        second,
+        first_cut_segment_range: (first_cut_start, first_cut_end),
+        second_cut_segment_range: (second_cut_start, second_cut_end),
+        source_segment_fragments: source_map,
+    })
+}
