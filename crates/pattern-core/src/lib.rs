@@ -141,12 +141,18 @@ pub enum FoldKind {
     Decorative,
 }
 
-/// Linha interna com parâmetros mecânicos; stiffness é um coeficiente normalizado em [0, 1].
+/// Linha interna com parâmetros mecânicos; stiffness é a fração da rigidez de flexão local.
+fn default_fold_angle() -> f64 { std::f64::consts::FRAC_PI_6 }
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FoldLine {
     pub curve: Curve2D,
     pub kind: FoldKind,
+    /// Fração da rigidez de flexão em [0, 1]; valores baixos facilitam a dobra.
     pub stiffness: f64,
+    /// Ângulo-alvo assinado da dobra, em radianos. Padrão compatível com arquivos antigos: 30°.
+    #[serde(default = "default_fold_angle")]
+    pub angle_radians: f64,
 }
 
 /// Metadados de uma prega. A curva localiza o eixo; depth e angle descrevem sua forma-alvo.
@@ -409,6 +415,22 @@ impl PatternProject {
                 points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite())
             }) || !piece.outline.start.x.is_finite() || !piece.outline.start.y.is_finite() {
                 return Err(format!("O contorno da peça '{}' contém coordenadas não finitas.", piece.name));
+            }
+            for fold in &piece.fold_lines {
+                if !fold.stiffness.is_finite() || !(0.0..=1.0).contains(&fold.stiffness)
+                    || !fold.angle_radians.is_finite()
+                    || !(0.0..=std::f64::consts::PI).contains(&fold.angle_radians)
+                {
+                    return Err(format!("Parâmetros inválidos na linha de dobra do molde '{}'.", piece.name));
+                }
+            }
+            for pleat in &piece.pleats {
+                if !pleat.depth_meters.is_finite() || pleat.depth_meters <= 0.0
+                    || !pleat.angle_radians.is_finite()
+                    || !(0.0..=std::f64::consts::PI).contains(&pleat.angle_radians)
+                {
+                    return Err(format!("Parâmetros inválidos na prega do molde '{}'.", piece.name));
+                }
             }
             let fabric_values = [
                 piece.fabric.density_kg_m2,
