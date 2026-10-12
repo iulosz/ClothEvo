@@ -63,7 +63,15 @@ fn cubic(p0: Point2, p1: Point2, p2: Point2, p3: Point2, t: f64) -> Point2 {
 
 /// Amostra uma curva e preserva o mapeamento entre segmentos da curva original e vértices.
 pub fn sample_curve_with_ranges(curve: &Curve2D, cubic_steps: usize) -> SampledCurve {
-    let steps = cubic_steps.max(1);
+    let cubic_count = curve.segments.iter()
+        .filter(|segment| matches!(segment, CurveSegment::CubicBezier { .. }))
+        .count();
+    let line_count = curve.segments.len().saturating_sub(cubic_count);
+    let extra_budget = MAX_CURVE_SAMPLES.saturating_sub(1 + line_count);
+    let safe_steps = if cubic_count == 0 { 1 } else {
+        (extra_budget / cubic_count).max(1)
+    };
+    let steps = cubic_steps.max(1).min(safe_steps);
     let mut points = vec![curve.start];
     let mut ranges = Vec::with_capacity(curve.segments.len());
     let mut current = curve.start;

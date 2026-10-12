@@ -5,6 +5,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+/// Limite defensivo contra projetos com geometria patológica.
+const MAX_PATTERN_SEGMENTS: usize = 4_096;
+
 pub type PieceId = u64;
 pub type SeamId = u64;
 
@@ -425,18 +428,21 @@ impl PatternProject {
             if !piece.outline.closed || piece.outline.segments.len() < 3 {
                 return Err(format!("O contorno da peça '{}' precisa ser fechado e ter ao menos 3 segmentos.", piece.name));
             }
+            if piece.outline.segments.len() > MAX_PATTERN_SEGMENTS {
+                return Err(format!("O contorno da peça '{}' excede o limite seguro de {} segmentos.", piece.name, MAX_PATTERN_SEGMENTS));
+            }
             if curve_has_non_finite(&piece.outline) {
                 return Err(format!("O contorno da peça '{}' contém coordenadas não finitas.", piece.name));
             }
             if piece.sewing_line.as_ref().is_some_and(|curve| {
-                curve.segments.is_empty() || curve_has_non_finite(curve)
+                curve.segments.is_empty() || curve.segments.len() > MAX_PATTERN_SEGMENTS || curve_has_non_finite(curve)
             }) {
-                return Err(format!("A linha de costura da peça '{}' contém geometria inválida.", piece.name));
+                return Err(format!("A linha de costura da peça '{}' contém geometria inválida ou excede o limite seguro de segmentos.", piece.name));
             }
             if piece.internal_lines.iter().any(|curve| {
-                curve.segments.is_empty() || curve_has_non_finite(curve)
+                curve.segments.is_empty() || curve.segments.len() > MAX_PATTERN_SEGMENTS || curve_has_non_finite(curve)
             }) {
-                return Err(format!("Uma linha interna da peça '{}' contém geometria inválida.", piece.name));
+                return Err(format!("Uma linha interna da peça '{}' contém geometria inválida ou excede o limite seguro de segmentos.", piece.name));
             }
             if piece.grain_line.as_ref().is_some_and(|line| {
                 point_has_non_finite(&line.start) || point_has_non_finite(&line.end)
@@ -466,7 +472,7 @@ impl PatternProject {
                 return Err(format!("Uma anotação da peça '{}' contém valores não finitos.", piece.name));
             }
             for fold in &piece.fold_lines {
-                if fold.curve.segments.is_empty() || curve_has_non_finite(&fold.curve) {
+                if fold.curve.segments.is_empty() || fold.curve.segments.len() > MAX_PATTERN_SEGMENTS || curve_has_non_finite(&fold.curve) {
                     return Err(format!("A linha de dobra da peça '{}' contém geometria inválida.", piece.name));
                 }
                 if !fold.stiffness.is_finite() || !(0.0..=1.0).contains(&fold.stiffness)
@@ -477,7 +483,7 @@ impl PatternProject {
                 }
             }
             for pleat in &piece.pleats {
-                if pleat.axis.segments.is_empty() || curve_has_non_finite(&pleat.axis) {
+                if pleat.axis.segments.is_empty() || pleat.axis.segments.len() > MAX_PATTERN_SEGMENTS || curve_has_non_finite(&pleat.axis) {
                     return Err(format!("O eixo de prega da peça '{}' contém geometria inválida.", piece.name));
                 }
                 if !pleat.depth_meters.is_finite() || pleat.depth_meters <= 0.0
@@ -810,6 +816,21 @@ mod tests {
             intake_meters: 0.1,
         });
         assert!(project.validate().unwrap_err().contains("pence"));
+    }
+
+    #[test]
+    fn validation_rejects_pathological_outline_segment_count() {
+        let mut project = PatternProject::new("Muitos segmentos");
+        let mut piece = PatternPiece::from_polygon(1, "Frente", &[
+            Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
+            Point2::new(1.0, 1.0), Point2::new(0.0, 1.0),
+        ]).unwrap();
+        piece.outline.segments = vec![
+            CurveSegment::Line { to: Point2::new(0.5, 0.5) };
+            MAX_PATTERN_SEGMENTS + 1
+        ];
+        project.pieces.push(piece);
+        assert!(project.validate().unwrap_err().contains("limite seguro"));
     }
 
     #[test]

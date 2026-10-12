@@ -523,6 +523,8 @@ pub fn cut_closed_outline(
     endpoint_tolerance: f64,
 ) -> Result<CutAndSewResult, GeometryError> {
     if !outline.closed || outline.segments.len() < 3
+        || outline.segments.len() > crate::MAX_CURVE_SAMPLES
+        || cut_path.segments.len() > crate::MAX_CURVE_SAMPLES
         || !endpoint_tolerance.is_finite() || endpoint_tolerance <= 0.0
     {
         return Err(GeometryError::InvalidParameter);
@@ -611,6 +613,25 @@ pub fn cut_closed_outline(
 #[cfg(test)]
 mod cut_path_intersection_tests {
     use super::*;
+
+    #[test]
+    fn cut_and_sew_rejects_extreme_segment_counts_before_sampling() {
+        let outline = Curve2D {
+            start: Point2::new(0.0, 0.0),
+            segments: vec![
+                CurveSegment::Line { to: Point2::new(1.0, 0.0) };
+                crate::MAX_CURVE_SAMPLES + 1
+            ],
+            closed: true,
+        };
+        let cut = Curve2D::polyline(&[
+            Point2::new(0.5, 0.0), Point2::new(0.5, 1.0)
+        ], false).unwrap();
+        assert_eq!(
+            cut_closed_outline(&outline, &cut, 0.1),
+            Err(GeometryError::InvalidParameter)
+        );
+    }
 
     #[test]
     fn cut_path_intersection_detects_tangency_and_collinear_overlap() {
