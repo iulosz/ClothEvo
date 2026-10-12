@@ -382,15 +382,23 @@ impl ClothEvoApp {
         }
         ui.horizontal(|ui| {
             let label = if self.playing { "⏸ Pausar" } else { "▶ Continuar" };
-            if ui.button(label).clicked() {
+            if ui.button(label).clicked() && !self.diverged {
                 self.playing = !self.playing;
-                self.diverged = false;
+                self.accumulator = 0.0;
             }
-            if ui.button("⏭ Passo").clicked() {
+            if ui.button("⏭ Avançar 1 quadro").clicked() && !self.diverged {
+                self.playing = false;
+                self.accumulator = 0.0;
                 self.sim.step(FIXED_DT);
+                self.seam_pairs = self.sim.seam_pairs();
+                if !self.sim.is_finite() {
+                    self.playing = false;
+                    self.diverged = true;
+                }
             }
             if ui.button("↺ Reiniciar").clicked() {
                 self.sim.reset();
+                self.playing = false;
                 self.diverged = false;
                 self.accumulator = 0.0;
             }
@@ -426,10 +434,25 @@ impl ClothEvoApp {
 
         // ----- Solver
         ui.separator();
-        ui.strong("Solver");
-        ui.add(egui::Slider::new(&mut p.substeps, 1..=60).text("substeps"));
-        ui.add(egui::Slider::new(&mut p.iterations, 1..=8).text("iterações"));
+        ui.strong("Solver e estabilidade");
+        ui.add(egui::Slider::new(&mut p.substeps, 1..=80).text("substeps / quadro"));
+        ui.add(egui::Slider::new(&mut p.iterations, 1..=12).text("iterações / substep"));
+        ui.checkbox(&mut p.self_collision, "Auto-colisão do tecido");
+        ui.add(egui::Slider::new(&mut p.max_velocity, 1.0..=40.0).text("limite de velocidade (m/s)"));
+        ui.horizontal(|ui| {
+            if ui.button("Equilibrado").clicked() {
+                p.substeps = 20;
+                p.iterations = 2;
+                p.max_velocity = 20.0;
+            }
+            if ui.button("Mais estável").clicked() {
+                p.substeps = 40;
+                p.iterations = 4;
+                p.max_velocity = 12.0;
+            }
+        });
         ui.checkbox(&mut p.parallel, "paralelo (rayon)");
+        ui.weak("Mais substeps melhoram a integração temporal; mais iterações reforçam as restrições por substep. Auto-colisão aumenta o custo, principalmente em malhas densas.");
 
         // ----- Visualização
         ui.separator();
@@ -453,6 +476,29 @@ impl ClothEvoApp {
         ui.colored_label(color, format!("passo: {ms:.2} ms (orçamento {budget:.1} ms a 60 Hz)"));
         ui.label(format!("deformação máx.: {:.1} %", sim.max_strain() * 100.0));
         ui.label(format!("energia cinética: {:.4} J", sim.kinetic_energy()));
+        ui.label(format!("velocidade máxima: {:.2} m/s", sim.max_particle_speed()));
+        if sim.stability_corrections() > 0 {
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 180, 80),
+                format!("Correções de estabilidade no último passo: {}", sim.stability_corrections()),
+            );
+        }
+        let unstable = sim.unstable_particle_count();
+        if unstable > 0 {
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 80, 95),
+                format!("Partículas instáveis / próximas do limite: {unstable}"),
+            );
+        } else {
+            ui.colored_label(egui::Color32::LIGHT_GREEN, "Partículas dentro do limite de estabilidade");
+        }
+        if self.sim.params.self_collision {
+            ui.label(format!(
+                "auto-colisão: {} contatos · penetração máxima {:.2} mm",
+                sim.self_collision_contacts(),
+                sim.self_collision_max_penetration() * 1000.0
+            ));
+        }
         if !self.seam_pairs.is_empty() {
             ui.label(format!("abertura máx. das costuras: {:.1} mm", self.seam_gap_max() * 1000.0));
         }
@@ -866,6 +912,10 @@ impl ClothEvoApp {
                     changed |= ui.add(egui::Slider::new(
                         &mut piece.fabric.thickness_meters, 0.0001..=0.01,
                     ).text("Espessura (m)")).changed();
+                    changed |= ui.add(egui::Slider::new(
+                        &mut piece.fabric.friction_coefficient, 0.0..=1.5,
+                    ).text("Atrito do tecido")).changed();
+                    ui.weak("O atrito do molde escala o atrito global nos contatos corpo-tecido e tecido-tecido.");
                     changed |= ui.add(egui::Slider::new(
                         &mut piece.fabric.particle_distance_meters, 0.01..=0.20,
                     ).text("Distância entre partículas (m)")).changed();
@@ -2653,6 +2703,7 @@ impl ClothEvoApp {
                 shear_n_m: fabric.shear_n_m as f32,
                 bend_nm: fabric.bend_nm as f32,
                 thickness_meters: fabric.thickness_meters as f32,
+                friction_coefficient: fabric.friction_coefficient as f32,
             };
             let handle = builder.add_panel_with_grain_and_material(
                 &panel_mesh,
