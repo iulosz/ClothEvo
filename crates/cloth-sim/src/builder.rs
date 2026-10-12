@@ -208,8 +208,8 @@ impl ClothBuilder {
         pairs.dedup();
         self.seams.push(SeamSpec {
             pairs,
-            edge_a,
-            edge_b,
+            edge_a: edge_a.to_vec(),
+            edge_b: edge_b.to_vec(),
             edge_a_paths: vec![edge_a.to_vec()],
             edge_b_paths: vec![edge_b.to_vec()],
             ease_meters,
