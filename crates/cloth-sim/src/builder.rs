@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use glam::{Vec2, Vec3};
+use pattern_core::{polyline_length_meters, Point2};
 
 use crate::collider::Collider;
 use crate::coloring::{greedy_coloring, group_by_color};
@@ -409,9 +410,11 @@ fn pair_by_arc_length(a: &[u32], b: &[u32], uv: &[Vec2]) -> Vec<(u32, u32)> {
 }
 
 fn chain_length(edge: &[u32], uv: &[Vec2]) -> f32 {
-    edge.windows(2)
-        .map(|pair| (uv[pair[1] as usize] - uv[pair[0] as usize]).length())
-        .sum()
+    let points = edge.iter().map(|&index| {
+        let point = uv[index as usize];
+        Point2::new(point.x as f64, point.y as f64)
+    }).collect::<Vec<_>>();
+    polyline_length_meters(&points) as f32
 }
 
 /// Ajusta os comprimentos de repouso da borda excedente para obter a diferença assinada desejada.
@@ -429,10 +432,12 @@ fn adjust_seam_ease(
     }
 
     let ease = seam.ease_meters;
-    let (target_a, target_b) = if ease >= 0.0 {
-        (len_b + ease, len_b)
+    // O lado que excede a diferença-alvo é sempre reduzido, independentemente do sinal
+    // da folga. Isso evita alongar a borda errada quando a geometria inicial contradiz o alvo.
+    let (target_a, target_b) = if len_a - len_b > ease {
+        ((len_b + ease).max(1.0e-6), len_b)
     } else {
-        (len_a, len_a - ease)
+        (len_a, (len_a - ease).max(1.0e-6))
     };
     let scale_a = (target_a / len_a).clamp(0.05, 20.0);
     let scale_b = (target_b / len_b).clamp(0.05, 20.0);
@@ -474,9 +479,26 @@ mod tests {
         assert!((distance[0].rest - 1.0).abs() < 1e-6);
         assert!((distance[1].rest - 0.5).abs() < 1e-6);
 
-        let zero_ease = SeamSpec { ease_meters: 0.0, ..seam };
+        let zero_ease = SeamSpec { ease_meters: 0.0, ..seam.clone() };
         adjust_seam_ease(&mut distance, &indices, &uv, &zero_ease, &mut HashSet::new());
         assert!((distance[0].rest - 0.5).abs() < 1e-6);
+        assert!((distance[1].rest - 0.5).abs() < 1e-6);
+
+        // Folga negativa também reduz A quando A é a borda excedente.
+        distance[0].rest = 1.0;
+        distance[1].rest = 0.5;
+        let negative_ease = SeamSpec { ease_meters: -0.25, ..seam.clone() };
+        adjust_seam_ease(&mut distance, &indices, &uv, &negative_ease, &mut HashSet::new());
+        assert!((distance[0].rest - 0.25).abs() < 1e-6);
+        assert!((distance[1].rest - 0.5).abs() < 1e-6);
+
+        // Quando B excede a relação desejada, B é reduzida mesmo com folga positiva.
+        distance[0].rest = 0.5;
+        distance[1].rest = 1.0;
+        let positive_ease = SeamSpec { ease_meters: 0.25, ..seam };
+        adjust_seam_ease(&mut distance, &indices, &uv, &positive_ease, &mut HashSet::new());
+        assert!((distance[0].rest - 0.5).abs() < 1e-6);
+        assert!((distance[1].rest - 0.25).abs() < 1e-6);
     }
 
     #[test]
