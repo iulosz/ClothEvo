@@ -2823,6 +2823,15 @@ fn split_project_segment(
     curve.segments[segment_index] = left;
     curve.segments.insert(segment_index + 1, right);
 
+    // Inserir um vértice desloca os índices das âncoras posteriores, inclusive as que estão
+    // fixadas para a montagem 3D.
+    let new_anchor_index = segment_index + 1;
+    for anchor in &mut piece.assembly.pinned_anchors {
+        if *anchor as usize >= new_anchor_index {
+            *anchor += 1;
+        }
+    }
+
     // Atualiza os intervalos de costura que referenciam a curva subdividida.
     for seam in &mut project.seams {
         for edge in [&mut seam.a, &mut seam.b] {
@@ -2942,6 +2951,16 @@ fn delete_project_anchor(
             _ => unreachable!("contornos Bézier foram rejeitados acima"),
         }
         curve.segments.remove(anchor_index);
+    }
+    // O ponto que deixa de existir perde a fixação; os vértices posteriores mudam de índice.
+    {
+        let piece = staged.pieces.iter_mut().find(|piece| piece.id == piece_id).unwrap();
+        piece.assembly.pinned_anchors.retain(|anchor| *anchor as usize != anchor_index);
+        for anchor in &mut piece.assembly.pinned_anchors {
+            if *anchor as usize > anchor_index {
+                *anchor -= 1;
+            }
+        }
     }
     staged.validate()?;
     *project = staged;
@@ -3187,6 +3206,18 @@ mod pattern_editor_tests {
         assert_eq!(curve.start, moved);
         assert_eq!(curve.segments.last().unwrap().endpoint(), moved);
         assert_eq!(outline_anchors(&curve).len(), 4);
+    }
+
+    #[test]
+    fn contour_edits_keep_fixed_anchors_attached_to_the_same_vertices() {
+        let mut project = square_project();
+        project.pieces[0].assembly.pinned_anchors = vec![1, 3];
+        split_project_segment(&mut project, 1, 0, 0.5).unwrap();
+        assert_eq!(project.pieces[0].assembly.pinned_anchors, vec![2, 4]);
+
+        delete_project_anchor(&mut project, 1, 2).unwrap();
+        assert_eq!(project.pieces[0].assembly.pinned_anchors, vec![3]);
+        project.validate().unwrap();
     }
 
     #[test]
