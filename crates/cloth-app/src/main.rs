@@ -1547,7 +1547,7 @@ impl ClothEvoApp {
         self.selected_piece = self.selected_piece.min(self.pattern_project.pieces.len() - 1);
         let id = self.pattern_project.pieces[self.selected_piece].id;
         self.pattern_project.pieces.remove(self.selected_piece);
-        self.pattern_project.seams.retain(|seam| seam.a.piece_id != id && seam.b.piece_id != id);
+        self.pattern_project.seams.retain(|seam| !seam.sides_a.iter().chain(seam.sides_b.iter()).any(|edge| edge.piece_id == id));
         self.pattern_project.symmetry_links.retain(|link| {
             link.piece_a_id != id && link.piece_b_id != id
         });
@@ -1647,18 +1647,23 @@ impl ClothEvoApp {
             axis_x: self.pattern_symmetry_axis_x,
         });
 
-        // Duplicate constraints only when both ends have a known symmetric counterpart.
+        // Replica a costura M:N apenas quando todos os moldes dos dois lados têm contrapartes.
         let original_seams = project.seams.clone();
         let mut next_seam_id = project.seams.iter().map(|seam| seam.id).max().unwrap_or(0) + 1;
         for seam in original_seams {
-            let Some(a_mate) = symmetry_counterpart_id(&project, seam.a.piece_id) else { continue; };
-            let Some(b_mate) = symmetry_counterpart_id(&project, seam.b.piece_id) else { continue; };
-            if a_mate == seam.a.piece_id && b_mate == seam.b.piece_id { continue; }
             let mut mirrored_seam = seam.clone();
+            let mut changed = false;
+            let mut complete = true;
+            for edge in mirrored_seam.sides_a.iter_mut().chain(mirrored_seam.sides_b.iter_mut()) {
+                let Some(mate) = symmetry_counterpart_id(&project, edge.piece_id) else {
+                    complete = false; break;
+                };
+                changed |= mate != edge.piece_id;
+                edge.piece_id = mate;
+            }
+            if !complete || !changed { continue; }
             mirrored_seam.id = next_seam_id;
             mirrored_seam.name = format!("{} (espelho)", seam.name);
-            mirrored_seam.a.piece_id = a_mate;
-            mirrored_seam.b.piece_id = b_mate;
             project.seams.push(mirrored_seam);
             next_seam_id += 1;
         }
@@ -1963,7 +1968,7 @@ impl ClothEvoApp {
         // Remap existing references on both source pieces before replacing them. If a previous
         // seam crosses a segment split by the new cut, reject atomically rather than corrupt it.
         for seam in &mut project.seams {
-            for edge in [&mut seam.a, &mut seam.b] {
+            for edge in seam.sides_a.iter_mut().chain(seam.sides_b.iter_mut()) {
                 let target = if edge.piece_id == first_id {
                     Some((&cut_result, first_id, second_id, sewing_side))
                 } else if let Some((_, mate_source, mate_result, mate_second_id, _)) = &paired_cut {
