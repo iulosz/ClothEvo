@@ -1171,6 +1171,69 @@ impl ClothEvoApp {
             ui.checkbox(&mut self.seam_a_reversed, "Inverter direção da borda A");
             ui.checkbox(&mut self.seam_b_reversed, "Inverter direção da borda B");
 
+            ui.horizontal(|ui| {
+                ui.label("Lado ativo para Shift+clique:");
+                ui.selectable_value(&mut self.seam_active_side_a, true, "A");
+                ui.selectable_value(&mut self.seam_active_side_a, false, "B");
+            });
+            ui.horizontal(|ui| {
+                if ui.button("Adicionar borda atual a A").clicked() {
+                    if let Ok((edge, _)) = self.seam_edges_from_controls() {
+                        self.add_draft_edge_to_side(true, edge);
+                    }
+                }
+                if ui.button("Adicionar borda atual a B").clicked() {
+                    if let Ok((_, edge)) = self.seam_edges_from_controls() {
+                        self.add_draft_edge_to_side(false, edge);
+                    }
+                }
+            });
+            ui.weak("Cada lado é uma cadeia ordenada. Shift+clique em uma borda adiciona-a ao lado ativo.");
+            for is_a in [true, false] {
+                let paths = if is_a { self.seam_sides_a.clone() } else { self.seam_sides_b.clone() };
+                let active = if is_a { self.seam_a_active_path } else { self.seam_b_active_path };
+                let label = if is_a { "Lado A" } else { "Lado B" };
+                ui.collapsing(format!("{label} · {} bordas", paths.len()), |ui| {
+                    for (index, edge) in paths.iter().enumerate() {
+                        let piece_name = self.pattern_project.pieces.iter()
+                            .find(|piece| piece.id == edge.piece_id).map(|piece| piece.name.as_str()).unwrap_or("Peça ausente");
+                        let len_cm = edge_length_meters(&self.pattern_project, edge) * 100.0;
+                        let response = ui.selectable_label(active == index,
+                            format!("{} · {} · segmentos {}–{} ({:.1} cm)",
+                                index + 1, piece_name, edge.start.segment + 1, edge.end.segment + 1, len_cm));
+                        let mut selected_path = false;
+                        ui.horizontal(|ui| {
+                            if response.clicked() { selected_path = true; }
+                            if ui.small_button("↑").clicked() && index > 0 {
+                                let target = if is_a { &mut self.seam_sides_a } else { &mut self.seam_sides_b };
+                                target.swap(index, index - 1);
+                                if is_a { self.seam_a_active_path = index - 1; } else { self.seam_b_active_path = index - 1; }
+                                selected_path = true;
+                            }
+                            if ui.small_button("↓").clicked() && index + 1 < paths.len() {
+                                let target = if is_a { &mut self.seam_sides_a } else { &mut self.seam_sides_b };
+                                target.swap(index, index + 1);
+                                if is_a { self.seam_a_active_path = index + 1; } else { self.seam_b_active_path = index + 1; }
+                                selected_path = true;
+                            }
+                            if ui.small_button("Remover").clicked() {
+                                let target = if is_a { &mut self.seam_sides_a } else { &mut self.seam_sides_b };
+                                target.remove(index);
+                                if is_a { self.seam_a_active_path = self.seam_a_active_path.min(target.len().saturating_sub(1)); }
+                                else { self.seam_b_active_path = self.seam_b_active_path.min(target.len().saturating_sub(1)); }
+                                selected_path = true;
+                            }
+                        });
+                        if selected_path {
+                            if is_a { self.seam_a_active_path = index.min(self.seam_sides_a.len().saturating_sub(1)); }
+                            else { self.seam_b_active_path = index.min(self.seam_sides_b.len().saturating_sub(1)); }
+                            self.seam_active_side_a = is_a;
+                            self.load_active_chain_edge_to_controls(is_a);
+                        }
+                    }
+                });
+            }
+
             let piece_a = &self.pattern_project.pieces[self.seam_a_piece];
             let piece_b = &self.pattern_project.pieces[self.seam_b_piece];
             let edge_a = EdgePath {
@@ -1197,10 +1260,12 @@ impl ClothEvoApp {
                 },
                 reversed: self.seam_b_reversed,
             };
-            let length_a = edge_length_meters(&self.pattern_project, &edge_a);
-            let length_b = edge_length_meters(&self.pattern_project, &edge_b);
+            let (display_a, display_b) = self.current_seam_sides_with_draft().unwrap_or((vec![edge_a.clone()], vec![edge_b.clone()]));
+            let length_a = display_a.iter().map(|edge| edge_length_meters(&self.pattern_project, edge)).sum::<f64>();
+            let length_b = display_b.iter().map(|edge| edge_length_meters(&self.pattern_project, edge)).sum::<f64>();
             let difference = length_a - length_b;
-            ui.label(format!("Comprimento A: {:.1} cm · B: {:.1} cm", length_a * 100.0, length_b * 100.0));
+            ui.label(format!("A: {} bordas ({:.1} cm) · B: {} bordas ({:.1} cm)",
+                display_a.len(), length_a * 100.0, display_b.len(), length_b * 100.0));
             ui.label(format!("Diferença geométrica A − B: {:+.1} cm · alvo: {:+.1} cm",
                 difference * 100.0, self.seam_ease_m * 100.0));
             let shortest = length_a.min(length_b);
