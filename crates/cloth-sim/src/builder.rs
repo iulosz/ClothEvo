@@ -168,14 +168,7 @@ impl ClothBuilder {
         let (edge_b, tb) = flatten_path_chain(paths_b, &self.uv);
         if edge_a.len() < 2 || edge_b.len() < 2 { return; }
 
-        let mut pairs = pair_by_arc_progress(&edge_a, &ta, &edge_b, &tb);
-        for &(marker_a, marker_b) in notch_markers {
-            let Some(&a) = edge_a.get(nearest_arc_index(marker_a, &ta)) else { continue; };
-            let Some(&b) = edge_b.get(nearest_arc_index(marker_b, &tb)) else { continue; };
-            if a != b { pairs.push((a, b)); }
-        }
-        pairs.sort_unstable();
-        pairs.dedup();
+        let pairs = pair_by_arc_between_anchors(&edge_a, &ta, &edge_b, &tb, notch_markers);
         self.seams.push(SeamSpec {
             pairs,
             edge_a,
@@ -409,6 +402,52 @@ fn flatten_path_chain(paths: &[Vec<u32>], uv: &[Vec2]) -> (Vec<u32>, Vec<f32>) {
         prefix += length;
     }
     (edge, progress)
+}
+
+fn pair_by_arc_between_anchors(
+    a: &[u32],
+    ta: &[f32],
+    b: &[u32],
+    tb: &[f32],
+    notch_markers: &[(f32, f32)],
+) -> Vec<(u32, u32)> {
+    if a.len() < 2 || b.len() < 2 || ta.len() != a.len() || tb.len() != b.len() {
+        return Vec::new();
+    }
+    let mut anchors = vec![(0.0_f32, 0.0_f32)];
+    anchors.extend(notch_markers.iter().copied()
+        .filter(|(pa, pb)| pa.is_finite() && pb.is_finite()
+            && *pa > 0.0 && *pa < 1.0 && *pb > 0.0 && *pb < 1.0));
+    anchors.push((1.0, 1.0));
+    anchors.sort_by(|left, right| left.0.partial_cmp(&right.0)
+        .unwrap_or(std::cmp::Ordering::Equal));
+    anchors.dedup_by(|left, right| (left.0-right.0).abs() <= 1.0e-6
+        && (left.1-right.1).abs() <= 1.0e-6);
+
+    let mut pairs = Vec::new();
+    for &(pa, pb) in &anchors {
+        pairs.push((a[nearest_arc_index(pa, ta)], b[nearest_arc_index(pb, tb)]));
+    }
+    for window in anchors.windows(2) {
+        let (a0, b0) = window[0];
+        let (a1, b1) = window[1];
+        if a1 - a0 <= 1.0e-7 || b1 - b0 <= 1.0e-7 { continue; }
+        for (i, &progress_a) in ta.iter().enumerate() {
+            if progress_a < a0 - 1.0e-6 || progress_a > a1 + 1.0e-6 { continue; }
+            let t = ((progress_a - a0) / (a1 - a0)).clamp(0.0, 1.0);
+            let progress_b = b0 + (b1 - b0) * t;
+            pairs.push((a[i], b[nearest_arc_index(progress_b, tb)]));
+        }
+        for (i, &progress_b) in tb.iter().enumerate() {
+            if progress_b < b0 - 1.0e-6 || progress_b > b1 + 1.0e-6 { continue; }
+            let t = ((progress_b - b0) / (b1 - b0)).clamp(0.0, 1.0);
+            let progress_a = a0 + (a1 - a0) * t;
+            pairs.push((a[nearest_arc_index(progress_a, ta)], b[i]));
+        }
+    }
+    pairs.sort_unstable();
+    pairs.dedup();
+    pairs
 }
 
 fn pair_by_arc_progress(a: &[u32], ta: &[f32], b: &[u32], tb: &[f32]) -> Vec<(u32, u32)> {
