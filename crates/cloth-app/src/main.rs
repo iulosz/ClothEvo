@@ -32,6 +32,30 @@ const PATTERN_PIXELS_PER_METER: f32 = 360.0;
 const PATTERN_SIM_BODY_RADIUS: f32 = 0.14;
 const PATTERN_SIM_PERTURBATION: f32 = 0.001;
 const PATTERN_SIM_LAYER_SPACING: f32 = 0.003;
+const GIZMO_MOVE_LENGTH: f32 = 0.42;
+const GIZMO_SCALE_LENGTH: f32 = 0.70;
+const GIZMO_ROTATE_RADIUS: f32 = 0.34;
+
+const T_POSE_REFERENCE: &[(f64, f64)] = &[
+    (-0.029,1.720),(-0.067,1.698),(-0.097,1.655),(-0.097,1.595),(-0.072,1.532),
+    (-0.064,1.532),(-0.048,1.502),(-0.048,1.478),(-0.069,1.445),(-0.102,1.426),
+    (-0.197,1.423),(-0.293,1.399),(-0.480,1.396),(-0.657,1.377),(-0.793,1.350),
+    (-0.796,1.342),(-0.750,1.339),(-0.731,1.328),(-0.657,1.334),(-0.622,1.344),
+    (-0.486,1.328),(-0.184,1.328),(-0.156,1.306),(-0.143,1.274),(-0.113,1.108),
+    (-0.159,0.963),(-0.178,0.868),(-0.178,0.795),(-0.148,0.593),(-0.148,0.490),
+    (-0.170,0.386),(-0.170,0.321),(-0.146,0.147),(-0.154,0.117),(-0.151,0.079),
+    (-0.178,0.041),(-0.186,0.014),(-0.159,0.003),(-0.102,0.003),(-0.091,0.016),
+    (-0.091,0.196),(-0.061,0.316),(-0.061,0.441),(-0.039,0.514),(-0.034,0.661),
+    (-0.010,0.797),(-0.012,0.827),(0.010,0.830),(0.034,0.645),(0.037,0.523),
+    (0.059,0.449),(0.059,0.316),(0.086,0.199),(0.080,0.016),(0.094,0.003),
+    (0.151,0.003),(0.176,0.011),(0.176,0.033),(0.151,0.063),(0.143,0.087),
+    (0.148,0.120),(0.140,0.158),(0.167,0.329),(0.167,0.384),(0.146,0.498),
+    (0.146,0.596),(0.176,0.781),(0.178,0.846),(0.156,0.966),(0.113,1.097),
+    (0.118,1.176),(0.146,1.290),(0.178,1.328),(0.491,1.328),(0.592,1.342),
+    (0.728,1.328),(0.739,1.336),(0.791,1.339),(0.793,1.347),(0.633,1.380),
+    (0.475,1.396),(0.320,1.396),(0.192,1.423),(0.102,1.426),(0.059,1.459),
+    (0.048,1.494),(0.094,1.587),(0.083,1.660),(0.045,1.712),
+];
 
 /// Raio de montagem por painel, incluindo espessura, ruído inicial e folga entre camadas.
 fn pattern_sim_shell_radius(piece_index: usize, thickness: f32) -> f32 {
@@ -81,12 +105,40 @@ impl WorkspaceMode {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct PanelPlacementRange {
     piece_id: u64,
     first: usize,
     end: usize,
     boundary_count: usize,
+    base_rotation: Quat,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GizmoMode {
+    Move,
+    Rotate,
+    Scale,
+    Transform,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GizmoAction {
+    Move,
+    Rotate,
+    Scale,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PlacementGizmoDrag {
+    piece_id: u64,
+    axis: usize,
+    action: GizmoAction,
+    axis_world: Vec3,
+    screen_axis: egui::Vec2,
+    screen_center: egui::Pos2,
+    pixels_per_meter: f32,
+    last_pointer: egui::Pos2,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,6 +227,8 @@ struct ClothEvoApp {
     selected_placement_piece: Option<u64>,
     placement_drag_piece: Option<u64>,
     placement_drag_before: Option<PatternEditorSnapshot>,
+    placement_gizmo_drag: Option<PlacementGizmoDrag>,
+    gizmo_mode: GizmoMode,
     show_avatar_guide: bool,
     pattern_tool: PatternTool,
     pattern_zoom: f32,
@@ -290,6 +344,8 @@ impl ClothEvoApp {
             selected_placement_piece: None,
             placement_drag_piece: None,
             placement_drag_before: None,
+            placement_gizmo_drag: None,
+            gizmo_mode: GizmoMode::Move,
             show_avatar_guide: true,
             pattern_tool: PatternTool::Draw,
             pattern_zoom: PATTERN_PIXELS_PER_METER,
@@ -591,7 +647,21 @@ impl ClothEvoApp {
     fn placement_controls(&mut self, ui: &mut egui::Ui) {
         ui.heading("Posicionamento 3D");
         ui.label("Organize os moldes ao redor do manequim antes de iniciar a simulação.");
-        ui.weak("Arraste um painel com o botão esquerdo. Arraste fora dos painéis para orbitar; botão direito/meio move a câmera; roda aproxima.");
+        ui.label("Selecione um gizmo e arraste o eixo/anel/quadrado diretamente na viewport.");
+        ui.horizontal_wrapped(|ui| {
+            for (mode, label) in [
+                (GizmoMode::Move, "↔ Mover"),
+                (GizmoMode::Rotate, "⟳ Girar"),
+                (GizmoMode::Scale, "□ Escalar"),
+                (GizmoMode::Transform, "◇ Transformar"),
+            ] {
+                if ui.selectable_label(self.gizmo_mode == mode, label).clicked() {
+                    self.gizmo_mode = mode;
+                    self.placement_gizmo_drag = None;
+                }
+            }
+        });
+        ui.weak("Mover: setas X/Y/Z · Girar: anéis · Escalar: quadrados nos eixos · Transformar: controles combinados.");
         ui.horizontal(|ui| {
             if ui.button("Voltar aos moldes 2D").clicked() {
                 self.workspace = WorkspaceMode::Pattern;
@@ -636,65 +706,27 @@ impl ClothEvoApp {
 
         let selected_transform = self.selected_placement_piece
             .and_then(|id| self.pattern_project.pieces.iter().find(|piece| piece.id == id))
-            .map(|piece| (piece.name.clone(), piece.assembly.translation_meters, piece.assembly.rotation_degrees));
-        if let Some((name, translation, rotation)) = selected_transform {
+            .map(|piece| (
+                piece.name.clone(),
+                piece.assembly.translation_meters,
+                piece.assembly.rotation_degrees,
+                piece.assembly.scale,
+            ));
+        if let Some((name, translation, rotation, scale)) = selected_transform {
             ui.separator();
             ui.strong(format!("Transformação: {name}"));
             ui.label(format!(
-                "Posição adicional: X {:+.1} cm · Y {:+.1} cm · Z {:+.1} cm",
+                "Posição: X {:+.1} cm · Y {:+.1} cm · Z {:+.1} cm",
                 translation[0] * 100.0, translation[1] * 100.0, translation[2] * 100.0
             ));
             ui.label(format!(
-                "Rotação: X {:+.0}° · Y {:+.0}° · Z {:+.0}°",
+                "Rotação: X {:+.1}° · Y {:+.1}° · Z {:+.1}°",
                 rotation[0], rotation[1], rotation[2]
             ));
-            ui.separator();
-            ui.strong("Mover 5 cm");
-            let mut movement: Option<Vec3> = None;
-            ui.horizontal(|ui| {
-                ui.label("X · esquerda/direita");
-                if ui.button("−").clicked() { movement = Some(-Vec3::X * 0.05); }
-                if ui.button("+").clicked() { movement = Some(Vec3::X * 0.05); }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Y · baixo/alto");
-                if ui.button("− ").clicked() { movement = Some(-Vec3::Y * 0.05); }
-                if ui.button("+ ").clicked() { movement = Some(Vec3::Y * 0.05); }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Z · frente/trás");
-                if ui.button("−  ").clicked() { movement = Some(-Vec3::Z * 0.05); }
-                if ui.button("+  ").clicked() { movement = Some(Vec3::Z * 0.05); }
-            });
-            if let Some(delta) = movement {
-                let before = self.editor_snapshot();
-                if let Some(id) = self.selected_placement_piece {
-                    self.apply_placement_translation(id, delta);
-                }
-                self.remember_pattern_change(before);
-            }
-
-            ui.separator();
-            ui.strong("Girar 15°");
-            let mut turn: Option<(usize, f64)> = None;
-            ui.horizontal(|ui| {
-                ui.label("X");
-                if ui.button("−15° X").clicked() { turn = Some((0, -15.0)); }
-                if ui.button("+15° X").clicked() { turn = Some((0, 15.0)); }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Y");
-                if ui.button("−15° Y").clicked() { turn = Some((1, -15.0)); }
-                if ui.button("+15° Y").clicked() { turn = Some((1, 15.0)); }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Z");
-                if ui.button("−15° Z").clicked() { turn = Some((2, -15.0)); }
-                if ui.button("+15° Z").clicked() { turn = Some((2, 15.0)); }
-            });
-            if let Some((axis, degrees)) = turn {
-                self.rotate_selected_placement(axis, degrees);
-            }
+            ui.label(format!(
+                "Escala local: X {:.2}× · Y {:.2}× · Z {:.2}×",
+                scale[0], scale[1], scale[2]
+            ));
             if ui.button("Restaurar transformação deste molde").clicked() {
                 self.reset_selected_placement_transform();
             }
@@ -765,6 +797,7 @@ impl ClothEvoApp {
         if let Some(piece) = self.pattern_project.pieces.iter_mut().find(|piece| piece.id == id) {
             piece.assembly.translation_meters = [0.0; 3];
             piece.assembly.rotation_degrees = [0.0; 3];
+            piece.assembly.scale = [1.0; 3];
         }
         let selected = self.selected_placement_piece;
         if let Err(error) = self.start_pattern_simulation() {
@@ -2509,48 +2542,22 @@ impl ClothEvoApp {
             egui::Stroke::new(1.0, egui::Color32::from_gray(88)),
         );
 
-        // Guia anatômico esquemático em T-pose, desenhado em coordenadas reais (metros).
-        // A baixa opacidade deixa os moldes legíveis e permite traçar peças sobre a silhueta.
+        // Silhueta vetorial traçada a partir da imagem T-POSE fornecida; altura total de 1,72 m.
+        // O path não convexo preserva o vão entre as pernas e os recortes dos braços.
         if self.show_avatar_guide {
-            // Centraliza a silhueta no canvas, mantendo a escala do modelo em metros.
-            let guide = |x: f64, y: f64| to_screen(PatternPoint2::new(x, y - 0.80));
-            let fill = egui::Color32::from_rgba_unmultiplied(72, 143, 184, 30);
-            let outline = egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(115, 184, 218, 115));
-            let polygon = |points: &[(f64, f64)]| {
-                painter.add(egui::Shape::convex_polygon(
-                    points.iter().map(|&(x, y)| guide(x, y)).collect(),
-                    fill,
-                    outline,
-                ));
-            };
-            polygon(&[
-                (-0.19, 1.43), (-0.115, 1.31), (-0.12, 1.00), (-0.16, 0.76),
-                (-0.17, 0.66), (-0.12, 0.59), (0.12, 0.59), (0.17, 0.66),
-                (0.16, 0.76), (0.12, 1.00), (0.115, 1.31), (0.19, 1.43),
-            ]);
-            polygon(&[
-                (-0.18, 1.42), (-0.25, 1.39), (-0.48, 1.385), (-0.72, 1.37),
-                (-0.78, 1.345), (-0.77, 1.30), (-0.70, 1.29), (-0.47, 1.315),
-                (-0.25, 1.32), (-0.17, 1.34),
-            ]);
-            polygon(&[
-                (0.18, 1.42), (0.25, 1.39), (0.48, 1.385), (0.72, 1.37),
-                (0.78, 1.345), (0.77, 1.30), (0.70, 1.29), (0.47, 1.315),
-                (0.25, 1.32), (0.17, 1.34),
-            ]);
-            polygon(&[
-                (-0.12, 0.65), (-0.015, 0.62), (-0.035, 0.35), (-0.075, 0.08),
-                (-0.14, 0.08), (-0.13, 0.32),
-            ]);
-            polygon(&[
-                (0.12, 0.65), (0.015, 0.62), (0.035, 0.35), (0.075, 0.08),
-                (0.14, 0.08), (0.13, 0.32),
-            ]);
-            painter.circle_filled(guide(0.0, 1.60), (0.085 * scale).clamp(5.0, 34.0), fill);
-            painter.circle_stroke(guide(0.0, 1.60), (0.085 * scale).clamp(5.0, 34.0), outline);
-            painter.line_segment([guide(-0.20, 1.41), guide(0.20, 1.41)], outline);
+            let points = T_POSE_REFERENCE.iter()
+                .map(|&(x, y)| to_screen(PatternPoint2::new(x, y - 0.80)))
+                .collect::<Vec<_>>();
+            let fill = egui::Color32::from_rgba_unmultiplied(72, 143, 184, 42);
+            let outline = egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(115, 184, 218, 100));
+            painter.add(egui::Shape::Path(egui::epaint::PathShape {
+                points,
+                closed: true,
+                fill,
+                stroke: outline.into(),
+            }));
             painter.text(
-                guide(0.0, 1.79),
+                to_screen(PatternPoint2::new(0.0, 0.99)),
                 egui::Align2::CENTER_CENTER,
                 "REFERÊNCIA T-POSE · 1,72 m",
                 egui::FontId::proportional(10.0),
@@ -3112,6 +3119,7 @@ impl ClothEvoApp {
         self.workspace = WorkspaceMode::Placement;
         self.placement_drag_piece = None;
         self.placement_drag_before = None;
+        self.placement_gizmo_drag = None;
         self.selected_placement_piece = previous_selection
             .filter(|id| self.placement_ranges.iter().any(|range| range.piece_id == *id))
             .or_else(|| self.placement_ranges.first().map(|range| range.piece_id));
