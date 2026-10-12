@@ -524,6 +524,20 @@ mod tests {
     }
 
     #[test]
+    fn synchronized_sewing_uses_paired_indices_not_nearest_arc_neighbours() {
+        let uv = vec![
+            Vec2::new(0.0, 0.0), Vec2::new(0.0, 0.25), Vec2::new(0.0, 1.0),
+            Vec2::new(1.0, 0.0), Vec2::new(1.0, 0.75), Vec2::new(1.0, 1.0),
+        ];
+        let mut builder = ClothBuilder::new();
+        builder.uv = uv;
+        let a = [0u32, 1, 2];
+        let b = [3u32, 4, 5];
+        builder.sew_synchronized_with_markers(&a, &b, 0.0, &[]);
+        assert_eq!(builder.seams[0].pairs, vec![(0, 3), (1, 4), (2, 5)]);
+    }
+
+    #[test]
     fn arc_length_pairing_matches_equal_edges_one_to_one() {
         let uv: Vec<Vec2> = (0..4)
             .map(|k| Vec2::new(0.0, k as f32))
