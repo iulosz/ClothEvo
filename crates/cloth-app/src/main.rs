@@ -15,8 +15,8 @@ use cloth_sim::{
 use eframe::{egui, egui_wgpu};
 use glam::{EulerRot, Quat, Vec2, Vec3};
 use pattern_core::{
-    AssemblyTransform, BoundaryCurve, Curve2D, CurveSegment, EdgeRef, FabricProperties,
-    FoldKind, FoldLine, GrainLine, PatternPiece, PatternProject, Pleat,
+    BoundaryCurve, Curve2D, CurveSegment, EdgeRef, FoldKind, FoldLine, GrainLine,
+    PatternPiece, PatternProject, Pleat,
     Point2 as PatternPoint2, SeamDefinition, SymmetryLink,
 };
 use pattern_geom::{
@@ -2120,29 +2120,44 @@ impl ClothEvoApp {
             return Err("O projeto não contém peças.".into());
         }
 
-        // Prepara as malhas antes de posicionar os painéis para preservar o layout relativo
-        // que o usuário desenhou no editor 2D.
+        // Cada molde usa a sua própria distância entre partículas. As coordenadas da malha
+        // são recentradas por peça, para que a transformação 3D gire em torno do centro do painel.
         let mut prepared = Vec::with_capacity(self.pattern_project.pieces.len());
         for piece in &self.pattern_project.pieces {
+            let particle_distance = piece.fabric.particle_distance_meters;
+            if !particle_distance.is_finite() || particle_distance <= 0.0 {
+                return Err(format!("Distância entre partículas inválida em '{}'.", piece.name));
+            }
             let sampled = sample_curve_with_ranges(&piece.outline, 8);
             validate_simple_polygon(&sampled.points)
                 .map_err(|e| format!("Contorno inválido em '{}': {e}", piece.name))?;
-            let mesh = triangulate_outline(&sampled.points, self.pattern_spacing)
+            let mesh = triangulate_outline(&sampled.points, particle_distance)
                 .map_err(|e| format!("Não foi possível triangular '{}': {e}", piece.name))?;
             if mesh.boundary_vertex_count != sampled.points.len() {
                 return Err(format!("Mapeamento de contorno inválido na peça '{}'.", piece.name));
             }
-            prepared.push((piece.id, sampled.segment_vertex_ranges, mesh));
+            let grain = piece.grain_line.as_ref().map(|line| {
+                Vec2::new((line.end.x - line.start.x) as f32, (line.end.y - line.start.y) as f32)
+            }).unwrap_or(Vec2::Y);
+            prepared.push((
+                piece.id,
+                sampled.segment_vertex_ranges,
+                mesh,
+                piece.fabric.clone(),
+                piece.assembly.clone(),
+                grain,
+                piece.name.clone(),
+            ));
         }
 
         let min_x = prepared.iter()
-            .flat_map(|(_, _, mesh)| mesh.vertices.iter().map(|p| p.x))
+            .flat_map(|(_, _, mesh, _, _, _, _)| mesh.vertices.iter().map(|p| p.x))
             .fold(f64::INFINITY, f64::min);
         let max_x = prepared.iter()
-            .flat_map(|(_, _, mesh)| mesh.vertices.iter().map(|p| p.x))
+            .flat_map(|(_, _, mesh, _, _, _, _)| mesh.vertices.iter().map(|p| p.x))
             .fold(f64::NEG_INFINITY, f64::max);
         let min_y = prepared.iter()
-            .flat_map(|(_, _, mesh)| mesh.vertices.iter().map(|p| p.y))
+            .flat_map(|(_, _, mesh, _, _, _, _)| mesh.vertices.iter().map(|p| p.y))
             .fold(f64::INFINITY, f64::min);
 
         let mut builder = ClothBuilder::new();
@@ -2164,21 +2179,65 @@ impl ClothEvoApp {
         let origin_x = (-0.5 * (min_x + max_x)) as f32;
         let origin_y = (0.9 - min_y) as f32;
 
-        for (piece_index, (id, ranges, mesh)) in prepared.into_iter().enumerate() {
-            // Mantém as coordenadas relativas do molde no plano XY. Os painéis ficam tangentes
-            // ao lado frontal do colisor corporal, com folga para espessura e ruído inicial.
-            // Camadas anteriores foram centradas em Z=0 e começavam atravessando o cilindro;
-            // a correção de colisão em posições se convertia em velocidades enormes no primeiro frame.
+        for (piece_index, (id, ranges, mesh, fabric, assembly, grain, name)) in
+            prepared.into_iter().enumerate()
+        {
+            let mesh_min_x = mesh.vertices.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+            let mesh_max_x = mesh.vertices.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+            let mesh_min_y = mesh.vertices.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+            let mesh_max_y = mesh.vertices.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
+            let center_x = (mesh_min_x + mesh_max_x) * 0.5;
+            let center_y = (mesh_min_y + mesh_max_y) * 0.5;
+
             let uv = mesh.vertices.iter()
-                .map(|p| Vec2::new(p.x as f32, p.y as f32))
+                .map(|p| Vec2::new((p.x - center_x) as f32, (p.y - center_y) as f32))
                 .collect();
             let panel_mesh = PanelMesh { uv, triangles: mesh.triangles };
-            let z = pattern_sim_layer_z(piece_index, self.sim.params.thickness);
-            let handle = builder.add_panel_with_grain(
-                &panel_mesh,
-                Placement::new(Vec3::new(origin_x, origin_y, z), Quat::IDENTITY),
-                Vec2::Y,
+            let z = pattern_sim_layer_z(piece_index, fabric.thickness_meters as f32);
+            let translation = Vec3::new(
+                origin_x + center_x as f32 + assembly.translation_meters[0] as f32,
+                origin_y + center_y as f32 + assembly.translation_meters[1] as f32,
+                z + assembly.translation_meters[2] as f32,
             );
+            let rotation = Quat::from_euler(
+                EulerRot::XYZ,
+                assembly.rotation_degrees[0].to_radians() as f32,
+                assembly.rotation_degrees[1].to_radians() as f32,
+                assembly.rotation_degrees[2].to_radians() as f32,
+            );
+            let material = PanelMaterial {
+                density_kg_m2: fabric.density_kg_m2 as f32,
+                stretch_warp_n_m: fabric.stretch_warp_n_m as f32,
+                stretch_weft_n_m: fabric.stretch_weft_n_m as f32,
+                shear_n_m: fabric.shear_n_m as f32,
+                bend_nm: fabric.bend_nm as f32,
+                thickness_meters: fabric.thickness_meters as f32,
+            };
+            let handle = builder.add_panel_with_grain_and_material(
+                &panel_mesh,
+                Placement::new(translation, rotation),
+                grain,
+                material,
+            ).map_err(|error| format!("Material inválido em '{}': {error}", name))?;
+
+            // Âncoras de contorno: 0 é o início da curva; as demais correspondem ao fim do
+            // segmento anterior. Os índices são os mesmos que o editor exibe ao selecionar nós.
+            for anchor in &assembly.pinned_anchors {
+                let anchor_index = *anchor as usize;
+                if anchor_index >= ranges.len().saturating_sub(1) {
+                    return Err(format!(
+                        "O vértice fixado {} não existe no contorno de '{}'.",
+                        anchor_index + 1, name
+                    ));
+                }
+                let local_index = if anchor_index == 0 {
+                    0
+                } else {
+                    ranges[anchor_index - 1].1 % mesh.boundary_vertex_count
+                };
+                builder.pin(handle.global(local_index as u32));
+            }
+
             infos.push(PieceBuildInfo {
                 id,
                 handle,
@@ -2189,7 +2248,10 @@ impl ClothEvoApp {
 
         for seam in &self.pattern_project.seams {
             if seam.a.curve != BoundaryCurve::Outline || seam.b.curve != BoundaryCurve::Outline {
-                return Err(format!("A costura '{}' usa uma linha de costura interna; a simulação atual suporta bordas do contorno.", seam.name));
+                return Err(format!(
+                    "A costura '{}' usa uma linha de costura interna; a simulação atual suporta bordas do contorno.",
+                    seam.name
+                ));
             }
             let info_a = infos.iter().find(|info| info.id == seam.a.piece_id)
                 .ok_or_else(|| format!("Peça A ausente na costura '{}'.", seam.name))?;
@@ -2202,6 +2264,8 @@ impl ClothEvoApp {
             builder.sew(&globals_a, &globals_b);
         }
 
+        // A simulação mantém o espaçamento real de cada molde; o ruído inicial é menor que
+        // a folga aplicada contra o corpo para evitar penetração artificial no primeiro frame.
         builder.perturb(PATTERN_SIM_PERTURBATION);
         self.sim = builder.build(self.sim.params.clone());
         self.seam_pairs = self.sim.seam_pairs();
@@ -2211,10 +2275,17 @@ impl ClothEvoApp {
         self.using_pattern_sim = true;
         self.workspace = WorkspaceMode::Simulation;
         self.upload_scene();
+        let pinned = self.pattern_project.pieces.iter()
+            .map(|piece| piece.assembly.pinned_anchors.len())
+            .sum::<usize>();
+        self.pattern_message = format!(
+            "Montagem 3D pronta: {} moldes, {} costuras e {} âncoras fixadas. Materiais e resolução aplicados por molde.",
+            piece_count, self.pattern_project.seams.len(), pinned
+        );
         Ok(())
     }
 
-    fn viewport(&mut self, ui: &mut egui::Ui) {
+        fn viewport(&mut self, ui: &mut egui::Ui) {
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
 
