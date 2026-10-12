@@ -216,3 +216,18 @@ Na viewport de simulação, ajuste **substeps por quadro** e **iterações por s
 O atrito da seção **Física e montagem 3D por molde** é configurável por tecido e afeta o contato com colisores e outras partes do pano. Os controles globais de atrito e espessura continuam atuando como multiplicadores. As métricas mostram velocidade máxima, deslocamento do último substep, partículas acima do limiar de velocidade e aberturas críticas nas costuras.
 
 Os comandos **Pausar**, **Passo único** e **Reiniciar** são independentes: o passo único pausa antes de avançar exatamente um passo fixo; reiniciar restaura o estado de colocação e mantém a simulação pausada.
+
+
+## Posicionamento 3D pré-simulação
+
+O Pattern Studio inclui uma referência anatômica esquemática em T-pose, desenhada como overlay no canvas 2D e ativável pela opção **Guia anatômico T-Pose**. A silhueta usa altura de referência de 1,72 m para ajudar a comparar as proporções dos moldes; ela é uma guia visual, não um avatar de fabricação.
+
+Use **Posicionar moldes na cena 3D** para gerar uma prévia dos painéis em torno do manequim sem iniciar automaticamente a física. Na viewport:
+
+- Clique em um painel para selecioná-lo; o contorno selecionado fica destacado.
+- Arraste o painel com o botão esquerdo para movê-lo no plano da câmera.
+- Arraste fora dos painéis com o botão esquerdo para orbitar; botão direito ou do meio move a câmera; a roda controla o zoom.
+- O painel lateral também oferece deslocamentos de 5 cm por eixo, rotações de 15° e restauração da transformação do molde selecionado.
+- Clique em **Iniciar simulação de tecido** quando terminar o posicionamento.
+
+As translações feitas por arraste atualizam a transformação do molde no projeto e o estado de repouso do solver, portanto permanecem após **Reiniciar** e ao salvar o projeto. A montagem mantém o limite atual de costuras físicas às bordas dos contornos; costuras internas e colisão robusta entre triângulos continuam sendo etapas futuras.
