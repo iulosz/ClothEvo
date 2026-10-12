@@ -576,6 +576,8 @@ mod tests {
             "darts":[],"notches":[],"holes":[],"annotations":[]}],"seams":[]}"#;
         let project = PatternProject::from_json(json).unwrap();
         assert_eq!(project.pieces[0].assembly, AssemblyTransform::default());
+        // Novos parâmetros físicos de versões posteriores assumem seus defaults em projetos legados.
+        assert_eq!(project.pieces[0].fabric.friction_coefficient, 0.4);
     }
 
     #[test]
@@ -587,6 +589,19 @@ mod tests {
         let project = PatternProject::from_json(json).unwrap();
         assert!(project.symmetry_links.is_empty());
         assert_eq!(project.avatar, AvatarDimensions::default());
+    }
+
+    #[test]
+    fn zero_fabric_friction_is_valid_but_negative_friction_is_rejected() {
+        let mut project = PatternProject::new("Atrito");
+        project.pieces.push(PatternPiece::from_polygon(1, "A", &[
+            Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
+            Point2::new(1.0, 1.0), Point2::new(0.0, 1.0),
+        ]).unwrap());
+        project.pieces[0].fabric.friction_coefficient = 0.0;
+        assert!(project.validate().is_ok());
+        project.pieces[0].fabric.friction_coefficient = -0.01;
+        assert!(project.validate().is_err());
     }
 
     #[test]
