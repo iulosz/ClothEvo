@@ -592,7 +592,8 @@ mod tests {
         project.pieces[0].notches[0].t = f64::NAN;
         assert!(project.validate().is_err());
         project.pieces[0].notches[0].t = 0.5;
-        project.pieces[0].notches.push(project.pieces[0].notches[0].clone());
+        let duplicate = project.pieces[0].notches[0].clone();
+        project.pieces[0].notches.push(duplicate);
         assert!(project.validate().is_err());
     }
 
