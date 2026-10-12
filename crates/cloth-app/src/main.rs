@@ -1581,6 +1581,9 @@ impl ClothEvoApp {
             if ui.button("Criar dobra (vale)").clicked() {
                 self.create_fold_line_from_draft();
             }
+            if ui.button("Criar dobra (montanha)").clicked() {
+                self.create_mountain_fold_line_from_draft();
+            }
             if ui.button("Criar prega").clicked() {
                 self.create_pleat_from_draft();
             }
@@ -2488,6 +2491,14 @@ impl ClothEvoApp {
     }
 
     fn create_fold_line_from_draft(&mut self) {
+        self.create_fold_line_from_draft_with_kind(FoldKind::Valley);
+    }
+
+    fn create_mountain_fold_line_from_draft(&mut self) {
+        self.create_fold_line_from_draft_with_kind(FoldKind::Mountain);
+    }
+
+    fn create_fold_line_from_draft_with_kind(&mut self, kind: FoldKind) {
         let (piece_index, curve) = match self.drafted_internal_curve() {
             Ok(value) => value,
             Err(error) => { self.pattern_message = error; return; }
@@ -2496,14 +2507,17 @@ impl ClothEvoApp {
         let piece_id = self.pattern_project.pieces[piece_index].id;
         self.pattern_project.pieces[piece_index].fold_lines.push(FoldLine {
             curve,
-            kind: FoldKind::Valley,
+            kind,
             stiffness: 0.35,
             angle_radians: std::f64::consts::FRAC_PI_6,
         });
         self.sync_symmetric_mate(piece_id);
         self.draft_points.clear();
         self.pattern_tool = PatternTool::Select;
-        self.pattern_message = "Dobra física criada: alvo de 30° e 35% da rigidez de flexão base.".into();
+        let kind_name = if kind == FoldKind::Mountain { "montanha" } else { "vale" };
+        self.pattern_message = format!(
+            "Dobra física de {kind_name} criada: alvo de 30° e 35% da rigidez de flexão base."
+        );
         self.remember_pattern_change(before);
     }
 
