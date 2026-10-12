@@ -3621,6 +3621,7 @@ impl eframe::App for ClothEvoApp {
         // antes do solver rodar e nunca recebe um passo automático adicional no mesmo frame.
         let dt = if self.capture.is_some() { FIXED_DT } else { ui.input(|i| i.stable_dt) };
         let was_simulation_workspace = self.workspace == WorkspaceMode::Simulation;
+        let diverged_before = self.diverged;
         let steps_before = self.sim.stats.steps;
 
         egui::Panel::left("controls").default_size(310.0).show(ui, |ui| {
@@ -3642,6 +3643,10 @@ impl eframe::App for ClothEvoApp {
         });
 
         self.handle_capture(ui);
+        if self.diverged && !diverged_before {
+            // O diagnóstico foi definido após renderizar o painel de controles deste frame.
+            ui.ctx().request_repaint();
+        }
         if (self.playing && self.workspace == WorkspaceMode::Simulation) || self.capture.is_some() {
             ui.ctx().request_repaint();
         }
