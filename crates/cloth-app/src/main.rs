@@ -36,26 +36,7 @@ const GIZMO_MOVE_LENGTH: f32 = 0.42;
 const GIZMO_SCALE_LENGTH: f32 = 0.70;
 const GIZMO_ROTATE_RADIUS: f32 = 0.34;
 
-const T_POSE_REFERENCE: &[(f64, f64)] = &[
-    (-0.029,1.720),(-0.067,1.698),(-0.097,1.655),(-0.097,1.595),(-0.072,1.532),
-    (-0.064,1.532),(-0.048,1.502),(-0.048,1.478),(-0.069,1.445),(-0.102,1.426),
-    (-0.197,1.423),(-0.293,1.399),(-0.480,1.396),(-0.657,1.377),(-0.793,1.350),
-    (-0.796,1.342),(-0.750,1.339),(-0.731,1.328),(-0.657,1.334),(-0.622,1.344),
-    (-0.486,1.328),(-0.184,1.328),(-0.156,1.306),(-0.143,1.274),(-0.113,1.108),
-    (-0.159,0.963),(-0.178,0.868),(-0.178,0.795),(-0.148,0.593),(-0.148,0.490),
-    (-0.170,0.386),(-0.170,0.321),(-0.146,0.147),(-0.154,0.117),(-0.151,0.079),
-    (-0.178,0.041),(-0.186,0.014),(-0.159,0.003),(-0.102,0.003),(-0.091,0.016),
-    (-0.091,0.196),(-0.061,0.316),(-0.061,0.441),(-0.039,0.514),(-0.034,0.661),
-    (-0.010,0.797),(-0.012,0.827),(0.010,0.830),(0.034,0.645),(0.037,0.523),
-    (0.059,0.449),(0.059,0.316),(0.086,0.199),(0.080,0.016),(0.094,0.003),
-    (0.151,0.003),(0.176,0.011),(0.176,0.033),(0.151,0.063),(0.143,0.087),
-    (0.148,0.120),(0.140,0.158),(0.167,0.329),(0.167,0.384),(0.146,0.498),
-    (0.146,0.596),(0.176,0.781),(0.178,0.846),(0.156,0.966),(0.113,1.097),
-    (0.118,1.176),(0.146,1.290),(0.178,1.328),(0.491,1.328),(0.592,1.342),
-    (0.728,1.328),(0.739,1.336),(0.791,1.339),(0.793,1.347),(0.633,1.380),
-    (0.475,1.396),(0.320,1.396),(0.192,1.423),(0.102,1.426),(0.059,1.459),
-    (0.048,1.494),(0.094,1.587),(0.083,1.660),(0.045,1.712),
-];
+
 
 /// Raio de montagem por painel, incluindo espessura, ruído inicial e folga entre camadas.
 fn pattern_sim_shell_radius(piece_index: usize, thickness: f32) -> f32 {
@@ -231,6 +212,7 @@ struct ClothEvoApp {
     placement_gizmo_drag: Option<PlacementGizmoDrag>,
     placement_drag_selected_body: bool,
     gizmo_mode: GizmoMode,
+    avatar_guide_texture: Option<egui::TextureHandle>,
     show_avatar_guide: bool,
     pattern_tool: PatternTool,
     pattern_zoom: f32,
@@ -349,6 +331,7 @@ impl ClothEvoApp {
             placement_gizmo_drag: None,
             placement_drag_selected_body: false,
             gizmo_mode: GizmoMode::Move,
+            avatar_guide_texture: None,
             show_avatar_guide: true,
             pattern_tool: PatternTool::Draw,
             pattern_zoom: PATTERN_PIXELS_PER_METER,
@@ -2804,27 +2787,45 @@ impl ClothEvoApp {
             egui::Stroke::new(1.0, egui::Color32::from_gray(88)),
         );
 
-        // Silhueta vetorial traçada a partir da imagem T-POSE fornecida; altura total de 1,72 m.
-        // O path não convexo preserva o vão entre as pernas e os recortes dos braços.
+        // Usa o PNG original como textura raster, sem vetorizar, recortar ou modificar seus pixels.
+        // A altura é 1,72 m; a largura deriva do aspect ratio original (585 × 632) para preservar a proporção.
         if self.show_avatar_guide {
-            let points = T_POSE_REFERENCE.iter()
-                .map(|&(x, y)| to_screen(PatternPoint2::new(x, y - 0.80)))
-                .collect::<Vec<_>>();
-            let fill = egui::Color32::from_rgba_unmultiplied(72, 143, 184, 42);
-            let outline = egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(115, 184, 218, 100));
-            painter.add(egui::Shape::Path(egui::epaint::PathShape {
-                points,
-                closed: true,
-                fill,
-                stroke: outline.into(),
-            }));
-            painter.text(
-                to_screen(PatternPoint2::new(0.0, 0.99)),
-                egui::Align2::CENTER_CENTER,
-                "REFERÊNCIA T-POSE · 1,72 m",
-                egui::FontId::proportional(10.0),
-                egui::Color32::from_rgba_unmultiplied(155, 199, 222, 170),
-            );
+            if self.avatar_guide_texture.is_none() {
+                let decoded = image::load_from_memory(include_bytes!("../../../assets/t_pose_reference.png"))
+                    .expect("assets/t_pose_reference.png deve ser um PNG válido")
+                    .to_rgba8();
+                let size = [decoded.width() as usize, decoded.height() as usize];
+                let pixels = egui::ColorImage::from_rgba_unmultiplied(size, decoded.as_raw());
+                self.avatar_guide_texture = Some(
+                    ui.ctx().load_texture("t_pose_reference_original", pixels, egui::TextureOptions::LINEAR)
+                );
+            }
+
+            if let Some(texture) = self.avatar_guide_texture.as_ref() {
+                let pixel_size = texture.size();
+                let reference_height_m = 1.72_f64;
+                let reference_width_m = reference_height_m * pixel_size[0] as f64 / pixel_size[1].max(1) as f64;
+                let top_left = to_screen(PatternPoint2::new(-reference_width_m * 0.5, 0.92));
+                let bottom_right = to_screen(PatternPoint2::new(reference_width_m * 0.5, -0.80));
+                let image_rect = egui::Rect::from_min_max(top_left, bottom_right);
+
+                // O fundo translúcido é separado do PNG: ele só melhora o contraste sobre a grade.
+                // A textura é desenhada com tint branca, mantendo as cores e o alpha originais.
+                painter.rect_filled(image_rect, 0.0, egui::Color32::from_white_alpha(100));
+                painter.image(
+                    texture.id(),
+                    image_rect,
+                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+                painter.text(
+                    to_screen(PatternPoint2::new(0.0, 0.99)),
+                    egui::Align2::CENTER_CENTER,
+                    "REFERÊNCIA T-POSE · 1,72 m",
+                    egui::FontId::proportional(10.0),
+                    egui::Color32::from_rgb(155, 199, 222),
+                );
+            }
         }
 
         let symmetry_screen_x = origin.x + self.pattern_symmetry_axis_x as f32 * scale;
