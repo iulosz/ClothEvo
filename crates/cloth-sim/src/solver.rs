@@ -87,6 +87,12 @@ pub struct Simulation {
     last_substep_dt: f32,
     /// Pares topologicamente adjacentes (ou unidos por costura) que não devem auto-colidir.
     self_collision_exclusions: HashSet<(u32, u32)>,
+    /// Contatos de auto-colisão acumulados no passo de simulação atual.
+    last_self_collision_contacts: usize,
+    /// Maior penetração interna detectada no passo atual, em metros.
+    last_self_collision_penetration: f32,
+    /// Recuperações/clamps de estabilidade ocorridos no passo atual.
+    last_stability_corrections: usize,
     last_density: f32,
 
     distance: Vec<DistanceConstraint>,
@@ -148,6 +154,9 @@ impl Simulation {
             friction_scale,
             last_substep_dt: 0.0,
             self_collision_exclusions,
+            last_self_collision_contacts: 0,
+            last_self_collision_penetration: 0.0,
+            last_stability_corrections: 0,
             dist_lambda: vec![0.0; distance.len()],
             distance,
             dist_colors,
@@ -187,6 +196,9 @@ impl Simulation {
         self.pos.copy_from_slice(&self.rest_pos);
         self.prev.copy_from_slice(&self.rest_pos);
         self.vel.fill(Vec3::ZERO);
+        self.last_self_collision_contacts = 0;
+        self.last_self_collision_penetration = 0.0;
+        self.last_stability_corrections = 0;
         self.last_substep_dt = 0.0;
         self.stats = Stats::default();
     }
@@ -296,6 +308,9 @@ impl Simulation {
         let damp = (-self.params.damping.max(0.0) * h).exp();
         let g = self.params.gravity;
         let parallel = self.params.parallel;
+        self.last_self_collision_contacts = 0;
+        self.last_self_collision_penetration = 0.0;
+        self.last_stability_corrections = 0;
 
         for _ in 0..substeps {
             // 1. Predição de posições.
@@ -342,24 +357,37 @@ impl Simulation {
             }
             self.collide();
 
-            // 4. Reconstrução de velocidade com limitador de segurança para evitar explosões.
+            // 4. Reconstrói velocidades, recuperando estados não finitos e limitando picos.
             let max_speed = self.params.max_particle_speed.clamp(1.0, 100.0);
             let max_displacement = max_speed * h;
             for i in 0..self.pos.len() {
+                if !self.pos[i].is_finite() || !self.prev[i].is_finite() {
+                    self.pos[i] = if self.prev[i].is_finite() {
+                        self.prev[i]
+                    } else {
+                        self.rest_pos[i]
+                    };
+                    self.prev[i] = self.pos[i];
+                    self.vel[i] = Vec3::ZERO;
+                    self.last_stability_corrections += 1;
+                    continue;
+                }
                 if self.inv_mass[i] <= 0.0 {
                     self.vel[i] = Vec3::ZERO;
                     continue;
                 }
                 let mut delta = self.pos[i] - self.prev[i];
                 let displacement = delta.length();
-                if displacement.is_finite() && displacement > max_displacement {
+                if !delta.is_finite() {
+                    self.pos[i] = self.prev[i];
+                    self.vel[i] = Vec3::ZERO;
+                    self.last_stability_corrections += 1;
+                    continue;
+                }
+                if displacement > max_displacement {
                     delta *= max_displacement / displacement.max(1e-9);
                     self.pos[i] = self.prev[i] + delta;
-                } else if !delta.is_finite() {
-                    // O app reconhece e pausa uma divergência não recuperável; evite propagá-la
-                    // para velocidades ou para a hash grid de colisão no substep seguinte.
-                    self.vel[i] = Vec3::splat(f32::NAN);
-                    continue;
+                    self.last_stability_corrections += 1;
                 }
                 self.vel[i] = delta / h;
             }
@@ -432,6 +460,9 @@ impl Simulation {
                 }
             };
             let penetration = min_distance - distance;
+            self.last_self_collision_contacts += 1;
+            self.last_self_collision_penetration =
+                self.last_self_collision_penetration.max(penetration);
             let correction = normal * penetration;
             let ci = correction * (wi / weight);
             let cj = -correction * (wj / weight);
@@ -583,6 +614,21 @@ impl Simulation {
             .map(|(p, previous)| (*p - *previous).length())
             .filter(|d| d.is_finite())
             .fold(0.0, f32::max)
+    }
+
+    /// Contatos de auto-colisão encontrados em todos os substeps do último passo.
+    pub fn self_collision_contacts(&self) -> usize {
+        self.last_self_collision_contacts
+    }
+
+    /// Maior penetração entre partículas não adjacentes no último passo, em metros.
+    pub fn self_collision_max_penetration(&self) -> f32 {
+        self.last_self_collision_penetration
+    }
+
+    /// Quantidade de partículas recuperadas ou limitadas pelo mecanismo de estabilidade.
+    pub fn stability_corrections(&self) -> usize {
+        self.last_stability_corrections
     }
 
     /// Normais por vértice (média ponderada pela área), para o render.
@@ -1284,6 +1330,8 @@ mod stability_tests {
         let after = (sim.pos[0] - sim.pos[3]).length();
         assert!(after > before, "self collision should increase layer separation");
         assert!(sim.is_finite());
+        assert!(sim.self_collision_contacts() > 0);
+        assert!(sim.self_collision_max_penetration() > 0.0);
     }
 
     #[test]
@@ -1302,7 +1350,18 @@ mod stability_tests {
         sim.params.max_particle_speed = 2.0;
         sim.step(1.0 / 60.0);
         assert!(sim.max_particle_speed() <= 2.01);
+        assert!(sim.stability_corrections() > 0);
         assert_eq!(sim.unstable_particle_count(10.0), 0);
+    }
+
+    #[test]
+    fn non_finite_particle_state_is_recovered_and_reported() {
+        let mut sim = minimal_simulation(false, 0.0);
+        sim.pos[0] = Vec3::splat(f32::NAN);
+        sim.step(1.0 / 60.0);
+        assert!(sim.is_finite());
+        assert!(sim.stability_corrections() > 0);
+        assert_eq!(sim.vel[0], Vec3::ZERO);
     }
 }
 
