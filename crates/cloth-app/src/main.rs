@@ -2088,14 +2088,14 @@ impl ClothEvoApp {
         project.seams.push(SeamDefinition {
             id: next_seam_id,
             name: format!("Cut & Sew {next_seam_id}"),
-            a: EdgeRef {
+            sides_a: vec![EdgeRef {
                 piece_id: first_id, curve: BoundaryCurve::Outline,
                 segment_start: a_start as u32, segment_end: a_end as u32, reversed: false,
-            }.into(),
-            b: EdgeRef {
+            }.into()],
+            sides_b: vec![EdgeRef {
                 piece_id: second_id, curve: BoundaryCurve::Outline,
                 segment_start: b_start as u32, segment_end: b_end as u32, reversed: true,
-            }.into(),
+            }.into()],
             ease_meters: 0.0,
         });
         next_seam_id += 1;
@@ -2106,14 +2106,14 @@ impl ClothEvoApp {
             project.seams.push(SeamDefinition {
                 id: next_seam_id,
                 name: format!("Cut & Sew {next_seam_id}"),
-                a: EdgeRef {
+                sides_a: vec![EdgeRef {
                     piece_id: mate_source.id, curve: BoundaryCurve::Outline,
                     segment_start: mate_a_start as u32, segment_end: mate_a_end as u32, reversed: false,
-                }.into(),
-                b: EdgeRef {
+                }.into()],
+                sides_b: vec![EdgeRef {
                     piece_id: *mate_second_id, curve: BoundaryCurve::Outline,
                     segment_start: mate_b_start as u32, segment_end: mate_b_end as u32, reversed: true,
-                }.into(),
+                }.into()],
                 ease_meters: 0.0,
             });
         }
@@ -4015,7 +4015,7 @@ fn split_project_segment(
 
     // Reparametriza as extremidades sobre os segmentos Bézier/lineares recém-criados.
     for seam in &mut project.seams {
-        for edge in [&mut seam.a, &mut seam.b] {
+        for edge in seam.sides_a.iter_mut().chain(seam.sides_b.iter_mut()) {
             if edge.piece_id != piece_id || edge.curve != BoundaryCurve::Outline { continue; }
             remap_param_after_segment_split(&mut edge.start, segment_index, t);
             remap_param_after_segment_split(&mut edge.end, segment_index, t);
@@ -4306,8 +4306,8 @@ mod pattern_editor_tests {
         project.seams.push(SeamDefinition {
             id: 1,
             name: "A-B".into(),
-            a: EdgeRef::single_segment(1, 1).into(),
-            b: EdgeRef::single_segment(2, 3).into(),
+            sides_a: vec![EdgeRef::single_segment(1, 1).into()],
+            sides_b: vec![EdgeRef::single_segment(2, 3).into()],
             ease_meters: 0.0,
         });
         project
@@ -4323,11 +4323,11 @@ mod pattern_editor_tests {
             id: 1, segment_index: 3, t: 0.5, depth_meters: 0.008, width_meters: 0.012,
         });
         let seam = project.seams[0].clone();
-        assert!((edge_length_meters(&project, &seam.a) - 1.0).abs() < 1e-6);
-        assert!((edge_length_meters(&project, &seam.b) - 1.0).abs() < 1e-6);
-        assert_eq!(paired_notch_markers(&project, &seam.a, &seam.b), vec![(0.5, 0.5)]);
+        assert!((edge_length_meters(&project, &seam.sides_a[0]) - 1.0).abs() < 1e-6);
+        assert!((edge_length_meters(&project, &seam.sides_b[0]) - 1.0).abs() < 1e-6);
+        assert_eq!(paired_notch_markers(&project, &seam.sides_a[0], &seam.sides_b[0]), vec![(0.5, 0.5)]);
 
-        let mut reversed = seam.b.clone();
+        let mut reversed = seam.sides_b[0].clone();
         reversed.reversed = true;
         assert_eq!(edge_notch_positions(&project, &reversed), vec![0.5]);
     }
@@ -4425,7 +4425,7 @@ mod pattern_editor_tests {
         let moved = &project.pieces[0];
         assert_eq!(moved.outline.start, PatternPoint2::new(before.outline.start.x + 2.0, before.outline.start.y - 0.5));
         assert_eq!(moved.id, before.id);
-        assert_eq!(project.seams[0].a.piece_id, 1);
+        assert_eq!(project.seams[0].sides_a[0].piece_id, 1);
         assert!((pattern_geom::curve_length(&moved.outline, 32) - pattern_geom::curve_length(&before.outline, 32)).abs() < 1.0e-6);
     }
 
