@@ -57,6 +57,81 @@ fn cubic(p0: Point2, p1: Point2, p2: Point2, p3: Point2, t: f64) -> Point2 {
 }
 
 /// Amostra uma curva e preserva o mapeamento entre segmentos da curva original e vértices.
+/// Variante do amostrador que injeta exatamente parâmetros indicados na borda.
+/// Retorna os índices dos vértices forçados na mesma ordem de `forced_params`; não faz
+/// projeção para um vértice vizinho. Os parâmetros precisam identificar segmentos existentes.
+pub fn sample_curve_with_forced_params(
+    curve: &Curve2D,
+    cubic_steps: usize,
+    forced_params: &[(u32, f64)],
+) -> Result<(SampledCurve, Vec<usize>), GeometryError> {
+    if forced_params.iter().any(|(segment, t)| {
+        *segment as usize >= curve.segments.len() || !t.is_finite() || !(0.0..=1.0).contains(t)
+    }) {
+        return Err(GeometryError::InvalidParameter);
+    }
+    let steps = cubic_steps.max(1);
+    let mut points = vec![curve.start];
+    let mut ranges = Vec::with_capacity(curve.segments.len());
+    let mut forced_indices = vec![None; forced_params.len()];
+    let mut current = curve.start;
+
+    for (segment_index, segment) in curve.segments.iter().enumerate() {
+        let start_index = points.len() - 1;
+        let mut ts = Vec::new();
+        if matches!(segment, CurveSegment::CubicBezier { .. }) {
+            ts.extend((1..steps).map(|step| step as f64 / steps as f64));
+        }
+        ts.extend(forced_params.iter().filter_map(|(forced_segment, t)| {
+            (*forced_segment as usize == segment_index && *t > EPS && *t < 1.0 - EPS).then_some(*t)
+        }));
+        ts.push(1.0);
+        ts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        ts.dedup_by(|a, b| (*a - *b).abs() <= EPS);
+
+        for (forced_index, (forced_segment, t)) in forced_params.iter().enumerate() {
+            if *forced_segment as usize == segment_index && t.abs() <= EPS {
+                forced_indices[forced_index] = Some(start_index);
+            }
+        }
+        for t in ts {
+            let point = match segment {
+                CurveSegment::Line { to } => Point2::new(
+                    current.x + (to.x - current.x) * t,
+                    current.y + (to.y - current.y) * t,
+                ),
+                CurveSegment::CubicBezier { control1, control2, to } => {
+                    cubic(current, *control1, *control2, *to, t)
+                }
+            };
+            points.push(point);
+            let vertex_index = points.len() - 1;
+            for (forced_index, (forced_segment, forced_t)) in forced_params.iter().enumerate() {
+                if *forced_segment as usize == segment_index && (*forced_t - t).abs() <= EPS {
+                    forced_indices[forced_index] = Some(vertex_index);
+                }
+            }
+        }
+        ranges.push((start_index, points.len() - 1));
+        current = segment.endpoint();
+    }
+
+    if curve.closed && points.len() > 1 && points[0].distance(*points.last().unwrap()) <= EPS {
+        let duplicated_index = points.len() - 1;
+        points.pop();
+        for range in &mut ranges {
+            if range.1 == duplicated_index { range.1 = 0; }
+        }
+        for index in &mut forced_indices {
+            if *index == Some(duplicated_index) { *index = Some(0); }
+        }
+    }
+    let forced_indices = forced_indices.into_iter()
+        .map(|index| index.ok_or(GeometryError::InvalidParameter))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((SampledCurve { points, segment_vertex_ranges: ranges }, forced_indices))
+}
+
 pub fn sample_curve_with_ranges(curve: &Curve2D, cubic_steps: usize) -> SampledCurve {
     let steps = cubic_steps.max(1);
     let mut points = vec![curve.start];
