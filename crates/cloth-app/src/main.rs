@@ -2882,6 +2882,46 @@ mod pattern_editor_tests {
     }
 
     #[test]
+    fn cut_seam_remapping_keeps_untouched_edges_and_rejects_split_edges() {
+        let outline = rectangle(
+            PatternPoint2::new(0.0, 0.0),
+            PatternPoint2::new(2.0, 1.0),
+        ).unwrap();
+        let path = Curve2D::polyline(&[
+            PatternPoint2::new(1.0, 0.0),
+            PatternPoint2::new(1.0, 1.0),
+        ], false).unwrap();
+        let cut = cut_closed_outline(&outline, &path, 0.02).unwrap();
+
+        let mut untouched = EdgeRef::single_segment(1, 1);
+        remap_edge_after_cut(&mut untouched, &cut.source_segment_fragments, 1, 10).unwrap();
+        assert_eq!(untouched.piece_id, 1);
+        assert_eq!(untouched.segment_start, 1);
+        assert_eq!(untouched.segment_end, 2);
+
+        let mut divided = EdgeRef::single_segment(1, 0);
+        assert!(remap_edge_after_cut(&mut divided, &cut.source_segment_fragments, 1, 10).is_err());
+    }
+
+    #[test]
+    fn mirrored_pair_keeps_topology_in_sync_after_anchor_insertion() {
+        let mut project = square_project();
+        let source = project.pieces[0].clone();
+        let mirror = mirror_pattern_piece(&source, 3, "A espelho".into(), 1.0).unwrap();
+        project.pieces.push(mirror);
+        project.symmetry_links.push(SymmetryLink {
+            piece_a_id: 1,
+            piece_b_id: 3,
+            axis_x: 1.0,
+        });
+        let mirrored_id = symmetry_counterpart_id(&project, 1).unwrap();
+        split_project_segment(&mut project, 1, 1, 0.35).unwrap();
+        split_project_segment(&mut project, mirrored_id, 1, 0.35).unwrap();
+        assert_eq!(project.pieces[0].outline.segments.len(), project.pieces[2].outline.segments.len());
+        project.validate().unwrap();
+    }
+
+    #[test]
     fn mirror_pattern_piece_reflects_outline_and_internal_metadata() {
         let mut source = PatternPiece::from_polygon(10, "Frente", &[
             PatternPoint2::new(0.0, 0.0),
