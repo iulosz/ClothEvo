@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use glam::{Vec2, Vec3};
 
@@ -137,8 +137,12 @@ impl ClothBuilder {
             x ^= x >> 16;
             (x as f32 / u32::MAX as f32) - 0.5
         }
+        let pinned = self.pinned.iter().copied().collect::<HashSet<_>>();
         for (i, p) in self.pos.iter_mut().enumerate() {
             let i = i as u32;
+            // A mounting pin defines an exact initial anchor; don't perturb it away from its
+            // configured placement before the first simulation step.
+            if pinned.contains(&i) { continue; }
             *p += Vec3::new(hash(i * 3), hash(i * 3 + 1), hash(i * 3 + 2)) * (2.0 * amplitude);
         }
     }
