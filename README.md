@@ -196,3 +196,12 @@ A montagem 2D→3D utiliza um manequim procedural ajustável no Pattern Studio. 
 A física e a viewport usam os mesmos 18 colisores analíticos: elipsoides para cabeça, pescoço e tronco; cápsulas para braços, antebraços, coxas e canelas; e volumes elipsoidais para mãos e pés. A projeção de colisão usa campos de distância assinada (SDF), aproveitando a espessura do tecido e o atrito existentes no solver.
 
 **Limitações desta etapa:** é um manequim composto para colisão, não uma malha anatômica de alta resolução. Importação de avatares OBJ, FBX e glTF, colisão contra malhas arbitrárias e ajuste anatômico avançado continuam como etapas futuras.
+
+
+## Sistema avançado de costura
+
+No Pattern Studio, selecione uma costura existente para editar os moldes, intervalos de segmento, orientação, nome e diferença-alvo de comprimento. A diferença assinada `A − B` é expressa em metros: valor positivo significa que A deve ser mais longa; negativo significa que B deve ser mais longa. A diferença é aplicada ao comprimento de repouso das arestas de contorno, e não apenas salva como metadado.
+
+O solver faz pareamento das duas bordas pelo comprimento de arco normalizado e cobre os vértices de ambos os lados mesmo quando a malha tem densidades diferentes. Piques (notches) podem ser adicionados, editados e removidos; os piques de ambas as bordas são pareados por progresso de arco e recebem vínculos explícitos no solver. O canvas 2D mostra piques e costuras, com vermelho para diferenças medidas que não coincidem com a meta. Na viewport 3D, vínculos cuja abertura supera 15 mm são realçados em vermelho; essa abertura é um indicador de diagnóstico, não uma estimativa de força em newtons.
+
+Ações disponíveis: criar costura, selecionar e alterar uma costura existente, inverter a direção de A ou B, selecionar intervalos com vários segmentos e descosturar. A simulação atual ainda costura apenas bordas do contorno; linhas de costura internas exigem um mapeamento de malha próprio em uma etapa futura.

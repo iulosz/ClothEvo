@@ -375,6 +375,27 @@ impl Simulation {
             .collect()
     }
 
+    /// Pares de costura com abertura superior ao limite em metros.
+    /// É um indicador visual de abertura/tensão, não uma medição de força em newtons.
+    pub fn seam_warning_pairs(&self, gap_limit_meters: f32) -> Vec<(u32, u32)> {
+        let limit = gap_limit_meters.max(0.0);
+        self.distance.iter()
+            .filter(|c| c.kind == ConstraintKind::Seam)
+            .filter_map(|c| {
+                let gap = (self.pos[c.a as usize] - self.pos[c.b as usize]).length();
+                (gap > limit).then_some((c.a, c.b))
+            })
+            .collect()
+    }
+
+    /// Maior abertura instantânea entre as partículas emparelhadas de costura.
+    pub fn seam_gap_max(&self) -> f32 {
+        self.distance.iter()
+            .filter(|c| c.kind == ConstraintKind::Seam)
+            .map(|c| (self.pos[c.a as usize] - self.pos[c.b as usize]).length())
+            .fold(0.0, f32::max)
+    }
+
     /// Arestas únicas da malha (para o overlay de wireframe).
     pub fn mesh_edges(&self) -> Vec<[u32; 2]> {
         let mut edges: Vec<[u32; 2]> = Vec::with_capacity(self.triangles.len() * 3);
