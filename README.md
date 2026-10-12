@@ -222,15 +222,16 @@ Os comandos **Pausar**, **Passo único** e **Reiniciar** são independentes: o p
 
 O Pattern Studio inclui a silhueta de referência **T-POSE** enviada para o projeto, traçada como contorno vetorial e exibida como overlay no canvas 2D pela opção **Guia anatômico T-Pose**. A silhueta mantém a proporção da imagem e altura de referência de 1,72 m; é um gabarito visual de proporção, não um avatar de fabricação.
 
-Use **Posicionar moldes na cena 3D** para gerar uma prévia dos painéis em torno do manequim sem iniciar automaticamente a física. Na viewport:
+Use **Posicionar moldes na cena 3D** para gerar uma prévia dos painéis em torno do manequim sem iniciar automaticamente a física. Selecione um painel e escolha no painel lateral o modo **Mover**, **Girar**, **Escalar** ou **Transformar**:
 
-- Clique em um painel para selecioná-lo; o contorno selecionado fica destacado.
-- Arraste o painel com o botão esquerdo para movê-lo no plano da câmera.
-- Arraste fora dos painéis com o botão esquerdo para orbitar; botão direito ou do meio move a câmera; a roda controla o zoom.
-- O painel lateral também oferece deslocamentos de 5 cm por eixo, rotações de 15° e restauração da transformação do molde selecionado.
-- Clique em **Iniciar simulação de tecido** quando terminar o posicionamento.
+- **Mover**: arraste as setas coloridas para deslocar o molde por eixo.
+- **Girar**: arraste os anéis para rotacionar o molde no eixo correspondente.
+- **Escalar**: arraste os quadrados nas extremidades dos eixos; como o molde é uma superfície 2D, o controle normal ao plano aplica escala uniforme no plano.
+- **Transformar**: combina setas, anéis e controles de escala numa única ferramenta.
+- Arrastar o corpo do painel no modo **Mover** ainda permite posicionamento livre no plano da câmera. Arrastar fora dos painéis orbita; botão direito/meio move a câmera; a roda controla o zoom.
+- Use **Restaurar transformação deste molde** para recuperar posição, rotação e escala originais e **Iniciar simulação de tecido** quando terminar.
 
-As translações feitas por arraste atualizam a transformação do molde no projeto e o estado de repouso do solver, portanto permanecem após **Reiniciar** e ao salvar o projeto. A montagem mantém o limite atual de costuras físicas às bordas dos contornos; costuras internas e colisão robusta entre triângulos continuam sendo etapas futuras.
+As transformações são gravadas no projeto e no estado de repouso do solver. A rotação é aplicada sem reconstruir a malha; após escalar, a prévia é reconstruída ao soltar o manipulador para recalcular áreas, massas e restrições de repouso. Os comandos de costura continuam ligados aos vértices de contorno preservados pela triangulação CDT.
 
 
 ### Topologia da malha de tecido
