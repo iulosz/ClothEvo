@@ -173,7 +173,7 @@ fn segment_parameters(curve: &Curve2D, max_spacing: f64) -> Result<SegmentParame
     Ok(result)
 }
 
-fn normalize_parameters(params: &mut [f64]) {
+fn normalize_parameters(params: &mut Vec<f64>) {
     params.sort_by(f64::total_cmp);
     params.dedup_by(|a, b| (*a - *b).abs() <= 1.0e-10);
     if params.first().is_none_or(|t| *t > 1.0e-10) {
