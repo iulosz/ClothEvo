@@ -178,7 +178,7 @@ impl Default for FabricProperties {
             shear_n_m: 1_200.0,
             bend_nm: 0.0001,
             thickness_meters: 0.001,
-            particle_distance_meters: 0.01,
+            particle_distance_meters: 0.04,
         }
     }
 }
