@@ -334,12 +334,16 @@ impl ClothBuilder {
         // remain useful as a master multiplier for the whole simulation.
         let mut mass_scale = vec![1.0f32; n];
         let mut thickness_scale = vec![1.0f32; n];
+        // 0.4 is the default global friction. Per-panel friction acts as a
+        // scale factor, so the global slider remains a useful master control.
+        let mut friction_scale = vec![1.0f32; n];
         let global_density = params.density.max(1.0e-4);
         let global_thickness = params.thickness.max(1.0e-4);
         for i in 0..n {
             if let Some(material) = self.panel_materials[self.panel_of[i] as usize] {
                 mass_scale[i] = (material.density_kg_m2 / global_density).max(1.0e-4);
                 thickness_scale[i] = (material.thickness_meters / global_thickness).max(1.0e-4);
+                friction_scale[i] = (material.friction_coefficient / 0.4).clamp(0.0, 5.0);
             }
         }
 
@@ -350,6 +354,7 @@ impl ClothBuilder {
             pinned,
             mass_scale,
             thickness_scale,
+            friction_scale,
             distance,
             dist_ranges,
             bending,
