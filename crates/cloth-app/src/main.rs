@@ -229,6 +229,7 @@ struct ClothEvoApp {
     placement_drag_piece: Option<u64>,
     placement_drag_before: Option<PatternEditorSnapshot>,
     placement_gizmo_drag: Option<PlacementGizmoDrag>,
+    placement_drag_selected_body: bool,
     gizmo_mode: GizmoMode,
     show_avatar_guide: bool,
     pattern_tool: PatternTool,
@@ -346,6 +347,7 @@ impl ClothEvoApp {
             placement_drag_piece: None,
             placement_drag_before: None,
             placement_gizmo_drag: None,
+            placement_drag_selected_body: false,
             gizmo_mode: GizmoMode::Move,
             show_avatar_guide: true,
             pattern_tool: PatternTool::Draw,
@@ -3393,6 +3395,7 @@ impl ClothEvoApp {
         self.placement_drag_piece = None;
         self.placement_drag_before = None;
         self.placement_gizmo_drag = None;
+        self.placement_drag_selected_body = false;
         self.selected_placement_piece = previous_selection
             .filter(|id| self.placement_ranges.iter().any(|range| range.piece_id == *id))
             .or_else(|| self.placement_ranges.first().map(|range| range.piece_id));
@@ -3470,9 +3473,10 @@ impl ClothEvoApp {
                             self.placement_drag_piece = Some(id);
                             self.placement_drag_before = Some(self.editor_snapshot());
                         } else {
-                            // Em Girar/Escalar, arrastar o tecido seleciona; a transformação
-                            // só inicia quando um aro ou manipulador do gizmo é capturado.
+                            // Em Girar/Escalar, clicar no painel apenas o seleciona; o arraste
+                            // do corpo não deve mover a câmera nem transformar o painel.
                             self.placement_drag_piece = None;
+                            self.placement_drag_selected_body = true;
                         }
                     }
                 }
@@ -3514,7 +3518,7 @@ impl ClothEvoApp {
                     self.translate_placement_by_screen_delta(
                         id, pointer_delta.x, pointer_delta.y, rect.height(),
                     );
-                } else {
+                } else if !self.placement_drag_selected_body {
                     self.camera.orbit(pointer_delta.x, pointer_delta.y);
                 }
             }
@@ -3528,6 +3532,8 @@ impl ClothEvoApp {
             }
             if response.drag_stopped_by(egui::PointerButton::Primary) {
                 let stopped_action = self.placement_gizmo_drag.take().map(|drag| drag.action);
+                let before = self.placement_drag_before.take();
+                self.placement_drag_selected_body = false;
                 // Escalar altera comprimentos de repouso e áreas. Reconstrói uma única vez
                 // ao soltar o mouse, e não a cada quadro do arraste.
                 if stopped_action == Some(GizmoAction::Scale) {
@@ -3535,7 +3541,7 @@ impl ClothEvoApp {
                         self.pattern_message = error;
                     }
                 }
-                if let Some(before) = self.placement_drag_before.take() {
+                if let Some(before) = before {
                     self.remember_pattern_change(before);
                 }
                 self.placement_drag_piece = None;
