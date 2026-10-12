@@ -569,7 +569,7 @@ impl ClothEvoApp {
             diverged: false,
             last_step_ms: 0.0,
             capture,
-            workspace: WorkspaceMode::Simulation,
+            workspace: WorkspaceMode::Split,
             split_swapped: false,
             split_vertical: false,
             pattern_project: PatternProject::new("Novo projeto"),
