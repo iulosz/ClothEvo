@@ -690,11 +690,6 @@ impl ClothEvoApp {
                 }
             });
         }
-        if !self.pattern_project.pieces.is_empty()
-            && ui.button("Excluir peça selecionada").clicked() {
-            self.delete_selected_piece();
-        }
-
         if !self.pattern_project.pieces.is_empty() {
             ui.horizontal(|ui| {
                 if ui.button("Duplicar peça selecionada").clicked() {

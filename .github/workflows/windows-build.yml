@@ -46,11 +46,11 @@ jobs:
 
           Atalhos e recursos principais:
           - Use o workspace "Moldes 2D" para desenhar peças.
-          - Mude para "Editar" para mover vértices e alças Bézier.
-          - Use a roda do mouse para zoom.
-          - Use o botão direito ou do meio para mover a viewport.
-          - Os projetos de molde são salvos/abertos em clothevo-pattern.json no diretório
-            de trabalho atual do aplicativo.
+          - Ctrl+Z desfaz e Ctrl+Y refaz edições; Ctrl+Shift+Z também refaz.
+          - Selecione o interior de uma peça para movê-la; duplique pelo painel.
+          - Selecione uma borda e use "Usar borda selecionada como A/B" para preparar costuras.
+          - Use a roda do mouse para zoom; botão direito/meio move a viewport.
+          - Use Abrir, Salvar e Salvar como para gerenciar projetos .clothevo ou .json.
           '@
           Set-Content -Encoding utf8 -Path "$package/LEIA-ME-WINDOWS.txt" -Value $instructions
 

@@ -135,3 +135,12 @@ Limitações desta etapa: o histórico cobre as edições de moldes e rascunhos,
 de arquivo nem os parâmetros transitórios do painel de costura; mover uma peça desloca também linhas
 internas, pences, furos, linha de fio e anotações. Costuras entre peças não são duplicadas junto com
 uma cópia porque é necessário definir explicitamente a nova correspondência.
+
+
+### Atalhos e ações do Pattern Studio 0.3
+
+- **Ctrl+Z** desfaz; **Ctrl+Y** ou **Ctrl+Shift+Z** refaz.
+- No modo **Selecionar / editar**, clique dentro de uma peça para selecioná-la e arraste para movê-la.
+- Use **Duplicar peça selecionada** para criar uma cópia deslocada; as costuras não são clonadas.
+- Clique em uma borda (destacada em amarelo) e use **Usar borda selecionada como A/B** para configurar uma costura visualmente.
+- Abrir um projeto com alterações não salvas mostra uma confirmação antes de descartá-las. O histórico é reiniciado quando outro projeto é aberto ou criado, evitando que o caminho de arquivo mude ao desfazer edições antigas.
