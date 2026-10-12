@@ -42,8 +42,12 @@ pub struct SimParams {
     pub seam_pull_speed: f32,
     /// Espessura de colisão (m): distância mínima entre o tecido e o colisor.
     pub thickness: f32,
-    /// Coeficiente de atrito de Coulomb com os colisores.
+    /// Coeficiente de atrito de Coulomb com os colisores; atua como multiplicador mestre.
     pub friction: f32,
+    /// Auto-colisão entre partículas não adjacentes do próprio tecido.
+    pub self_collision: bool,
+    /// Limite de velocidade das partículas (m/s) para conter explosões numéricas.
+    pub max_velocity: f32,
     /// Resolver restrições em paralelo (rayon).
     pub parallel: bool,
 }
@@ -66,6 +70,8 @@ impl Default for SimParams {
             seam_pull_speed: 0.5,
             thickness: 0.005,
             friction: 0.4,
+            self_collision: false,
+            max_velocity: 20.0,
             parallel: true,
         };
         FabricPreset::Cotton.apply(&mut p);
