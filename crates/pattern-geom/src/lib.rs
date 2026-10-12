@@ -931,8 +931,8 @@ mod tests {
         let seam = SeamDefinition {
             id: 7,
             name: "Lateral".into(),
-            a: edge_a,
-            b: edge_b,
+            sides_a: vec![edge_a.into()],
+            sides_b: vec![edge_b.into()],
             ease_meters: 0.0,
         };
         let sampled = sample_pattern_outlines_with_seam_sync(&[longer, shorter], &[seam]).unwrap();
