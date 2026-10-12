@@ -3007,7 +3007,7 @@ impl ClothEvoApp {
                 .extend(piece.notches.iter().map(|notch| (notch.segment_index, notch.t)));
         }
         for seam in &self.pattern_project.seams {
-            for edge in [&seam.a, &seam.b] {
+            for edge in seam.sides_a.iter().chain(seam.sides_b.iter()) {
                 if edge.curve != BoundaryCurve::Outline { continue; }
                 let points = forced_by_piece.entry(edge.piece_id).or_default();
                 points.push((edge.start.segment, edge.start.t));
@@ -3172,26 +3172,30 @@ impl ClothEvoApp {
         }
 
         for seam in &self.pattern_project.seams {
-            if seam.a.curve != BoundaryCurve::Outline || seam.b.curve != BoundaryCurve::Outline {
-                return Err(format!(
-                    "A costura '{}' usa uma linha de costura interna; a simulação atual suporta bordas do contorno.",
-                    seam.name
-                ));
-            }
-            let info_a = infos.iter().find(|info| info.id == seam.a.piece_id)
-                .ok_or_else(|| format!("Peça A ausente na costura '{}'.", seam.name))?;
-            let info_b = infos.iter().find(|info| info.id == seam.b.piece_id)
-                .ok_or_else(|| format!("Peça B ausente na costura '{}'.", seam.name))?;
-            let locals_a = sampled_edge_indices(
-                &seam.a, &info_a.sample.ranges, &info_a.sample.forced_vertices, info_a.boundary_count,
-            )?;
-            let locals_b = sampled_edge_indices(
-                &seam.b, &info_b.sample.ranges, &info_b.sample.forced_vertices, info_b.boundary_count,
-            )?;
-            let globals_a = info_a.handle.globals(&locals_a);
-            let globals_b = info_b.handle.globals(&locals_b);
-            let notch_markers = paired_notch_markers(&self.pattern_project, &seam.a, &seam.b);
-            builder.sew_with_markers(
+            let map_side = |paths: &[EdgePath]| -> Result<Vec<Vec<u32>>, String> {
+                let mut result = Vec::with_capacity(paths.len());
+                for edge in paths {
+                    if edge.curve != BoundaryCurve::Outline {
+                        return Err(format!(
+                            "A costura '{}' usa uma linha interna; a simulação atual suporta bordas do contorno.",
+                            seam.name
+                        ));
+                    }
+                    let info = infos.iter().find(|info| info.id == edge.piece_id)
+                        .ok_or_else(|| format!("Peça ausente na costura '{}'.", seam.name))?;
+                    let locals = sampled_edge_indices(
+                        edge, &info.sample.ranges, &info.sample.forced_vertices, info.boundary_count,
+                    )?;
+                    result.push(info.handle.globals(&locals));
+                }
+                Ok(result)
+            };
+            let globals_a = map_side(&seam.sides_a)?;
+            let globals_b = map_side(&seam.sides_b)?;
+            let notch_markers = paired_chain_notch_markers(
+                &self.pattern_project, &seam.sides_a, &seam.sides_b,
+            );
+            builder.sew_with_path_chains(
                 &globals_a, &globals_b, seam.ease_meters as f32, &notch_markers,
             );
         }
