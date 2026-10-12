@@ -1054,6 +1054,7 @@ mod tests {
             "seams":[]
         }"#;
         let project = PatternProject::from_json(json).unwrap();
+        assert_eq!(project.schema_version, PatternProject::CURRENT_SCHEMA_VERSION);
         assert!(project.grading_rules.is_empty());
         assert!(project.pieces[0].fold_lines.is_empty());
         assert!(project.pieces[0].pleats.is_empty());
