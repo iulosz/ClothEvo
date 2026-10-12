@@ -132,6 +132,74 @@ pub struct SeamDefinition {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GrainLine { pub start: Point2, pub end: Point2 }
 
+/// Tipo semântico de uma linha de dobra usada pelo preview e pela simulação.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FoldKind {
+    #[default]
+    Valley,
+    Mountain,
+    Decorative,
+}
+
+/// Linha interna com parâmetros mecânicos; stiffness é um coeficiente normalizado em [0, 1].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FoldLine {
+    pub curve: Curve2D,
+    pub kind: FoldKind,
+    pub stiffness: f64,
+}
+
+/// Metadados de uma prega. A curva localiza o eixo; depth e angle descrevem sua forma-alvo.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Pleat {
+    pub axis: Curve2D,
+    pub depth_meters: f64,
+    pub angle_radians: f64,
+}
+
+/// Propriedades físicas específicas do molde, em unidades SI.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FabricProperties {
+    pub density_kg_m2: f64,
+    pub stretch_warp_n_m: f64,
+    pub stretch_weft_n_m: f64,
+    pub shear_n_m: f64,
+    pub bend_nm: f64,
+    pub thickness_meters: f64,
+    pub particle_distance_meters: f64,
+}
+
+impl Default for FabricProperties {
+    fn default() -> Self {
+        Self {
+            density_kg_m2: 0.18,
+            stretch_warp_n_m: 8_000.0,
+            stretch_weft_n_m: 6_000.0,
+            shear_n_m: 1_200.0,
+            bend_nm: 0.0001,
+            thickness_meters: 0.001,
+            particle_distance_meters: 0.01,
+        }
+    }
+}
+
+/// Transformação afim 2D de gradação para um tamanho comercial.
+/// Matriz armazenada como [m00, m01, tx, m10, m11, ty].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GradingRule {
+    pub label: String,
+    pub matrix: [f64; 6],
+}
+
+impl GradingRule {
+    pub fn transform(&self, point: Point2) -> Point2 {
+        Point2::new(
+            self.matrix[0] * point.x + self.matrix[1] * point.y + self.matrix[2],
+            self.matrix[3] * point.x + self.matrix[4] * point.y + self.matrix[5],
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Dart {
     pub apex: Point2,
@@ -168,7 +236,14 @@ pub struct PatternPiece {
     pub sewing_line: Option<Curve2D>,
     pub seam_allowance_meters: f64,
     pub grain_line: Option<GrainLine>,
+    #[serde(default)]
     pub internal_lines: Vec<Curve2D>,
+    #[serde(default)]
+    pub fold_lines: Vec<FoldLine>,
+    #[serde(default)]
+    pub pleats: Vec<Pleat>,
+    #[serde(default)]
+    pub fabric: FabricProperties,
     pub darts: Vec<Dart>,
     pub notches: Vec<Notch>,
     pub holes: Vec<Hole>,
@@ -185,6 +260,9 @@ impl PatternPiece {
             seam_allowance_meters: 0.01,
             grain_line: None,
             internal_lines: Vec::new(),
+            fold_lines: Vec::new(),
+            pleats: Vec::new(),
+            fabric: FabricProperties::default(),
             darts: Vec::new(),
             notches: Vec::new(),
             holes: Vec::new(),
@@ -200,6 +278,8 @@ pub struct PatternProject {
     pub units: LengthUnit,
     pub pieces: Vec<PatternPiece>,
     pub seams: Vec<SeamDefinition>,
+    #[serde(default)]
+    pub grading_rules: Vec<GradingRule>,
 }
 
 impl PatternProject {
@@ -212,6 +292,7 @@ impl PatternProject {
             units: LengthUnit::Centimeter,
             pieces: Vec::new(),
             seams: Vec::new(),
+            grading_rules: Vec::new(),
         }
     }
 
@@ -296,6 +377,43 @@ mod tests {
         ).unwrap());
         let decoded = PatternProject::from_json(&project.to_json().unwrap()).unwrap();
         assert_eq!(decoded, project);
+    }
+
+    #[test]
+    fn old_project_json_loads_with_defaults_for_new_pattern_metadata() {
+        let json = r#"{
+            "schema_version":1,
+            "name":"Legado",
+            "units":"Centimeter",
+            "pieces":[{
+                "id":1,"name":"Frente",
+                "outline":{"start":{"x":0.0,"y":0.0},"segments":[
+                    {"Line":{"to":{"x":1.0,"y":0.0}}},
+                    {"Line":{"to":{"x":1.0,"y":1.0}}},
+                    {"Line":{"to":{"x":0.0,"y":1.0}}},
+                    {"Line":{"to":{"x":0.0,"y":0.0}}}
+                ],"closed":true},
+                "sewing_line":null,"seam_allowance_meters":0.01,"grain_line":null,
+                "darts":[],"notches":[],"holes":[],"annotations":[]
+            }],
+            "seams":[]
+        }"#;
+        let project = PatternProject::from_json(json).unwrap();
+        assert!(project.grading_rules.is_empty());
+        assert!(project.pieces[0].fold_lines.is_empty());
+        assert!(project.pieces[0].pleats.is_empty());
+        assert_eq!(project.pieces[0].fabric, FabricProperties::default());
+    }
+
+    #[test]
+    fn grading_rule_applies_affine_transform() {
+        let rule = GradingRule {
+            label: "Tamanho M".into(),
+            matrix: [1.0, 0.0, 0.1, 0.0, 1.5, -0.02],
+        };
+        let result = rule.transform(Point2::new(0.2, 0.4));
+        assert!((result.x - 0.3).abs() < 1e-9);
+        assert!((result.y - 0.58).abs() < 1e-9);
     }
 
     #[test]
