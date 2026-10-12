@@ -2430,8 +2430,25 @@ fn split_piece_metadata(
     }
 
     for hole in &source.holes {
+        if !hole.radius_meters.is_finite() || hole.radius_meters < 0.0 {
+            return Err("um furo possui raio inválido".into());
+        }
+        let mut boundary = Vec::with_capacity(25);
+        for index in 0..24 {
+            let angle = std::f64::consts::TAU * index as f64 / 24.0;
+            boundary.push(PatternPoint2::new(
+                hole.center.x + hole.radius_meters * angle.cos(),
+                hole.center.y + hole.radius_meters * angle.sin(),
+            ));
+        }
         let side = classify_detail_point(hole.center, polygon_a, polygon_b)
             .map_err(|error| format!("furo: {error}"))?;
+        if boundary.iter().any(|point| {
+            classify_detail_point(*point, polygon_a, polygon_b)
+                .map(|boundary_side| boundary_side != side).unwrap_or(true)
+        }) {
+            return Err("o corte atravessa um furo; reposicione ou remova o furo antes de cortar".into());
+        }
         if side == 0 { first.holes.push(hole.clone()); }
         else { second.holes.push(hole.clone()); }
     }
