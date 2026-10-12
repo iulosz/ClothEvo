@@ -14,6 +14,7 @@ use cloth_sim::{
 };
 use eframe::{egui, egui_wgpu};
 use glam::{EulerRot, Quat, Vec2, Vec3};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use pattern_core::{
     BoundaryCurve, Curve2D, CurveSegment, EdgeRef, FoldKind, FoldLine, GrainLine,
     Notch, PatternPiece, PatternProject, Pleat,
@@ -21,7 +22,7 @@ use pattern_core::{
 };
 use pattern_geom::{
     cut_closed_outline, mirror_curve_x, offset_polygon, point_in_polygon, rectangle,
-    regular_polygon, sample_curve, sample_curve_with_ranges,
+    regular_polygon, resample_curve, sample_curve, sample_curve_with_ranges,
     sample_pattern_outlines_with_seam_sync, validate_simple_polygon, CutAndSewResult,
     SourceSegmentFragment,
 };
@@ -38,6 +39,206 @@ const GIZMO_SCALE_LENGTH: f32 = 0.70;
 const GIZMO_ROTATE_RADIUS: f32 = 0.34;
 
 
+
+type LocalFoldEdge = (u32, u32, f32, f32);
+
+fn curve_points_at_spacing(curve: &Curve2D, spacing: f64) -> Option<Vec<PatternPoint2>> {
+    let spacing = if spacing.is_finite() { spacing.clamp(0.003, 0.10) } else { 0.02 };
+    let sampled = resample_curve(curve, spacing).ok()?;
+    let points = sample_curve(&sampled, 1);
+    (points.len() >= 2).then_some(points)
+}
+
+fn offset_open_curve(
+    curve: &Curve2D,
+    offset_meters: f64,
+    sampling_spacing: f64,
+) -> Option<Curve2D> {
+    if !offset_meters.is_finite() { return None; }
+    let points = curve_points_at_spacing(curve, sampling_spacing)?;
+    let mut shifted = Vec::with_capacity(points.len());
+    for index in 0..points.len() {
+        let tangent = if index == 0 {
+            points[1] - points[0]
+        } else if index + 1 == points.len() {
+            points[index] - points[index - 1]
+        } else {
+            points[index + 1] - points[index - 1]
+        };
+        let length = (tangent.x * tangent.x + tangent.y * tangent.y).sqrt();
+        if length <= 1.0e-9 { return None; }
+        let normal = PatternPoint2::new(-tangent.y / length, tangent.x / length);
+        shifted.push(PatternPoint2::new(
+            points[index].x + normal.x * offset_meters,
+            points[index].y + normal.y * offset_meters,
+        ));
+    }
+    Curve2D::polyline(&shifted, false).ok()
+}
+
+/// Mapeia uma curva interna para uma cadeia de arestas reais da malha. Cada trecho amostrado
+/// encontra os vértices mais próximos e liga-os por caminho na adjacência triangular; só arestas
+/// internas compartilhadas por duas faces podem gerar restrições de flexão.
+fn trace_curve_to_mesh_edges(
+    vertices: &[PatternPoint2],
+    triangles: &[[u32; 3]],
+    curve: &Curve2D,
+    sampling_spacing: f64,
+    stiffness: f32,
+    base_angle: f32,
+) -> Vec<LocalFoldEdge> {
+    if vertices.len() < 3 || triangles.is_empty() { return Vec::new(); }
+    let Some(path_points) = curve_points_at_spacing(curve, sampling_spacing * 0.5) else {
+        return Vec::new();
+    };
+
+    let mut adjacency = vec![Vec::<usize>::new(); vertices.len()];
+    let mut face_count = HashMap::<(usize, usize), usize>::new();
+    for triangle in triangles {
+        for k in 0..3 {
+            let a = triangle[k] as usize;
+            let b = triangle[(k + 1) % 3] as usize;
+            if a >= vertices.len() || b >= vertices.len() || a == b { continue; }
+            let key = if a < b { (a, b) } else { (b, a) };
+            *face_count.entry(key).or_insert(0) += 1;
+            adjacency[a].push(b);
+            adjacency[b].push(a);
+        }
+    }
+    for neighbors in &mut adjacency {
+        neighbors.sort_unstable();
+        neighbors.dedup();
+    }
+
+    let nearest_vertex = |point: PatternPoint2| -> usize {
+        vertices.iter().enumerate().min_by(|(_, a), (_, b)| {
+            let da = (a.x - point.x).powi(2) + (a.y - point.y).powi(2);
+            let db = (b.x - point.x).powi(2) + (b.y - point.y).powi(2);
+            da.total_cmp(&db)
+        }).map(|(index, _)| index).unwrap_or(0)
+    };
+
+    let stiffness = stiffness.clamp(0.02, 1.0);
+    let mut mapped = BTreeMap::<(usize, usize), (f32, f32)>::new();
+    for pair in path_points.windows(2) {
+        let source = nearest_vertex(pair[0]);
+        let target = nearest_vertex(pair[1]);
+        if source == target { continue; }
+
+        // BFS sobre o grafo da malha; o caminho curto mantém a linha física na região mais
+        // próxima do traçado sem inventar vértices nem modificar a triangulação CDT.
+        let mut parent = vec![usize::MAX; vertices.len()];
+        let mut queue = VecDeque::new();
+        parent[source] = source;
+        queue.push_back(source);
+        while let Some(current) = queue.pop_front() {
+            if current == target { break; }
+            for &neighbor in &adjacency[current] {
+                if parent[neighbor] == usize::MAX {
+                    parent[neighbor] = current;
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+        if parent[target] == usize::MAX { continue; }
+        let mut path = vec![target];
+        let mut current = target;
+        while current != source {
+            current = parent[current];
+            if current == usize::MAX { break; }
+            path.push(current);
+        }
+        if path.last().copied() != Some(source) { continue; }
+        path.reverse();
+
+        let tangent = Vec2::new(
+            (pair[1].x - pair[0].x) as f32,
+            (pair[1].y - pair[0].y) as f32,
+        );
+        if tangent.length_squared() <= 1.0e-12 { continue; }
+        for edge in path.windows(2) {
+            let (a, b) = (edge[0].min(edge[1]), edge[0].max(edge[1]));
+            if face_count.get(&(a, b)).copied().unwrap_or(0) < 2 { continue; }
+            let canonical_direction = Vec2::new(
+                (vertices[b].x - vertices[a].x) as f32,
+                (vertices[b].y - vertices[a].y) as f32,
+            );
+            let orientation = if canonical_direction.dot(tangent) < 0.0 { -1.0 } else { 1.0 };
+            let angle = base_angle * orientation;
+            mapped.entry((a, b))
+                .and_modify(|spec| {
+                    spec.0 = spec.0.min(stiffness);
+                    spec.1 = (spec.1 + angle) * 0.5;
+                })
+                .or_insert((stiffness, angle));
+        }
+    }
+    mapped.into_iter().map(|((a, b), (s, angle))| {
+        (a as u32, b as u32, s, angle)
+    }).collect()
+}
+
+/// Cria dobradiças físicas para linhas de dobra e os dois vincos opostos de uma prega.
+/// Linhas Decorativas continuam apenas visuais. O mapeamento segue arestas já existentes,
+/// sem retopologizar nem inserir vértices na CDT.
+fn physical_fold_edges(
+    vertices: &[PatternPoint2],
+    triangles: &[[u32; 3]],
+    piece: &PatternPiece,
+) -> Vec<LocalFoldEdge> {
+    let mut combined = BTreeMap::<(u32, u32), (f32, f32)>::new();
+    let mut add_curve = |curve: &Curve2D, stiffness: f32, angle: f32, spacing: f64| {
+        for (a, b, s, rest_angle) in trace_curve_to_mesh_edges(
+            vertices, triangles, curve, spacing, stiffness, angle,
+        ) {
+            combined.entry((a, b))
+                .and_modify(|spec| {
+                    spec.0 = spec.0.min(s);
+                    spec.1 = (spec.1 + rest_angle) * 0.5;
+                })
+                .or_insert((s, rest_angle));
+        }
+    };
+
+    for fold in &piece.fold_lines {
+        let base_angle = match fold.kind {
+            FoldKind::Valley => fold.angle_radians as f32,
+            FoldKind::Mountain => -(fold.angle_radians as f32),
+            FoldKind::Decorative => continue,
+        };
+        add_curve(
+            &fold.curve,
+            fold.stiffness as f32,
+            base_angle,
+            piece.fabric.particle_distance_meters,
+        );
+    }
+
+    for pleat in &piece.pleats {
+        // A profundidade representa a distância entre os dois vincos; cada vinco fica a
+        // metade desse valor do eixo central e recebe um ângulo oposto ao outro.
+        let half_depth = pleat.depth_meters * 0.5;
+        let Some(first_crease) = offset_open_curve(
+            &pleat.axis, -half_depth, piece.fabric.particle_distance_meters * 0.5,
+        ) else { continue; };
+        let Some(second_crease) = offset_open_curve(
+            &pleat.axis, half_depth, piece.fabric.particle_distance_meters * 0.5,
+        ) else { continue; };
+        let angle = pleat.angle_radians as f32;
+        add_curve(
+            &first_crease, 0.22, angle,
+            piece.fabric.particle_distance_meters,
+        );
+        add_curve(
+            &second_crease, 0.22, -angle,
+            piece.fabric.particle_distance_meters,
+        );
+    }
+
+    combined.into_iter().map(|((a, b), (stiffness, angle))| {
+        (a, b, stiffness, angle)
+    }).collect()
+}
 
 /// Raio de montagem por painel, incluindo espessura, ruído inicial e folga entre camadas.
 fn pattern_sim_shell_radius(piece_index: usize, thickness: f32) -> f32 {
@@ -2286,6 +2487,7 @@ impl ClothEvoApp {
             curve,
             kind: FoldKind::Valley,
             stiffness: 0.35,
+            angle_radians: std::f64::consts::FRAC_PI_6,
         });
         self.sync_symmetric_mate(piece_id);
         self.draft_points.clear();
