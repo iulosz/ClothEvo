@@ -2493,7 +2493,7 @@ impl ClothEvoApp {
         self.sync_symmetric_mate(piece_id);
         self.draft_points.clear();
         self.pattern_tool = PatternTool::Select;
-        self.pattern_message = "Linha de dobra (vale) adicionada; rigidez inicial 0,35.".into();
+        self.pattern_message = "Dobra física criada: alvo de 30° e 35% da rigidez de flexão base.".into();
         self.remember_pattern_change(before);
     }
 
@@ -2512,7 +2512,7 @@ impl ClothEvoApp {
         self.sync_symmetric_mate(piece_id);
         self.draft_points.clear();
         self.pattern_tool = PatternTool::Select;
-        self.pattern_message = "Prega criada com profundidade inicial de 2 cm e ângulo de 45°.".into();
+        self.pattern_message = "Prega física criada: dois vincos opostos, separados por 2 cm, com alvo inicial de 45°.".into();
         self.remember_pattern_change(before);
     }
 
@@ -3472,6 +3472,7 @@ impl ClothEvoApp {
             pivot: Vec3,
         }
         let mut infos: Vec<PieceBuildInfo> = Vec::new();
+        let mut physical_fold_edge_count = 0usize;
         let piece_count = prepared.len();
         let x_span = (max_x - min_x).max(1.0e-6);
         let origin_y = (0.9 - min_y) as f32;
@@ -3502,6 +3503,7 @@ impl ClothEvoApp {
             let fold_edges = physical_fold_edges(
                 &mesh.vertices, &mesh.triangles, piece_metadata,
             );
+            physical_fold_edge_count += fold_edges.len();
             let panel_mesh = PanelMesh { uv, triangles: mesh.triangles };
             // Distribui o layout 2D pela semicircunferência frontal do colisor corporal:
             // moldes mais à esquerda/direita começam tangentes às laterais, e costuras os unem.
@@ -3625,13 +3627,18 @@ impl ClothEvoApp {
             .sum::<usize>();
         let body_collider_count = self.sim.colliders.len().saturating_sub(1);
         self.pattern_message = format!(
-            "Prévia pronta para posicionamento: {} moldes, {} costuras, {} âncoras fixadas e manequim com {} volumes de colisão. Arraste os painéis em 3D; inicie a simulação quando estiver satisfeito. Avatar: {:.2} m; ombros {:.2} m, cintura {:.2} m e quadril {:.2} m.",
-            piece_count, self.pattern_project.seams.len(), pinned, body_collider_count,
+            "Prévia pronta: {} moldes, {} costuras, {} âncoras fixadas, {} arestas de dobra/prega mapeadas e {} volumes de colisão corporal. Arraste os painéis em 3D; inicie a simulação quando estiver satisfeito. Avatar: {:.2} m; ombros {:.2} m, cintura {:.2} m e quadril {:.2} m.",
+            piece_count, self.pattern_project.seams.len(), pinned, physical_fold_edge_count, body_collider_count,
             self.pattern_project.avatar.height_meters,
             self.pattern_project.avatar.shoulder_width_meters,
             self.pattern_project.avatar.waist_width_meters,
             self.pattern_project.avatar.hip_width_meters,
         );
+        if physical_fold_edge_count == 0
+            && self.pattern_project.pieces.iter().any(|piece| !piece.fold_lines.is_empty() || !piece.pleats.is_empty())
+        {
+            self.pattern_message.push_str(" Nenhuma dobra/prega encontrou arestas internas suficientes na malha; aumente a resolução do molde ou ajuste o traçado.");
+        }
         Ok(())
     }
 
