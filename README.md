@@ -1,9 +1,14 @@
-# ClothEvo — Fase 0
+# ClothEvo — Pattern Studio + XPBD
 
-Protótipo para validar os maiores riscos técnicos de um programa de moldes + simulação de tecido
-(estilo CLO3D / Marvelous Designer): **estabilidade e desempenho do solver XPBD**, colisão com
-primitivas e **costuras 2D → 3D**. Ainda não há editor 2D, avatar glTF nem DXF — isso vem nas
-próximas fases.
+Aplicação desktop em Rust para edição de moldes 2D e simulação de tecido XPBD em 3D. O repositório
+inclui geometria vetorial de curvas lineares/Bézier, triangulação CDT, costuras, piques, simetria,
+Cut & Sew, detalhes de dobra/prega, prévia de posicionamento 3D, colisores analíticos e renderer WGPU
+integrado ao egui.
+
+**Estado do projeto:** protótipo em desenvolvimento. Alguns recursos são aproximados: a auto-colisão
+usa um orçamento de candidatos para proteger o desempenho; linhas de dobra mapeiam para arestas
+existentes da malha; e o simulador atual usa colisores corporais analíticos, sem importação de avatar
+glTF. Ainda não é um substituto completo do CLO3D/Marvelous Designer nem um pipeline de produção.
 
 ## Como rodar
 

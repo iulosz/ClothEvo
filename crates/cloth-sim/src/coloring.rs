@@ -7,7 +7,7 @@ use std::ops::Range;
 pub fn greedy_coloring<const N: usize>(items: &[[u32; N]], particle_count: usize) -> Vec<u16> {
     // Bitsets dinâmicos mantêm o caminho rápido em malhas normais e evitam panic
     // quando uma entrada degenerada exige mais de 128 cores.
-    let mut used = vec![vec![0u64; 1]; particle_count];
+    let mut used = vec![Vec::<u64>::new(); particle_count];
     let mut colors = Vec::with_capacity(items.len());
     for item in items {
         let mut color = 0usize;
