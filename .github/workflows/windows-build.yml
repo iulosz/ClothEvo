@@ -2,7 +2,7 @@ name: Windows build
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/split-workspace]
   workflow_dispatch:
 
 permissions:
@@ -65,6 +65,7 @@ jobs:
           retention-days: 30
 
       - name: Publish preview release
+        if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: windows-preview-${{ github.run_number }}
