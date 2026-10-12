@@ -385,13 +385,13 @@ impl PatternProject {
         let end = (edge.segment_end as usize).min(curve.segments.len());
         if start >= end { return Some(0.0); }
 
-        let mut points = Vec::with_capacity((end - start) * 32 + 1);
+        let mut points = Vec::with_capacity((end - start) * 24 + 1);
         points.push(if start == 0 { curve.start } else { curve.segments[start - 1].endpoint() });
         for index in start..end {
             let segment_start = if index == 0 { curve.start } else { curve.segments[index - 1].endpoint() };
             let segment = &curve.segments[index];
-            for step in 1..=32 {
-                let t = step as f64 / 32.0;
+            for step in 1..=24 {
+                let t = step as f64 / 24.0;
                 let point = match segment {
                     CurveSegment::Line { to } => Point2::new(
                         segment_start.x + (to.x - segment_start.x) * t,
@@ -813,7 +813,7 @@ mod tests {
         });
         assert!(project.validate().is_ok());
         assert_eq!(project.validation_warnings().len(), 1);
-        assert!(project.validation_warnings()[0].contains("3:1"));
+        assert!(project.validation_warnings()[0].contains("8.00:1"));
     }
 
 }
