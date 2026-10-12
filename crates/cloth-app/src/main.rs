@@ -4156,13 +4156,152 @@ fn classify_curve_side(
     classify_points_side(&dense_curve_samples(curve, 24), polygon_a, polygon_b)
 }
 
-fn assign_curve_to_side(
-    curve: Curve2D,
+fn side_for_cut_point(
+    point: PatternPoint2,
+    polygon_a: &[PatternPoint2],
+    polygon_b: &[PatternPoint2],
+) -> Option<usize> {
+    match (
+        point_in_polygon(point, polygon_a),
+        point_in_polygon(point, polygon_b),
+    ) {
+        (true, false) => Some(0),
+        (false, true) => Some(1),
+        _ => None,
+    }
+}
+
+fn cut_intersection_between(
+    a: PatternPoint2,
+    b: PatternPoint2,
+    side_a: usize,
+    side_b: usize,
+    polygon_a: &[PatternPoint2],
+    polygon_b: &[PatternPoint2],
+) -> PatternPoint2 {
+    let mut low = a;
+    let mut high = b;
+    for _ in 0..40 {
+        let mid = PatternPoint2::new(
+            (low.x + high.x) * 0.5,
+            (low.y + high.y) * 0.5,
+        );
+        match side_for_cut_point(mid, polygon_a, polygon_b) {
+            Some(side) if side == side_a => low = mid,
+            Some(side) if side == side_b => high = mid,
+            _ => return mid,
+        }
+    }
+    PatternPoint2::new((low.x + high.x) * 0.5, (low.y + high.y) * 0.5)
+}
+
+fn append_split_segment(
+    fragments: &mut [Vec<Vec<PatternPoint2>>; 2],
     side: usize,
-    first: &mut Vec<Curve2D>,
-    second: &mut Vec<Curve2D>,
+    a: PatternPoint2,
+    b: PatternPoint2,
 ) {
-    if side == 0 { first.push(curve); } else { second.push(curve); }
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    if dx * dx + dy * dy <= 1.0e-20 {
+        return;
+    }
+    let side_fragments = &mut fragments[side];
+    if let Some(last) = side_fragments.last_mut() {
+        if last.last().is_some_and(|previous| {
+            let dx = previous.x - a.x;
+            let dy = previous.y - a.y;
+            dx * dx + dy * dy <= 1.0e-12
+        }) {
+            if last.last().is_none_or(|previous| {
+                let dx = previous.x - b.x;
+                let dy = previous.y - b.y;
+                dx * dx + dy * dy > 1.0e-20
+            }) {
+                last.push(b);
+            }
+            return;
+        }
+    }
+    side_fragments.push(vec![a, b]);
+}
+
+fn split_curve_fragments_by_cut(
+    curve: &Curve2D,
+    polygon_a: &[PatternPoint2],
+    polygon_b: &[PatternPoint2],
+) -> Result<[Vec<Curve2D>; 2], String> {
+    // Preserve an untouched curve (including Bézier handles) whenever possible.
+    if let Ok(side) = classify_curve_side(curve, polygon_a, polygon_b) {
+        let mut result: [Vec<Curve2D>; 2] = [Vec::new(), Vec::new()];
+        result[side].push(curve.clone());
+        return Ok(result);
+    }
+
+    let points = dense_curve_samples(curve, 64);
+    if points.len() < 2 {
+        return Err("não foi possível amostrar o detalhe interno".into());
+    }
+    let mut point_fragments: [Vec<Vec<PatternPoint2>>; 2] = [Vec::new(), Vec::new()];
+    for pair in points.windows(2) {
+        let a = pair[0];
+        let b = pair[1];
+        match (
+            side_for_cut_point(a, polygon_a, polygon_b),
+            side_for_cut_point(b, polygon_a, polygon_b),
+        ) {
+            (Some(side_a), Some(side_b)) if side_a == side_b => {
+                append_split_segment(&mut point_fragments, side_a, a, b);
+            }
+            (Some(side_a), Some(side_b)) => {
+                let intersection = cut_intersection_between(
+                    a, b, side_a, side_b, polygon_a, polygon_b,
+                );
+                append_split_segment(&mut point_fragments, side_a, a, intersection);
+                append_split_segment(&mut point_fragments, side_b, intersection, b);
+            }
+            (Some(side), None) | (None, Some(side)) => {
+                // An exact cut-boundary sample becomes an endpoint shared by both
+                // resulting pieces. Each adjacent half-segment belongs to its interior side.
+                append_split_segment(&mut point_fragments, side, a, b);
+            }
+            (None, None) => {
+                let midpoint = PatternPoint2::new(
+                    (a.x + b.x) * 0.5,
+                    (a.y + b.y) * 0.5,
+                );
+                let Some(side) = side_for_cut_point(midpoint, polygon_a, polygon_b) else {
+                    return Err(
+                        "o detalhe coincide com a linha de corte ou sai das duas peças".into()
+                    );
+                };
+                append_split_segment(&mut point_fragments, side, a, b);
+            }
+        }
+    }
+
+    let mut result: [Vec<Curve2D>; 2] = [Vec::new(), Vec::new()];
+    for side in 0..2 {
+        for fragment in point_fragments[side].drain(..) {
+            if fragment.len() < 2 {
+                continue;
+            }
+            let first = fragment[0];
+            let last = *fragment.last().unwrap();
+            let dx = last.x - first.x;
+            let dy = last.y - first.y;
+            if dx * dx + dy * dy <= 1.0e-16 {
+                continue;
+            }
+            let clipped = Curve2D::polyline(&fragment, false)
+                .map_err(|error| format!("fragmento de detalhe inválido: {error}"))?;
+            result[side].push(clipped);
+        }
+    }
+    if result[0].is_empty() && result[1].is_empty() {
+        return Err("o detalhe não gerou fragmentos válidos após o corte".into());
+    }
+    Ok(result)
 }
 
 fn split_piece_metadata(
@@ -4193,21 +4332,38 @@ fn split_piece_metadata(
     second.sewing_line = None;
 
     for line in &source.internal_lines {
-        let side = classify_curve_side(line, polygon_a, polygon_b)
+        let fragments = split_curve_fragments_by_cut(line, polygon_a, polygon_b)
             .map_err(|error| format!("linha interna: {error}"))?;
-        assign_curve_to_side(line.clone(), side, &mut first.internal_lines, &mut second.internal_lines);
+        first.internal_lines.extend(fragments[0].iter().cloned());
+        second.internal_lines.extend(fragments[1].iter().cloned());
     }
     for fold in &source.fold_lines {
-        let side = classify_curve_side(&fold.curve, polygon_a, polygon_b)
+        let fragments = split_curve_fragments_by_cut(&fold.curve, polygon_a, polygon_b)
             .map_err(|error| format!("linha de dobra: {error}"))?;
-        if side == 0 { first.fold_lines.push(fold.clone()); }
-        else { second.fold_lines.push(fold.clone()); }
+        for fragment in &fragments[0] {
+            let mut split_fold = fold.clone();
+            split_fold.curve = fragment.clone();
+            first.fold_lines.push(split_fold);
+        }
+        for fragment in &fragments[1] {
+            let mut split_fold = fold.clone();
+            split_fold.curve = fragment.clone();
+            second.fold_lines.push(split_fold);
+        }
     }
     for pleat in &source.pleats {
-        let side = classify_curve_side(&pleat.axis, polygon_a, polygon_b)
+        let fragments = split_curve_fragments_by_cut(&pleat.axis, polygon_a, polygon_b)
             .map_err(|error| format!("prega: {error}"))?;
-        if side == 0 { first.pleats.push(pleat.clone()); }
-        else { second.pleats.push(pleat.clone()); }
+        for fragment in &fragments[0] {
+            let mut split_pleat = pleat.clone();
+            split_pleat.axis = fragment.clone();
+            first.pleats.push(split_pleat);
+        }
+        for fragment in &fragments[1] {
+            let mut split_pleat = pleat.clone();
+            split_pleat.axis = fragment.clone();
+            second.pleats.push(split_pleat);
+        }
     }
 
     if let Some(grain) = &source.grain_line {
