@@ -11,6 +11,8 @@ use crate::params::{ConstraintKind, SimParams, KIND_COUNT};
 
 /// Grupos de cor menores que isso são resolvidos em série (overhead do rayon não compensa).
 const PAR_MIN: usize = 256;
+/// Limita a quantidade de pares visitados por vértice quando a malha colapsa em uma célula.
+const MAX_SELF_COLLISION_CANDIDATES_PER_PARTICLE: usize = 96;
 
 /// Restrição de distância entre duas partículas (stretch, shear ou costura).
 #[derive(Clone, Copy, Debug)]
@@ -313,33 +315,13 @@ impl Simulation {
                 (p.z / cell_size).floor() as i32,
             )
         };
-        let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
-        for (i, p) in self.pos.iter().enumerate() {
-            if p.is_finite() {
-                grid.entry(cell_of(*p)).or_default().push(i as u32);
-            }
-        }
-
-        // Cada par aparece uma única vez: sempre processamos j > i.
-        let mut pairs: Vec<(u32, u32)> = Vec::new();
-        for (&cell, indices) in &grid {
-            for dx in -1..=1 {
-                for dy in -1..=1 {
-                    for dz in -1..=1 {
-                        let key = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
-                        let Some(neighbours) = grid.get(&key) else { continue; };
-                        for &i in indices {
-                            for &j in neighbours {
-                                if j <= i { continue; }
-                                let pair = (i, j);
-                                if self.self_collision_exclusions.contains(&pair) { continue; }
-                                pairs.push(pair);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // O pareamento é limitado por vértice: se muitos pontos colapsarem na mesma célula,
+        // o armazenamento permanece O(N·limite) em vez de crescer quadraticamente.
+        let pairs = bounded_self_collision_candidate_pairs(
+            &self.pos,
+            cell_size,
+            &self.self_collision_exclusions,
+        );
 
         let global_mu = self.params.friction.max(0.0);
         for (ia, ib) in pairs {
@@ -590,6 +572,89 @@ impl Simulation {
         edges.sort_unstable();
         edges.dedup();
         edges
+    }
+}
+
+/// Gera pares de auto-colisão em ordem determinística e com limite de candidatos por vértice.
+/// As listas da grade são inseridas por índice crescente, permitindo saltar j <= i com partition_point.
+fn bounded_self_collision_candidate_pairs(
+    positions: &[Vec3],
+    cell_size: f32,
+    exclusions: &HashSet<(u32, u32)>,
+) -> Vec<(u32, u32)> {
+    let cell_size = cell_size.max(1.0e-5);
+    let cell_of = |p: Vec3| -> (i32, i32, i32) {
+        (
+            (p.x / cell_size).floor() as i32,
+            (p.y / cell_size).floor() as i32,
+            (p.z / cell_size).floor() as i32,
+        )
+    };
+    let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
+    for (i, position) in positions.iter().enumerate() {
+        if position.is_finite() {
+            grid.entry(cell_of(*position)).or_default().push(i as u32);
+        }
+    }
+
+    let mut pairs = Vec::new();
+    for (i, position) in positions.iter().enumerate() {
+        if !position.is_finite() { continue; }
+        let (cx, cy, cz) = cell_of(*position);
+        let mut candidates = 0usize;
+        'neighbor_cells: for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let Some(neighbours) = grid.get(&(cx + dx, cy + dy, cz + dz)) else { continue; };
+                    let first_after_i = neighbours.partition_point(|&j| (j as usize) <= i);
+                    for &j in &neighbours[first_after_i..] {
+                        candidates += 1;
+                        if candidates > MAX_SELF_COLLISION_CANDIDATES_PER_PARTICLE {
+                            break 'neighbor_cells;
+                        }
+                        let pair = (i as u32, j);
+                        if exclusions.contains(&pair) { continue; }
+                        pairs.push(pair);
+                    }
+                }
+            }
+        }
+    }
+    pairs
+}
+
+#[cfg(test)]
+mod self_collision_candidate_tests {
+    use super::*;
+
+    #[test]
+    fn candidate_pairs_are_bounded_when_all_particles_collapse_into_one_cell() {
+        let positions = vec![Vec3::ZERO; 800];
+        let pairs = bounded_self_collision_candidate_pairs(&positions, 0.01, &HashSet::new());
+        assert!(!pairs.is_empty());
+        assert!(
+            pairs.len() <= positions.len() * MAX_SELF_COLLISION_CANDIDATES_PER_PARTICLE,
+            "candidate count grew beyond the per-particle bound: {}",
+            pairs.len()
+        );
+        assert!(pairs.iter().all(|&(a, b)| a < b));
+        let unique = pairs.iter().copied().collect::<HashSet<_>>();
+        assert_eq!(unique.len(), pairs.len(), "duplicate candidate pairs were generated");
+    }
+
+    #[test]
+    fn candidate_pairs_skip_excluded_and_non_finite_particles() {
+        let positions = vec![
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Vec3::splat(f32::NAN),
+            Vec3::ZERO,
+        ];
+        let exclusions = HashSet::from([(0_u32, 1_u32)]);
+        let pairs = bounded_self_collision_candidate_pairs(&positions, 0.01, &exclusions);
+        assert!(pairs.iter().all(|&(a, b)| a != 2 && b != 2));
+        assert!(!pairs.contains(&(0, 1)));
+        assert!(pairs.contains(&(0, 3)));
     }
 }
 
