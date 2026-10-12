@@ -169,10 +169,12 @@ impl PanelMaterial {
             self.shear_n_m,
             self.bend_nm,
             self.thickness_meters,
-            self.friction_coefficient,
         ];
         if values.iter().any(|value| !value.is_finite() || *value <= 0.0) {
             return Err("As propriedades físicas do painel precisam ser finitas e positivas.");
+        }
+        if !self.friction_coefficient.is_finite() || !(0.0..=5.0).contains(&self.friction_coefficient) {
+            return Err("O atrito do painel precisa estar entre 0 e 5.");
         }
         Ok(self)
     }
