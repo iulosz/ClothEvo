@@ -68,6 +68,15 @@ struct Capture {
 enum WorkspaceMode {
     Simulation,
     Pattern,
+    /// Viewport 3D e editor de moldes 2D visíveis ao mesmo tempo.
+    Split,
+}
+
+impl WorkspaceMode {
+    /// A simulação avança sempre que a viewport 3D está visível.
+    fn runs_simulation(self) -> bool {
+        matches!(self, Self::Simulation | Self::Split)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,6 +131,10 @@ struct ClothEvoApp {
     last_step_ms: f32,
     capture: Option<Capture>,
     workspace: WorkspaceMode,
+    /// No modo dividido: o editor 2D fica no primeiro painel (esquerda ou topo).
+    split_swapped: bool,
+    /// No modo dividido: painéis empilhados (topo/base) em vez de lado a lado.
+    split_vertical: bool,
     pattern_project: PatternProject,
     draft_points: Vec<PatternPoint2>,
     pattern_spacing: f64,
@@ -231,6 +244,8 @@ impl ClothEvoApp {
             last_step_ms: 0.0,
             capture,
             workspace: WorkspaceMode::Simulation,
+            split_swapped: false,
+            split_vertical: false,
             pattern_project: PatternProject::new("Novo projeto"),
             draft_points: Vec::new(),
             pattern_spacing: 0.08,
@@ -346,11 +361,27 @@ impl ClothEvoApp {
             if ui.selectable_label(self.workspace == WorkspaceMode::Pattern, "Moldes 2D").clicked() {
                 self.workspace = WorkspaceMode::Pattern;
             }
+            if ui.selectable_label(self.workspace == WorkspaceMode::Split, "3D + 2D").clicked() {
+                self.workspace = WorkspaceMode::Split;
+                // O editor 2D agora ocupa só metade da área; reenquadra os moldes.
+                self.pattern_fit_pending = true;
+            }
         });
         ui.separator();
         if self.workspace == WorkspaceMode::Pattern {
             self.pattern_controls(ui);
             return;
+        }
+        if self.workspace == WorkspaceMode::Split {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.split_swapped, "Trocar lados");
+                ui.checkbox(&mut self.split_vertical, "Empilhar");
+            });
+            egui::CollapsingHeader::new("Moldes 2D")
+                .default_open(true)
+                .show(ui, |ui| self.pattern_controls(ui));
+            ui.separator();
+            ui.strong("Simulação 3D");
         }
         if self.using_pattern_sim {
             ui.strong("Cena atual: moldes personalizados");
@@ -2762,7 +2793,10 @@ impl ClothEvoApp {
         self.accumulator = 0.0;
         self.playing = true;
         self.using_pattern_sim = true;
-        self.workspace = WorkspaceMode::Simulation;
+        // No modo dividido o editor 2D continua visível ao lado da simulação.
+        if self.workspace == WorkspaceMode::Pattern {
+            self.workspace = WorkspaceMode::Simulation;
+        }
         self.upload_scene();
         let pinned = self.pattern_project.pieces.iter()
             .map(|piece| piece.assembly.pinned_anchors.len())
@@ -2779,7 +2813,41 @@ impl ClothEvoApp {
         Ok(())
     }
 
-        fn viewport(&mut self, ui: &mut egui::Ui) {
+    /// Modo dividido: 3D e editor 2D lado a lado (ou empilhados), com divisor arrastável.
+    /// O primeiro painel é redimensionável; o segundo ocupa o espaço restante.
+    fn split_viewports(&mut self, ui: &mut egui::Ui) {
+        const MIN_PANE: f32 = 160.0;
+        let vertical = self.split_vertical;
+        // `swapped` coloca o editor 2D no primeiro painel (esquerda ou topo).
+        let pattern_first = self.split_swapped;
+        let total = if vertical { ui.available_height() } else { ui.available_width() };
+        let max_first = (total - MIN_PANE).max(MIN_PANE);
+        // Ids distintos por orientação: o tamanho guardado de uma não vira o da outra.
+        let first = if vertical {
+            egui::Panel::top("split_first_vertical")
+        } else {
+            egui::Panel::left("split_first_horizontal")
+        };
+        first
+            .resizable(true)
+            .frame(egui::Frame::NONE)
+            .default_size(total * 0.5)
+            .size_range(egui::Rangef::new(MIN_PANE, max_first))
+            .show(ui, |ui| self.split_pane(ui, pattern_first));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| self.split_pane(ui, !pattern_first));
+    }
+
+    fn split_pane(&mut self, ui: &mut egui::Ui, pattern: bool) {
+        if pattern {
+            self.pattern_viewport(ui);
+        } else {
+            self.viewport(ui);
+        }
+    }
+
+    fn viewport(&mut self, ui: &mut egui::Ui) {
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
 
@@ -3620,7 +3688,7 @@ impl eframe::App for ClothEvoApp {
         // Avança depois de processar os controles deste frame. Assim, "Passo único" pausa
         // antes do solver rodar e nunca recebe um passo automático adicional no mesmo frame.
         let dt = if self.capture.is_some() { FIXED_DT } else { ui.input(|i| i.stable_dt) };
-        let was_simulation_workspace = self.workspace == WorkspaceMode::Simulation;
+        let was_simulation_workspace = self.workspace.runs_simulation();
         let diverged_before = self.diverged;
         let steps_before = self.sim.stats.steps;
 
@@ -3635,10 +3703,10 @@ impl eframe::App for ClothEvoApp {
         }
 
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
-            if self.workspace == WorkspaceMode::Pattern {
-                self.pattern_viewport(ui);
-            } else {
-                self.viewport(ui);
+            match self.workspace {
+                WorkspaceMode::Pattern => self.pattern_viewport(ui),
+                WorkspaceMode::Simulation => self.viewport(ui),
+                WorkspaceMode::Split => self.split_viewports(ui),
             }
         });
 
@@ -3647,7 +3715,7 @@ impl eframe::App for ClothEvoApp {
             // O diagnóstico foi definido após renderizar o painel de controles deste frame.
             ui.ctx().request_repaint();
         }
-        if (self.playing && self.workspace == WorkspaceMode::Simulation) || self.capture.is_some() {
+        if (self.playing && self.workspace.runs_simulation()) || self.capture.is_some() {
             ui.ctx().request_repaint();
         }
     }
@@ -3685,6 +3753,13 @@ mod pattern_editor_tests {
             ease_meters: 0.0,
         });
         project
+    }
+
+    #[test]
+    fn simulation_runs_whenever_the_3d_viewport_is_visible() {
+        assert!(WorkspaceMode::Simulation.runs_simulation());
+        assert!(WorkspaceMode::Split.runs_simulation());
+        assert!(!WorkspaceMode::Pattern.runs_simulation());
     }
 
     #[test]
