@@ -1144,14 +1144,28 @@ impl ClothEvoApp {
 
             let piece_a = &self.pattern_project.pieces[self.seam_a_piece];
             let piece_b = &self.pattern_project.pieces[self.seam_b_piece];
-            let edge_a = EdgeRef {
+            let edge_a = EdgePath {
                 piece_id: piece_a.id, curve: BoundaryCurve::Outline,
-                segment_start: self.seam_a_segment as u32, segment_end: self.seam_a_segment_end as u32,
+                start: CurveParam {
+                    segment: self.seam_a_segment as u32,
+                    t: if self.seam_free_mode { self.seam_a_start_t } else { 0.0 },
+                },
+                end: CurveParam {
+                    segment: self.seam_a_segment_end.saturating_sub(1) as u32,
+                    t: if self.seam_free_mode { self.seam_a_end_t } else { 1.0 },
+                },
                 reversed: self.seam_a_reversed,
             };
-            let edge_b = EdgeRef {
+            let edge_b = EdgePath {
                 piece_id: piece_b.id, curve: BoundaryCurve::Outline,
-                segment_start: self.seam_b_segment as u32, segment_end: self.seam_b_segment_end as u32,
+                start: CurveParam {
+                    segment: self.seam_b_segment as u32,
+                    t: if self.seam_free_mode { self.seam_b_start_t } else { 0.0 },
+                },
+                end: CurveParam {
+                    segment: self.seam_b_segment_end.saturating_sub(1) as u32,
+                    t: if self.seam_free_mode { self.seam_b_end_t } else { 1.0 },
+                },
                 reversed: self.seam_b_reversed,
             };
             let length_a = edge_length_meters(&self.pattern_project, &edge_a);
@@ -2072,26 +2086,35 @@ impl ClothEvoApp {
         self.seam_drag_before = None;
     }
 
-    fn seam_edges_from_controls(&self) -> Result<(EdgeRef, EdgeRef), String> {
+    fn seam_edges_from_controls(&self) -> Result<(EdgePath, EdgePath), String> {
         let count = self.pattern_project.pieces.len();
         if count < 2 { return Err("Crie pelo menos duas peças antes de costurá-las.".into()); }
         let a_piece = &self.pattern_project.pieces[self.seam_a_piece.min(count - 1)];
         let b_piece = &self.pattern_project.pieces[self.seam_b_piece.min(count - 1)];
-        let make_edge = |piece: &PatternPiece, start: usize, end: usize, reversed: bool| {
+        let make_edge = |piece: &PatternPiece, start: usize, end: usize,
+                         start_t: f64, end_t: f64, reversed: bool| {
             let segment_count = piece.outline.segment_count();
             let start = start.min(segment_count.saturating_sub(1));
             let end = end.clamp(start + 1, segment_count);
-            EdgeRef {
+            EdgePath {
                 piece_id: piece.id,
                 curve: BoundaryCurve::Outline,
-                segment_start: start as u32,
-                segment_end: end as u32,
+                start: CurveParam {
+                    segment: start as u32,
+                    t: if self.seam_free_mode { start_t.clamp(0.0, 1.0) } else { 0.0 },
+                },
+                end: CurveParam {
+                    segment: (end - 1) as u32,
+                    t: if self.seam_free_mode { end_t.clamp(0.0, 1.0) } else { 1.0 },
+                },
                 reversed,
             }
         };
         Ok((
-            make_edge(a_piece, self.seam_a_segment, self.seam_a_segment_end, self.seam_a_reversed),
-            make_edge(b_piece, self.seam_b_segment, self.seam_b_segment_end, self.seam_b_reversed),
+            make_edge(a_piece, self.seam_a_segment, self.seam_a_segment_end,
+                self.seam_a_start_t, self.seam_a_end_t, self.seam_a_reversed),
+            make_edge(b_piece, self.seam_b_segment, self.seam_b_segment_end,
+                self.seam_b_start_t, self.seam_b_end_t, self.seam_b_reversed),
         ))
     }
 
@@ -2107,8 +2130,8 @@ impl ClothEvoApp {
         let seam = SeamDefinition {
             id: next_id,
             name: name.clone(),
-            a: edge_a,
-            b: edge_b,
+            a: edge_a.clone(),
+            b: edge_b.clone(),
             ease_meters: self.seam_ease_m,
         };
         let before = self.editor_snapshot();
