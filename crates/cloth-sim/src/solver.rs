@@ -768,6 +768,7 @@ mod tests {
             shear_n_m: 100.0,
             bend_nm: 2.0e-4,
             thickness_meters: 0.002,
+            friction_coefficient: 0.8,
         };
         let mut builder = ClothBuilder::new();
         let a = builder.add_panel_with_grain_and_material(
@@ -785,6 +786,7 @@ mod tests {
         assert!((sim.inv_mass[0] / sim.inv_mass[4] - 4.0).abs() < 1.0e-4);
         assert!((sim.thickness_scale[0] - 1.0).abs() < 1.0e-6);
         assert!((sim.thickness_scale[4] - 0.4).abs() < 1.0e-5);
+        assert!((sim.friction_scale[4] - 2.0).abs() < 1.0e-5);
 
         let edge_a = sim.distance.iter()
             .find(|constraint| {
