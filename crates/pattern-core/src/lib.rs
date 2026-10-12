@@ -944,7 +944,11 @@ pub fn suggest_seams(
                         let mean_delta = deltas.iter().sum::<f64>() / deltas.len() as f64;
                         (1.0 - mean_delta).clamp(0.0, 1.0)
                     };
-                    let notch_score = 0.5 * count_similarity + 0.5 * position_similarity;
+                    let notch_score = if notches_a.is_empty() && notches_b.is_empty() {
+                        0.5 // sem piques, esse critério é neutro em vez de premiar ausência de informação
+                    } else {
+                        0.5 * count_similarity + 0.5 * position_similarity
+                    };
                     let score = (0.30 * notch_score + 0.25 * ratio_score
                         + 0.25 * proximity_score + 0.20 * orientation_score).clamp(0.0, 1.0);
                     if score < params.minimum_score { continue; }
@@ -1250,6 +1254,14 @@ mod tests {
         }
         let matching_notches = notches_for_segment(&aligned.pieces[0], 1);
         assert_eq!(matching_notches.len(), 1);
+        let aligned_suggestions = suggest_seams(&aligned, &SeamSuggestionParams {
+            minimum_score: 0.0,
+            ..SeamSuggestionParams::default()
+        });
+        let aligned_score = aligned_suggestions.iter().find(|suggestion|
+            suggestion.a.piece_id == 1 && suggestion.a.start.segment == 1
+                && suggestion.b.piece_id == 2 && suggestion.b.start.segment == 3
+        ).map(|suggestion| suggestion.score).expect("facing edges should be suggested when notches align");
 
         let mut misaligned = aligned.clone();
         misaligned.pieces[0].notches[0].t = 0.2;
@@ -1262,9 +1274,11 @@ mod tests {
             minimum_score: 0.0,
             ..SeamSuggestionParams::default()
         });
-        assert!(suggestions.iter().all(|suggestion|
-            suggestion.a.piece_id != suggestion.b.piece_id
-        ));
+        let misaligned_score = suggestions.iter().find(|suggestion|
+            suggestion.a.piece_id == 1 && suggestion.a.start.segment == 1
+                && suggestion.b.piece_id == 2 && suggestion.b.start.segment == 3
+        ).map(|suggestion| suggestion.score).expect("facing edges remain a candidate with misaligned notches");
+        assert!(misaligned_score < aligned_score);
     }
 
     #[test]
