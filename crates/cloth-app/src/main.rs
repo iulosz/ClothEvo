@@ -3495,34 +3495,6 @@ fn curve_segment_point(curve: &Curve2D, segment_index: usize, t: f64) -> Option<
 }
 
 /// Comprimento de arco entre dois parâmetros locais do mesmo segmento.
-fn curve_segment_arc_between(curve: &Curve2D, segment_index: usize, start_t: f64, end_t: f64) -> f64 {
-    let start_t = start_t.clamp(0.0, 1.0);
-    let end_t = end_t.clamp(0.0, 1.0);
-    if end_t <= start_t { return 0.0; }
-    if matches!(curve.segments.get(segment_index), Some(CurveSegment::Line { .. })) {
-        let a = curve_segment_point(curve, segment_index, start_t);
-        let b = curve_segment_point(curve, segment_index, end_t);
-        return a.zip(b).map(|(a, b)| a.distance(b)).unwrap_or(0.0);
-    }
-    let steps = 32usize;
-    let mut previous = match curve_segment_point(curve, segment_index, start_t) {
-        Some(point) => point,
-        None => return 0.0,
-    };
-    let mut length = 0.0;
-    for step in 1..=steps {
-        let t = start_t + (end_t - start_t) * step as f64 / steps as f64;
-        let Some(point) = curve_segment_point(curve, segment_index, t) else { continue; };
-        length += previous.distance(point);
-        previous = point;
-    }
-    length
-}
-
-fn curve_segment_arc_length(curve: &Curve2D, segment_index: usize, end_t: f64) -> f64 {
-    curve_segment_arc_between(curve, segment_index, 0.0, end_t)
-}
-
 fn param_at_curve_position(position: f64, segment_count: usize, upper_bound: f64) -> CurveParam {
     let max_position = segment_count as f64;
     let upper = if upper_bound.is_finite() { upper_bound.min(max_position) } else { max_position };
@@ -3613,28 +3585,23 @@ fn edge_notch_positions(project: &PatternProject, edge: &EdgePath) -> Vec<f32> {
     let Some(piece) = project.pieces.iter().find(|piece| piece.id == edge.piece_id) else {
         return Vec::new();
     };
-    let curve = &piece.outline;
-    let start = edge.start;
-    let end = edge.end;
     let total = edge_length_meters(project, edge);
     if total <= 1.0e-9 { return Vec::new(); }
 
     let mut out = piece.notches.iter().filter_map(|notch| {
-        let index = notch.segment_index;
-        let scalar = index as f64 + notch.t;
+        let scalar = notch.segment_index as f64 + notch.t;
         if scalar < edge.start_position() - 1.0e-9
             || scalar > edge.end_position() + 1.0e-9
             || !notch.t.is_finite()
         { return None; }
-        let mut prefix = 0.0;
-        for segment in start.segment..=index {
-            let seg = segment as usize;
-            let t0 = if segment == start.segment { start.t } else { 0.0 };
-            let t1 = if segment == index { notch.t } else { 1.0 };
-            if t1 > t0 {
-                prefix += curve_segment_arc_between(curve, seg, t0, t1);
-            }
-        }
+        let prefix_path = EdgePath {
+            piece_id: edge.piece_id,
+            curve: edge.curve,
+            start: edge.start,
+            end: CurveParam { segment: notch.segment_index, t: notch.t },
+            reversed: false,
+        };
+        let prefix = project.edge_length_meters(&prefix_path).unwrap_or(0.0);
         let mut progress = (prefix / total).clamp(0.0, 1.0);
         if edge.reversed { progress = 1.0 - progress; }
         Some(progress as f32)
