@@ -3495,6 +3495,12 @@ impl ClothEvoApp {
                     ((p.y - center_y) as f32) * panel_scale[1],
                 ))
                 .collect();
+            let piece_metadata = self.pattern_project.pieces.iter()
+                .find(|piece| piece.id == id)
+                .ok_or_else(|| format!("Metadados ausentes para o molde '{}'.", name))?;
+            let fold_edges = physical_fold_edges(
+                &mesh.vertices, &mesh.triangles, piece_metadata,
+            );
             let panel_mesh = PanelMesh { uv, triangles: mesh.triangles };
             // Distribui o layout 2D pela semicircunferência frontal do colisor corporal:
             // moldes mais à esquerda/direita começam tangentes às laterais, e costuras os unem.
@@ -3534,6 +3540,9 @@ impl ClothEvoApp {
                 grain,
                 material,
             ).map_err(|error| format!("Material inválido em '{}': {error}", name))?;
+            for &(a, b, stiffness, rest_angle) in &fold_edges {
+                builder.add_fold_edge(handle, a, b, stiffness, rest_angle);
+            }
 
             // Âncoras de contorno: 0 é o início da curva; as demais correspondem ao fim do
             // segmento anterior. Os índices são os mesmos que o editor exibe ao selecionar nós.
