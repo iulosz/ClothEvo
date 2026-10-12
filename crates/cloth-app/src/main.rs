@@ -2959,19 +2959,24 @@ fn curve_segment_point(curve: &Curve2D, segment_index: usize, t: f64) -> Option<
     })
 }
 
-/// Comprimento de arco aproximado até t; linear é exato e Bézier usa amostragem uniforme.
-fn curve_segment_arc_length(curve: &Curve2D, segment_index: usize, end_t: f64) -> f64 {
-    let Some(start) = curve_segment_point(curve, segment_index, 0.0) else { return 0.0; };
-    let Some(segment) = curve.segments.get(segment_index) else { return 0.0; };
+/// Comprimento de arco entre dois parâmetros locais do mesmo segmento.
+fn curve_segment_arc_between(curve: &Curve2D, segment_index: usize, start_t: f64, end_t: f64) -> f64 {
+    let start_t = start_t.clamp(0.0, 1.0);
     let end_t = end_t.clamp(0.0, 1.0);
-    if let CurveSegment::Line { to } = segment {
-        return start.distance(curve_segment_point(curve, segment_index, end_t).unwrap_or(*to));
+    if end_t <= start_t { return 0.0; }
+    if matches!(curve.segments.get(segment_index), Some(CurveSegment::Line { .. })) {
+        let a = curve_segment_point(curve, segment_index, start_t);
+        let b = curve_segment_point(curve, segment_index, end_t);
+        return a.zip(b).map(|(a, b)| a.distance(b)).unwrap_or(0.0);
     }
     let steps = 32usize;
-    let mut previous = start;
+    let mut previous = match curve_segment_point(curve, segment_index, start_t) {
+        Some(point) => point,
+        None => return 0.0,
+    };
     let mut length = 0.0;
     for step in 1..=steps {
-        let t = end_t * step as f64 / steps as f64;
+        let t = start_t + (end_t - start_t) * step as f64 / steps as f64;
         let Some(point) = curve_segment_point(curve, segment_index, t) else { continue; };
         length += previous.distance(point);
         previous = point;
@@ -2979,7 +2984,11 @@ fn curve_segment_arc_length(curve: &Curve2D, segment_index: usize, end_t: f64) -
     length
 }
 
-fn edge_curve<'a>(project: &'a PatternProject, edge: &EdgeRef) -> Option<&'a Curve2D> {
+fn curve_segment_arc_length(curve: &Curve2D, segment_index: usize, end_t: f64) -> f64 {
+    curve_segment_arc_between(curve, segment_index, 0.0, end_t)
+}
+
+fn edge_curve<'a>(project: &'a PatternProject, edge: &EdgePath) -> Option<&'a Curve2D> {
     let piece = project.pieces.iter().find(|piece| piece.id == edge.piece_id)?;
     match edge.curve {
         BoundaryCurve::Outline => Some(&piece.outline),
@@ -2988,31 +2997,39 @@ fn edge_curve<'a>(project: &'a PatternProject, edge: &EdgeRef) -> Option<&'a Cur
 }
 
 /// Mede a extensão real do intervalo de segmentos, inclusive para intervalos Bézier.
-fn edge_length_meters(project: &PatternProject, edge: &EdgeRef) -> f64 {
+fn edge_length_meters(project: &PatternProject, edge: &EdgePath) -> f64 {
     project.edge_length_meters(edge).unwrap_or(0.0)
 }
 
 /// Posição de cada pique como progresso de arco normalizado na borda de costura.
-fn edge_notch_positions(project: &PatternProject, edge: &EdgeRef) -> Vec<f32> {
+fn edge_notch_positions(project: &PatternProject, edge: &EdgePath) -> Vec<f32> {
     if edge.curve != BoundaryCurve::Outline { return Vec::new(); }
     let Some(piece) = project.pieces.iter().find(|piece| piece.id == edge.piece_id) else {
         return Vec::new();
     };
     let curve = &piece.outline;
-    let start = edge.segment_start as usize;
-    let end = (edge.segment_end as usize).min(curve.segments.len());
-    if start >= end { return Vec::new(); }
-    let lengths: Vec<f64> = (start..end)
-        .map(|index| curve_segment_arc_length(curve, index, 1.0)).collect();
-    let total: f64 = lengths.iter().sum();
-    if total <= 1e-9 { return Vec::new(); }
+    let start = edge.start;
+    let end = edge.end;
+    let total = edge_length_meters(project, edge);
+    if total <= 1.0e-9 { return Vec::new(); }
 
     let mut out = piece.notches.iter().filter_map(|notch| {
-        let index = notch.segment_index as usize;
-        if index < start || index >= end || !notch.t.is_finite() { return None; }
-        let prefix: f64 = lengths.iter().take(index - start).sum();
-        let partial = curve_segment_arc_length(curve, index, notch.t);
-        let mut progress = ((prefix + partial) / total).clamp(0.0, 1.0);
+        let index = notch.segment_index;
+        let scalar = index as f64 + notch.t;
+        if scalar < edge.start_position() - 1.0e-9
+            || scalar > edge.end_position() + 1.0e-9
+            || !notch.t.is_finite()
+        { return None; }
+        let mut prefix = 0.0;
+        for segment in start.segment..=index {
+            let seg = segment as usize;
+            let t0 = if segment == start.segment { start.t } else { 0.0 };
+            let t1 = if segment == index { notch.t } else { 1.0 };
+            if t1 > t0 {
+                prefix += curve_segment_arc_between(curve, seg, t0, t1);
+            }
+        }
+        let mut progress = (prefix / total).clamp(0.0, 1.0);
         if edge.reversed { progress = 1.0 - progress; }
         Some(progress as f32)
     }).collect::<Vec<_>>();
@@ -3023,8 +3040,8 @@ fn edge_notch_positions(project: &PatternProject, edge: &EdgeRef) -> Vec<f32> {
 /// Gera marcadores de notch para que cada pique pareado receba uma restrição explícita do solver.
 fn paired_notch_markers(
     project: &PatternProject,
-    edge_a: &EdgeRef,
-    edge_b: &EdgeRef,
+    edge_a: &EdgePath,
+    edge_b: &EdgePath,
 ) -> Vec<(f32, f32)> {
     edge_notch_positions(project, edge_a).into_iter()
         .zip(edge_notch_positions(project, edge_b))
@@ -3032,19 +3049,21 @@ fn paired_notch_markers(
 }
 
 /// Amostra apenas o intervalo de segmentos referenciado pela costura, para o overlay do canvas.
-fn edge_path_points(project: &PatternProject, edge: &EdgeRef, steps: usize) -> Vec<PatternPoint2> {
+fn edge_path_points(project: &PatternProject, edge: &EdgePath, steps: usize) -> Vec<PatternPoint2> {
     let Some(curve) = edge_curve(project, edge) else { return Vec::new(); };
-    let start = edge.segment_start as usize;
-    let end = (edge.segment_end as usize).min(curve.segments.len());
-    if start >= end { return Vec::new(); }
+    if edge.start_position() >= edge.end_position()
+        || edge.end.segment as usize >= curve.segments.len()
+    { return Vec::new(); }
     let steps = steps.max(1);
     let mut points = Vec::new();
-    for index in start..end {
+    for index in edge.start.segment as usize..=edge.end.segment as usize {
+        let t0 = if index == edge.start.segment as usize { edge.start.t } else { 0.0 };
+        let t1 = if index == edge.end.segment as usize { edge.end.t } else { 1.0 };
+        if t1 < t0 { return Vec::new(); }
         for step in 0..=steps {
-            if index > start && step == 0 { continue; }
-            if let Some(point) = curve_segment_point(curve, index, step as f64 / steps as f64) {
-                points.push(point);
-            }
+            if index > edge.start.segment as usize && step == 0 { continue; }
+            let t = t0 + (t1 - t0) * step as f64 / steps as f64;
+            if let Some(point) = curve_segment_point(curve, index, t) { points.push(point); }
         }
     }
     if edge.reversed { points.reverse(); }
