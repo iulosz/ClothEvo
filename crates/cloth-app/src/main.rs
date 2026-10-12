@@ -2224,7 +2224,7 @@ impl ClothEvoApp {
             // segmento anterior. Os índices são os mesmos que o editor exibe ao selecionar nós.
             for anchor in &assembly.pinned_anchors {
                 let anchor_index = *anchor as usize;
-                if anchor_index >= ranges.len().saturating_sub(1) {
+                if anchor_index >= ranges.len() {
                     return Err(format!(
                         "O vértice fixado {} não existe no contorno de '{}'.",
                         anchor_index + 1, name
