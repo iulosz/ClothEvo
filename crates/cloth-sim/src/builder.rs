@@ -281,7 +281,8 @@ impl ClothBuilder {
                 scale: geometric_scale * material_scale,
                 kind,
             });
-            edge_constraint_indices.insert((i, j), distance.len() - 1);
+            let boundary_key = if i < j { (i, j) } else { (j, i) };
+            edge_constraint_indices.insert(boundary_key, distance.len() - 1);
 
             if let [Some(p3), Some(p4)] = e.opposite {
                 // k_flexão = 3 B l² / (A1 + A2)  →  α = (A / (3 l²)) / B
