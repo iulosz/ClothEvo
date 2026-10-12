@@ -220,7 +220,7 @@ Os comandos **Pausar**, **Passo único** e **Reiniciar** são independentes: o p
 
 ## Posicionamento 3D pré-simulação
 
-O Pattern Studio inclui uma referência anatômica esquemática em T-pose, desenhada como overlay no canvas 2D e ativável pela opção **Guia anatômico T-Pose**. A silhueta usa altura de referência de 1,72 m para ajudar a comparar as proporções dos moldes; ela é uma guia visual, não um avatar de fabricação.
+O Pattern Studio inclui a silhueta de referência **T-POSE** enviada para o projeto, traçada como contorno vetorial e exibida como overlay no canvas 2D pela opção **Guia anatômico T-Pose**. A silhueta mantém a proporção da imagem e altura de referência de 1,72 m; é um gabarito visual de proporção, não um avatar de fabricação.
 
 Use **Posicionar moldes na cena 3D** para gerar uma prévia dos painéis em torno do manequim sem iniciar automaticamente a física. Na viewport:
 
@@ -231,3 +231,8 @@ Use **Posicionar moldes na cena 3D** para gerar uma prévia dos painéis em torn
 - Clique em **Iniciar simulação de tecido** quando terminar o posicionamento.
 
 As translações feitas por arraste atualizam a transformação do molde no projeto e o estado de repouso do solver, portanto permanecem após **Reiniciar** e ao salvar o projeto. A montagem mantém o limite atual de costuras físicas às bordas dos contornos; costuras internas e colisão robusta entre triângulos continuam sendo etapas futuras.
+
+
+### Topologia da malha de tecido
+
+A triangulação CDT preserva os vértices de contorno usados pelas costuras, e os pontos internos agora usam linhas alternadas com deslocamento de meia célula (amostragem triangular). Isso reduz o padrão ortogonal da grade anterior e tende a distribuir melhor os comprimentos das arestas internas. O espaçamento por molde continua configurável em **Distância entre partículas**; valores menores geram malha mais densa e elevam o custo da simulação.
