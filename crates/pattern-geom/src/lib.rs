@@ -3,6 +3,12 @@
 use pattern_core::{Curve2D, CurveSegment, Point2};
 use std::fmt;
 
+pub mod editor_ops;
+pub use editor_ops::{
+    extract_segment_range, insert_anchor, mirror_curve_x, project_point_to_curve,
+    rectangle, regular_polygon, resample_curve, translate_curve, CurveProjection,
+};
+
 const EPS: f64 = 1.0e-9;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -11,6 +17,8 @@ pub enum GeometryError {
     DegenerateEdge,
     SelfIntersection,
     InvalidOffset,
+    InvalidSegment,
+    InvalidParameter,
 }
 
 impl fmt::Display for GeometryError {
@@ -20,6 +28,8 @@ impl fmt::Display for GeometryError {
             Self::DegenerateEdge => write!(f, "O polígono contém uma aresta de comprimento zero."),
             Self::SelfIntersection => write!(f, "O contorno se cruza ou não é simples."),
             Self::InvalidOffset => write!(f, "O offset solicitado é geometricamente inválido."),
+            Self::InvalidSegment => write!(f, "O intervalo ou índice de segmento é inválido."),
+            Self::InvalidParameter => write!(f, "Um parâmetro geométrico é inválido."),
         }
     }
 }
@@ -215,6 +225,74 @@ pub fn offset_polygon(polygon: &[Point2], distance: f64) -> Result<Vec<Point2>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pattern_primitives_create_closed_vector_outlines() {
+        let rect = rectangle(Point2::new(0.0, 0.0), Point2::new(2.0, 1.0)).unwrap();
+        assert!(rect.closed);
+        assert_eq!(rect.segment_count(), 4);
+
+        let pentagon = regular_polygon(Point2::new(0.0, 0.0), 1.0, 5, 0.0).unwrap();
+        assert!(pentagon.closed);
+        assert_eq!(pentagon.segment_count(), 5);
+        assert!(regular_polygon(Point2::new(0.0, 0.0), 1.0, 2, 0.0).is_err());
+    }
+
+    #[test]
+    fn bezier_anchor_insertion_preserves_shape_and_increases_topology() {
+        let curve = Curve2D {
+            start: Point2::new(0.0, 0.0),
+            segments: vec![CurveSegment::CubicBezier {
+                control1: Point2::new(0.0, 1.0),
+                control2: Point2::new(1.0, 1.0),
+                to: Point2::new(1.0, 0.0),
+            }],
+            closed: false,
+        };
+        let divided = insert_anchor(&curve, 0, 0.5).unwrap();
+        assert_eq!(divided.segment_count(), 2);
+        let original_length = curve_length(&curve, 128);
+        let divided_length = curve_length(&divided, 128);
+        assert!((original_length - divided_length).abs() < 0.002);
+        assert!(insert_anchor(&curve, 0, 0.0).is_err());
+    }
+
+    #[test]
+    fn extracting_segment_range_can_reverse_direction() {
+        let curve = Curve2D::polyline(&[
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(1.0, 1.0),
+        ], false).unwrap();
+        let forward = extract_segment_range(&curve, 0, 2, false).unwrap();
+        let backward = extract_segment_range(&curve, 0, 2, true).unwrap();
+        assert_eq!(forward.start, Point2::new(0.0, 0.0));
+        assert_eq!(forward.endpoint(), Some(Point2::new(1.0, 1.0)));
+        assert_eq!(backward.start, Point2::new(1.0, 1.0));
+        assert_eq!(backward.endpoint(), Some(Point2::new(0.0, 0.0)));
+    }
+
+    #[test]
+    fn projection_finds_nearest_line_position() {
+        let curve = Curve2D::polyline(&[
+            Point2::new(0.0, 0.0), Point2::new(2.0, 0.0)
+        ], false).unwrap();
+        let projected = project_point_to_curve(&curve, Point2::new(0.5, 0.25)).unwrap();
+        assert_eq!(projected.segment_index, 0);
+        assert!((projected.t - 0.25).abs() < 1.0e-9);
+        assert!((projected.distance - 0.25).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn curve_resampling_respects_target_spacing() {
+        let curve = rectangle(Point2::new(0.0, 0.0), Point2::new(2.0, 1.0)).unwrap();
+        let resampled = resample_curve(&curve, 0.25).unwrap();
+        let points = sample_curve(&resampled, 1);
+        for index in 0..points.len() {
+            let next = points[(index + 1) % points.len()];
+            assert!(points[index].distance(next) <= 0.251);
+        }
+    }
 
     #[test]
     fn cubic_sampling_preserves_segment_mapping_and_length() {
