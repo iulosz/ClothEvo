@@ -93,7 +93,7 @@ impl Curve2D {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BoundaryCurve { Outline, SewingLine }
 
 /// Intervalo de segmentos; segment_end é exclusivo.
@@ -116,6 +116,12 @@ impl EdgeRef {
             reversed: false,
         }
     }
+}
+
+/// Comprimento de uma polilinha aberta, em metros. Usado pelo editor e pelo solver para
+/// que ambos meçam cadeias de pontos com exatamente a mesma regra.
+pub fn polyline_length_meters(points: &[Point2]) -> f64 {
+    points.windows(2).map(|pair| pair[0].distance(pair[1])).sum()
 }
 
 /// Duas bordas costuradas. A folga é armazenada em metros; sua aplicação física fica a cargo
@@ -333,8 +339,11 @@ impl Default for AvatarDimensions {
     }
 }
 
+fn default_project_schema_version() -> u32 { 1 }
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PatternProject {
+    #[serde(default = "default_project_schema_version")]
     pub schema_version: u32,
     pub name: String,
     pub units: LengthUnit,
@@ -362,6 +371,63 @@ impl PatternProject {
             grading_rules: Vec::new(),
             symmetry_links: Vec::new(),
         }
+    }
+
+    /// Comprimento aproximado de uma borda, amostrando cada segmento em 32 intervalos.
+    /// A amostragem também contempla curvas Bézier e é compartilhada com a medição do canvas.
+    pub fn edge_length_meters(&self, edge: &EdgeRef) -> Option<f64> {
+        let piece = self.pieces.iter().find(|piece| piece.id == edge.piece_id)?;
+        let curve = match edge.curve {
+            BoundaryCurve::Outline => Some(&piece.outline),
+            BoundaryCurve::SewingLine => piece.sewing_line.as_ref(),
+        }?;
+        let start = edge.segment_start as usize;
+        let end = (edge.segment_end as usize).min(curve.segments.len());
+        if start >= end { return Some(0.0); }
+
+        let mut points = Vec::with_capacity((end - start) * 32 + 1);
+        points.push(if start == 0 { curve.start } else { curve.segments[start - 1].endpoint() });
+        for index in start..end {
+            let segment_start = if index == 0 { curve.start } else { curve.segments[index - 1].endpoint() };
+            let segment = &curve.segments[index];
+            for step in 1..=32 {
+                let t = step as f64 / 32.0;
+                let point = match segment {
+                    CurveSegment::Line { to } => Point2::new(
+                        segment_start.x + (to.x - segment_start.x) * t,
+                        segment_start.y + (to.y - segment_start.y) * t,
+                    ),
+                    CurveSegment::CubicBezier { control1, control2, to } => {
+                        let u = 1.0 - t;
+                        Point2::new(
+                            u*u*u*segment_start.x + 3.0*u*u*t*control1.x + 3.0*u*t*t*control2.x + t*t*t*to.x,
+                            u*u*u*segment_start.y + 3.0*u*u*t*control1.y + 3.0*u*t*t*control2.y + t*t*t*to.y,
+                        )
+                    }
+                };
+                points.push(point);
+            }
+        }
+        Some(polyline_length_meters(&points))
+    }
+
+    /// Diagnósticos não bloqueantes que o painel pode apresentar ao usuário.
+    pub fn validation_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        for seam in &self.seams {
+            let (Some(a), Some(b)) = (self.edge_length_meters(&seam.a), self.edge_length_meters(&seam.b)) else {
+                continue;
+            };
+            let shortest = a.min(b);
+            let longest = a.max(b);
+            if shortest > 1.0e-9 && longest / shortest > 3.0 {
+                warnings.push(format!(
+                    "A costura '{}' tem razão de comprimentos A/B de {:.2}:1; confira os segmentos selecionados.",
+                    seam.name, longest / shortest
+                ));
+            }
+        }
+        warnings
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -479,6 +545,7 @@ impl PatternProject {
         }
 
         let mut seam_ids = HashSet::new();
+        let mut occupied_segments: HashSet<(PieceId, BoundaryCurve, u32)> = HashSet::new();
         for seam in &self.seams {
             if !seam_ids.insert(seam.id) {
                 return Err(format!("ID de costura duplicado: {}.", seam.id));
@@ -486,7 +553,8 @@ impl PatternProject {
             if !seam.ease_meters.is_finite() {
                 return Err(format!("Folga inválida na costura '{}'.", seam.name));
             }
-            for edge in [&seam.a, &seam.b] {
+            let edges = [&seam.a, &seam.b];
+            for edge in edges {
                 let piece = self.pieces.iter().find(|p| p.id == edge.piece_id)
                     .ok_or_else(|| format!("A costura '{}' referencia uma peça inexistente.", seam.name))?;
                 let curve = match edge.curve {
@@ -497,6 +565,28 @@ impl PatternProject {
                     || edge.segment_end as usize > curve.segments.len()
                 {
                     return Err(format!("Intervalo de borda inválido na costura '{}'.", seam.name));
+                }
+            }
+
+            let a = edges[0];
+            let b = edges[1];
+            if a.piece_id == b.piece_id && a.curve == b.curve
+                && a.segment_start < b.segment_end && b.segment_start < a.segment_end
+            {
+                return Err(format!(
+                    "A e B da costura '{}' apontam para segmentos sobrepostos da mesma peça.",
+                    seam.name
+                ));
+            }
+
+            for edge in edges {
+                for segment in edge.segment_start..edge.segment_end {
+                    if !occupied_segments.insert((edge.piece_id, edge.curve, segment)) {
+                        return Err(format!(
+                            "A borda da peça {} (segmento {}) já está vinculada a outra costura; remova a sobreposição antes de continuar.",
+                            edge.piece_id, segment + 1
+                        ));
+                    }
                 }
             }
         }
