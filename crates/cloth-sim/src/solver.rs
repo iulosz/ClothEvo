@@ -243,7 +243,8 @@ impl Simulation {
             self.pos[i] = scale_point(self.pos[i]);
             self.prev[i] = scale_point(self.prev[i]);
             self.rest_pos[i] = scale_point(self.rest_pos[i]);
-            self.vel[i] += axis * (self.vel[i].dot(axis) * (factor - 1.0));
+            let velocity = self.vel[i];
+            self.vel[i] = velocity + axis * (velocity.dot(axis) * (factor - 1.0));
         }
         self.last_substep_dt = 0.0;
         true
