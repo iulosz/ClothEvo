@@ -16,9 +16,9 @@ use eframe::{egui, egui_wgpu};
 use glam::{EulerRot, Quat, Vec2, Vec3};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use pattern_core::{
-    BoundaryCurve, Curve2D, CurveSegment, EdgeRef, FoldKind, FoldLine, GrainLine,
-    Notch, PatternPiece, PatternProject, Pleat,
-    Point2 as PatternPoint2, SeamDefinition, SymmetryLink,
+    BoundaryCurve, Curve2D, CurveParam, CurveSegment, EdgePath, EdgeRef, FoldKind, FoldLine, GrainLine,
+    suggest_seams, Notch, PatternPiece, PatternProject, Pleat, SeamDefinition, SeamSuggestion,
+    SeamSuggestionParams, Point2 as PatternPoint2, SymmetryLink,
 };
 use pattern_geom::{
     cut_closed_outline, mirror_curve_x, offset_polygon, point_in_polygon, rectangle,
@@ -26,7 +26,7 @@ use pattern_geom::{
     sample_pattern_outlines_with_seam_sync, validate_simple_polygon, CutAndSewResult,
     SourceSegmentFragment,
 };
-use pattern_mesh::triangulate_outline;
+use pattern_mesh::{triangulate_outline, triangulate_outline_with_forced_vertices};
 
 const FIXED_DT: f32 = 1.0 / 60.0;
 const DEFAULT_RES: u32 = 40;
@@ -395,6 +395,13 @@ struct PatternEditorSnapshot {
     selected_target: Option<PatternEditTarget>,
 }
 
+#[derive(Clone, Debug)]
+struct PieceSampleMapping {
+    ranges: Vec<(usize, usize)>,
+    /// (segment, t, índice de vértice na borda amostrada).
+    forced_vertices: Vec<(u32, f64, usize)>,
+}
+
 impl PatternEditTarget {
     fn piece(self) -> usize {
         match self {
@@ -437,6 +444,11 @@ struct ClothEvoApp {
     selected_piece: usize,
     seam_a_piece: usize,
     seam_b_piece: usize,
+    seam_sides_a: Vec<EdgePath>,
+    seam_sides_b: Vec<EdgePath>,
+    seam_a_active_path: usize,
+    seam_b_active_path: usize,
+    seam_active_side_a: bool,
     seam_a_segment: usize,
     seam_b_segment: usize,
     /// Fim exclusivo do intervalo selecionado (na UI, o último segmento é inclusivo).
@@ -444,9 +456,21 @@ struct ClothEvoApp {
     seam_b_segment_end: usize,
     seam_a_reversed: bool,
     seam_b_reversed: bool,
+    seam_a_start_t: f64,
+    seam_a_end_t: f64,
+    seam_b_start_t: f64,
+    seam_b_end_t: f64,
+    seam_free_mode: bool,
+    seam_snap_tolerance_px: f32,
+    dragging_seam_handle: Option<(bool, bool)>,
+    seam_drag_before: Option<PatternEditorSnapshot>,
     seam_ease_m: f64,
     seam_name: String,
     selected_seam_id: Option<u64>,
+    auto_seam_suggestions: Vec<SeamSuggestion>,
+    auto_seam_selected: Vec<bool>,
+    hovered_auto_suggestion: Option<usize>,
+    auto_seam_minimum_score: f64,
     notch_segment: usize,
     notch_t: f64,
     notch_depth_m: f64,
@@ -557,15 +581,32 @@ impl ClothEvoApp {
             selected_piece: 0,
             seam_a_piece: 0,
             seam_b_piece: 1,
+            seam_sides_a: Vec::new(),
+            seam_sides_b: Vec::new(),
+            seam_a_active_path: 0,
+            seam_b_active_path: 0,
+            seam_active_side_a: true,
             seam_a_segment: 0,
             seam_b_segment: 0,
             seam_a_segment_end: 1,
             seam_b_segment_end: 1,
             seam_a_reversed: false,
             seam_b_reversed: false,
+            seam_a_start_t: 0.0,
+            seam_a_end_t: 1.0,
+            seam_b_start_t: 0.0,
+            seam_b_end_t: 1.0,
+            seam_free_mode: false,
+            seam_snap_tolerance_px: 10.0,
+            dragging_seam_handle: None,
+            seam_drag_before: None,
             seam_ease_m: 0.0,
             seam_name: String::new(),
             selected_seam_id: None,
+            auto_seam_suggestions: Vec::new(),
+            auto_seam_selected: Vec::new(),
+            hovered_auto_suggestion: None,
+            auto_seam_minimum_score: 0.35,
             notch_segment: 0,
             notch_t: 0.5,
             notch_depth_m: 0.008,
@@ -1832,24 +1873,22 @@ impl ClothEvoApp {
                 self.selected_seam_id = requested_seam;
                 if let Some(id) = requested_seam {
                     if let Some(seam) = self.pattern_project.seams.iter().find(|seam| seam.id == id).cloned() {
-                        if let Some(index) = self.pattern_project.pieces.iter().position(|piece| piece.id == seam.a.piece_id) {
-                            self.seam_a_piece = index;
+                        self.seam_sides_a = seam.sides_a.clone();
+                        self.seam_sides_b = seam.sides_b.clone();
+                        self.seam_a_active_path = 0;
+                        self.seam_b_active_path = 0;
+                        self.seam_active_side_a = true;
+                        if let (Some(edge_a), Some(edge_b)) = (seam.sides_a.first(), seam.sides_b.first()) {
+                            self.load_seam_edge_to_controls(true, edge_a);
+                            self.load_seam_edge_to_controls(false, edge_b);
+                            self.seam_free_mode = [edge_a, edge_b].iter().any(|edge|
+                                edge.start.t > 1.0e-9 || edge.end.t < 1.0 - 1.0e-9);
                         }
-                        if let Some(index) = self.pattern_project.pieces.iter().position(|piece| piece.id == seam.b.piece_id) {
-                            self.seam_b_piece = index;
-                        }
-                        self.seam_a_segment = seam.a.segment_start as usize;
-                        self.seam_a_segment_end = seam.a.segment_end as usize;
-                        self.seam_b_segment = seam.b.segment_start as usize;
-                        self.seam_b_segment_end = seam.b.segment_end as usize;
-                        self.seam_a_reversed = seam.a.reversed;
-                        self.seam_b_reversed = seam.b.reversed;
                         self.seam_ease_m = seam.ease_meters;
                         self.seam_name = seam.name;
                     }
                 } else {
-                    self.seam_name.clear();
-                    self.seam_ease_m = 0.0;
+                    self.reset_seam_controls();
                 }
             }
 
@@ -1883,85 +1922,200 @@ impl ClothEvoApp {
 
             ui.horizontal(|ui| {
                 egui::ComboBox::from_id_salt("seam_a_start")
-                    .selected_text(format!("A início: {}", self.seam_a_segment + 1))
+                    .selected_text(format!("Segmentos {} a {}", self.seam_a_segment + 1, self.seam_a_segment_end))
                     .show_ui(ui, |ui| {
                         for index in 0..a_count {
-                            ui.selectable_value(&mut self.seam_a_segment, index, format!("Segmento {}", index + 1));
+                            ui.selectable_value(&mut self.seam_a_segment, index, format!("Segmentos {} a {}", index + 1, self.seam_a_segment_end));
                         }
                     });
                 egui::ComboBox::from_id_salt("seam_a_end")
-                    .selected_text(format!("fim: {}", self.seam_a_segment_end))
+                    .selected_text(format!("Segmentos {} a {}", self.seam_a_segment + 1, self.seam_a_segment_end))
                     .show_ui(ui, |ui| {
                         for end in (self.seam_a_segment + 1)..=a_count {
-                            ui.selectable_value(&mut self.seam_a_segment_end, end, format!("Segmento {}", end));
+                            ui.selectable_value(&mut self.seam_a_segment_end, end, format!("Segmentos {} a {}", self.seam_a_segment + 1, end));
                         }
                     });
             });
             self.seam_a_segment_end = self.seam_a_segment_end.clamp(self.seam_a_segment + 1, a_count);
             ui.horizontal(|ui| {
                 egui::ComboBox::from_id_salt("seam_b_start")
-                    .selected_text(format!("B início: {}", self.seam_b_segment + 1))
+                    .selected_text(format!("Segmentos {} a {}", self.seam_b_segment + 1, self.seam_b_segment_end))
                     .show_ui(ui, |ui| {
                         for index in 0..b_count {
-                            ui.selectable_value(&mut self.seam_b_segment, index, format!("Segmento {}", index + 1));
+                            ui.selectable_value(&mut self.seam_b_segment, index, format!("Segmentos {} a {}", index + 1, self.seam_b_segment_end));
                         }
                     });
                 egui::ComboBox::from_id_salt("seam_b_end")
-                    .selected_text(format!("fim: {}", self.seam_b_segment_end))
+                    .selected_text(format!("Segmentos {} a {}", self.seam_b_segment + 1, self.seam_b_segment_end))
                     .show_ui(ui, |ui| {
                         for end in (self.seam_b_segment + 1)..=b_count {
-                            ui.selectable_value(&mut self.seam_b_segment_end, end, format!("Segmento {}", end));
+                            ui.selectable_value(&mut self.seam_b_segment_end, end, format!("Segmentos {} a {}", self.seam_b_segment + 1, end));
                         }
                     });
             });
             self.seam_b_segment_end = self.seam_b_segment_end.clamp(self.seam_b_segment + 1, b_count);
 
+            ui.checkbox(&mut self.seam_free_mode, "Costura livre (extremidades parciais)");
+            if self.seam_free_mode {
+                ui.label("A — parâmetros das extremidades");
+                ui.horizontal(|ui| {
+                    ui.add(egui::Slider::new(&mut self.seam_a_start_t, 0.0..=1.0).text("Início t"));
+                    ui.add(egui::Slider::new(&mut self.seam_a_end_t, 0.0..=1.0).text("Fim t"));
+                });
+                ui.label("B — parâmetros das extremidades");
+                ui.horizontal(|ui| {
+                    ui.add(egui::Slider::new(&mut self.seam_b_start_t, 0.0..=1.0).text("Início t"));
+                    ui.add(egui::Slider::new(&mut self.seam_b_end_t, 0.0..=1.0).text("Fim t"));
+                });
+                ui.add(egui::Slider::new(&mut self.seam_snap_tolerance_px, 4.0..=32.0)
+                    .text("Tolerância de encaixe (px)"));
+                ui.weak("Arraste os pontos de início/fim no canvas; eles encaixam em vértices e piques.");
+            }
+
             ui.horizontal(|ui| {
-                if ui.button("Borda selecionada → A").clicked() {
+                if ui.button("Usar borda selecionada como A").clicked() {
                     if let Some(PatternEditTarget::Edge { piece, segment, .. }) = self.selected_target {
                         self.seam_a_piece = piece.min(options.len() - 1);
                         self.seam_a_segment = segment;
                         self.seam_a_segment_end = segment + 1;
+                        self.seam_a_start_t = 0.0;
+                        self.seam_a_end_t = 1.0;
                     } else {
                         self.pattern_message = "Selecione uma borda no canvas antes de defini-la como A.".into();
                     }
                 }
-                if ui.button("Borda selecionada → B").clicked() {
+                if ui.button("Usar borda selecionada como B").clicked() {
                     if let Some(PatternEditTarget::Edge { piece, segment, .. }) = self.selected_target {
                         self.seam_b_piece = piece.min(options.len() - 1);
                         self.seam_b_segment = segment;
                         self.seam_b_segment_end = segment + 1;
+                        self.seam_b_start_t = 0.0;
+                        self.seam_b_end_t = 1.0;
                     } else {
                         self.pattern_message = "Selecione uma borda no canvas antes de defini-la como B.".into();
                     }
                 }
             });
 
-            ui.text_edit_singleline(&mut self.seam_name);
-            ui.add(egui::Slider::new(&mut self.seam_ease_m, -0.50..=0.50)
-                .text("Diferença-alvo A − B (m)"));
+            ui.add(egui::TextEdit::singleline(&mut self.seam_name).hint_text("Nome da costura"));
+            let mut ease_cm = self.seam_ease_m * 100.0;
+            if ui.add(egui::Slider::new(&mut ease_cm, -50.0..=50.0)
+                .text("Diferença-alvo A − B (cm)")).changed()
+            {
+                self.seam_ease_m = ease_cm / 100.0;
+            }
             ui.weak("Folga assinada: positivo = A mais longa; negativo = B mais longa. O valor é aplicado à simulação.");
             ui.checkbox(&mut self.seam_a_reversed, "Inverter direção da borda A");
             ui.checkbox(&mut self.seam_b_reversed, "Inverter direção da borda B");
 
+            ui.horizontal(|ui| {
+                ui.label("Lado ativo para Shift+clique:");
+                ui.selectable_value(&mut self.seam_active_side_a, true, "A");
+                ui.selectable_value(&mut self.seam_active_side_a, false, "B");
+            });
+            ui.horizontal(|ui| {
+                if ui.button("Adicionar borda atual a A").clicked() {
+                    if let Ok((edge, _)) = self.seam_edges_from_controls() {
+                        self.add_draft_edge_to_side(true, edge);
+                    }
+                }
+                if ui.button("Adicionar borda atual a B").clicked() {
+                    if let Ok((_, edge)) = self.seam_edges_from_controls() {
+                        self.add_draft_edge_to_side(false, edge);
+                    }
+                }
+            });
+            ui.weak("Cada lado é uma cadeia ordenada. Shift+clique em uma borda adiciona-a ao lado ativo.");
+            for is_a in [true, false] {
+                let paths = if is_a { self.seam_sides_a.clone() } else { self.seam_sides_b.clone() };
+                let active = if is_a { self.seam_a_active_path } else { self.seam_b_active_path };
+                let label = if is_a { "Lado A" } else { "Lado B" };
+                ui.collapsing(format!("{label} · {} bordas", paths.len()), |ui| {
+                    for (index, edge) in paths.iter().enumerate() {
+                        let piece_name = self.pattern_project.pieces.iter()
+                            .find(|piece| piece.id == edge.piece_id).map(|piece| piece.name.as_str()).unwrap_or("Peça ausente");
+                        let len_cm = edge_length_meters(&self.pattern_project, edge) * 100.0;
+                        let response = ui.selectable_label(active == index,
+                            format!("{} · {} · segmentos {}–{} ({:.1} cm)",
+                                index + 1, piece_name, edge.start.segment + 1, edge.end.segment + 1, len_cm));
+                        let mut desired_active: Option<usize> = None;
+                        let mut list_changed = false;
+                        ui.horizontal(|ui| {
+                            if response.clicked() { desired_active = Some(index); }
+                            if ui.small_button("↑").clicked() && index > 0 {
+                                let target = if is_a { &mut self.seam_sides_a } else { &mut self.seam_sides_b };
+                                target.swap(index, index - 1);
+                                desired_active = Some(index - 1);
+                                list_changed = true;
+                            }
+                            if ui.small_button("↓").clicked() && index + 1 < paths.len() {
+                                let target = if is_a { &mut self.seam_sides_a } else { &mut self.seam_sides_b };
+                                target.swap(index, index + 1);
+                                desired_active = Some(index + 1);
+                                list_changed = true;
+                            }
+                            if paths.len() > 1 && ui.small_button("Remover").clicked() {
+                                let target = if is_a { &mut self.seam_sides_a } else { &mut self.seam_sides_b };
+                                target.remove(index);
+                                desired_active = Some(index.min(target.len() - 1));
+                                list_changed = true;
+                            }
+                        });
+                        if let Some(active_index) = desired_active {
+                            if is_a { self.seam_a_active_path = active_index; }
+                            else { self.seam_b_active_path = active_index; }
+                            self.seam_active_side_a = is_a;
+                            self.load_active_chain_edge_to_controls(is_a);
+                        } else if list_changed {
+                            self.load_active_chain_edge_to_controls(is_a);
+                        }
+                    }
+                });
+            }
+
             let piece_a = &self.pattern_project.pieces[self.seam_a_piece];
             let piece_b = &self.pattern_project.pieces[self.seam_b_piece];
-            let edge_a = EdgeRef {
+            let edge_a = EdgePath {
                 piece_id: piece_a.id, curve: BoundaryCurve::Outline,
-                segment_start: self.seam_a_segment as u32, segment_end: self.seam_a_segment_end as u32,
+                start: CurveParam {
+                    segment: self.seam_a_segment as u32,
+                    t: if self.seam_free_mode { self.seam_a_start_t } else { 0.0 },
+                },
+                end: CurveParam {
+                    segment: self.seam_a_segment_end.saturating_sub(1) as u32,
+                    t: if self.seam_free_mode { self.seam_a_end_t } else { 1.0 },
+                },
                 reversed: self.seam_a_reversed,
             };
-            let edge_b = EdgeRef {
+            let edge_b = EdgePath {
                 piece_id: piece_b.id, curve: BoundaryCurve::Outline,
-                segment_start: self.seam_b_segment as u32, segment_end: self.seam_b_segment_end as u32,
+                start: CurveParam {
+                    segment: self.seam_b_segment as u32,
+                    t: if self.seam_free_mode { self.seam_b_start_t } else { 0.0 },
+                },
+                end: CurveParam {
+                    segment: self.seam_b_segment_end.saturating_sub(1) as u32,
+                    t: if self.seam_free_mode { self.seam_b_end_t } else { 1.0 },
+                },
                 reversed: self.seam_b_reversed,
             };
-            let length_a = edge_length_meters(&self.pattern_project, &edge_a);
-            let length_b = edge_length_meters(&self.pattern_project, &edge_b);
+            let (display_a, display_b) = self.current_seam_sides_with_draft().unwrap_or((vec![edge_a.clone()], vec![edge_b.clone()]));
+            let length_a = display_a.iter().map(|edge| edge_length_meters(&self.pattern_project, edge)).sum::<f64>();
+            let length_b = display_b.iter().map(|edge| edge_length_meters(&self.pattern_project, edge)).sum::<f64>();
             let difference = length_a - length_b;
-            ui.label(format!("Comprimento A: {:.1} cm · B: {:.1} cm", length_a * 100.0, length_b * 100.0));
+            ui.label(format!("A: {} bordas ({:.1} cm) · B: {} bordas ({:.1} cm)",
+                display_a.len(), length_a * 100.0, display_b.len(), length_b * 100.0));
             ui.label(format!("Diferença geométrica A − B: {:+.1} cm · alvo: {:+.1} cm",
                 difference * 100.0, self.seam_ease_m * 100.0));
+            let shortest = length_a.min(length_b);
+            let longest = length_a.max(length_b);
+            if shortest > 1.0e-9 && longest / shortest > 3.0 {
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 175, 80),
+                    format!("Aviso: a razão A/B é {:.2}:1 (acima de 3:1). Confira os segmentos; a costura continuará permitida.",
+                        longest / shortest),
+                );
+            }
             if (difference - self.seam_ease_m).abs() > 0.02 {
                 ui.colored_label(
                     egui::Color32::from_rgb(255, 190, 80),
@@ -1969,8 +2123,8 @@ impl ClothEvoApp {
                 );
             }
 
-            let notches_a = edge_notch_positions(&self.pattern_project, &edge_a);
-            let notches_b = edge_notch_positions(&self.pattern_project, &edge_b);
+            let notches_a = edge_chain_notch_positions(&self.pattern_project, &display_a);
+            let notches_b = edge_chain_notch_positions(&self.pattern_project, &display_b);
             if notches_a.is_empty() && notches_b.is_empty() {
                 ui.weak("Piques pareados: nenhum pique nas bordas selecionadas.");
             } else if notches_a.len() != notches_b.len() {
@@ -2002,13 +2156,53 @@ impl ClothEvoApp {
                 } else if ui.button("Criar costura").clicked() {
                     self.add_seam_from_controls();
                 }
-                if ui.button("Nova").clicked() {
-                    self.selected_seam_id = None;
-                    self.seam_name.clear();
-                    self.seam_ease_m = 0.0;
+                if ui.button("Nova costura").clicked() {
+                    self.reset_seam_controls();
                 }
             });
             ui.label(format!("Costuras no projeto: {}", self.pattern_project.seams.len()));
+
+            ui.separator();
+            ui.strong("Auto Sewing — sugestões");
+            ui.add(egui::Slider::new(&mut self.auto_seam_minimum_score, 0.0..=1.0)
+                .text("Score mínimo").custom_formatter(|value, _| format!("{:.0}%", value * 100.0)));
+            if ui.button("Sugerir costuras").clicked() {
+                self.auto_seam_suggestions = suggest_seams(&self.pattern_project, &SeamSuggestionParams {
+                    minimum_score: self.auto_seam_minimum_score,
+                    ..SeamSuggestionParams::default()
+                });
+                self.auto_seam_selected = vec![false; self.auto_seam_suggestions.len()];
+                self.hovered_auto_suggestion = None;
+                self.pattern_message = format!(
+                    "{} sugestão(ões) encontrada(s). Nenhuma costura foi criada.",
+                    self.auto_seam_suggestions.len()
+                );
+            }
+            self.hovered_auto_suggestion = None;
+            for index in 0..self.auto_seam_suggestions.len() {
+                let suggestion = self.auto_seam_suggestions[index].clone();
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.auto_seam_selected[index], "");
+                    let response = ui.selectable_label(
+                        false,
+                        format!(
+                            "#{:02} · {:.0}% · peça {} / seg. {} ↔ peça {} / seg. {}",
+                            index + 1, suggestion.score * 100.0,
+                            suggestion.a.piece_id, suggestion.a.start.segment + 1,
+                            suggestion.b.piece_id, suggestion.b.start.segment + 1,
+                        ),
+                    );
+                    if response.hovered() { self.hovered_auto_suggestion = Some(index); }
+                });
+                for reason in &suggestion.reasons {
+                    ui.weak(reason);
+                }
+            }
+            if !self.auto_seam_suggestions.is_empty()
+                && ui.button("Aplicar selecionadas").clicked()
+            {
+                self.apply_selected_auto_seams();
+            }
         } else {
             ui.weak("Crie ao menos duas peças para configurar uma costura.");
         }
@@ -2300,7 +2494,7 @@ impl ClothEvoApp {
         self.selected_piece = self.selected_piece.min(self.pattern_project.pieces.len() - 1);
         let id = self.pattern_project.pieces[self.selected_piece].id;
         self.pattern_project.pieces.remove(self.selected_piece);
-        self.pattern_project.seams.retain(|seam| seam.a.piece_id != id && seam.b.piece_id != id);
+        self.pattern_project.seams.retain(|seam| !seam.sides_a.iter().chain(seam.sides_b.iter()).any(|edge| edge.piece_id == id));
         self.pattern_project.symmetry_links.retain(|link| {
             link.piece_a_id != id && link.piece_b_id != id
         });
@@ -2400,18 +2594,23 @@ impl ClothEvoApp {
             axis_x: self.pattern_symmetry_axis_x,
         });
 
-        // Duplicate constraints only when both ends have a known symmetric counterpart.
+        // Replica a costura M:N apenas quando todos os moldes dos dois lados têm contrapartes.
         let original_seams = project.seams.clone();
         let mut next_seam_id = project.seams.iter().map(|seam| seam.id).max().unwrap_or(0) + 1;
         for seam in original_seams {
-            let Some(a_mate) = symmetry_counterpart_id(&project, seam.a.piece_id) else { continue; };
-            let Some(b_mate) = symmetry_counterpart_id(&project, seam.b.piece_id) else { continue; };
-            if a_mate == seam.a.piece_id && b_mate == seam.b.piece_id { continue; }
             let mut mirrored_seam = seam.clone();
+            let mut changed = false;
+            let mut complete = true;
+            for edge in mirrored_seam.sides_a.iter_mut().chain(mirrored_seam.sides_b.iter_mut()) {
+                let Some(mate) = symmetry_counterpart_id(&project, edge.piece_id) else {
+                    complete = false; break;
+                };
+                changed |= mate != edge.piece_id;
+                edge.piece_id = mate;
+            }
+            if !complete || !changed { continue; }
             mirrored_seam.id = next_seam_id;
             mirrored_seam.name = format!("{} (espelho)", seam.name);
-            mirrored_seam.a.piece_id = a_mate;
-            mirrored_seam.b.piece_id = b_mate;
             project.seams.push(mirrored_seam);
             next_seam_id += 1;
         }
@@ -2728,7 +2927,7 @@ impl ClothEvoApp {
         // Remap existing references on both source pieces before replacing them. If a previous
         // seam crosses a segment split by the new cut, reject atomically rather than corrupt it.
         for seam in &mut project.seams {
-            for edge in [&mut seam.a, &mut seam.b] {
+            for edge in seam.sides_a.iter_mut().chain(seam.sides_b.iter_mut()) {
                 let target = if edge.piece_id == first_id {
                     Some((&cut_result, first_id, second_id, sewing_side))
                 } else if let Some((_, mate_source, mate_result, mate_second_id, _)) = &paired_cut {
@@ -2783,14 +2982,14 @@ impl ClothEvoApp {
         project.seams.push(SeamDefinition {
             id: next_seam_id,
             name: format!("Cut & Sew {next_seam_id}"),
-            a: EdgeRef {
+            sides_a: vec![EdgeRef {
                 piece_id: first_id, curve: BoundaryCurve::Outline,
                 segment_start: a_start as u32, segment_end: a_end as u32, reversed: false,
-            },
-            b: EdgeRef {
+            }.into()],
+            sides_b: vec![EdgeRef {
                 piece_id: second_id, curve: BoundaryCurve::Outline,
                 segment_start: b_start as u32, segment_end: b_end as u32, reversed: true,
-            },
+            }.into()],
             ease_meters: 0.0,
         });
         next_seam_id += 1;
@@ -2801,14 +3000,14 @@ impl ClothEvoApp {
             project.seams.push(SeamDefinition {
                 id: next_seam_id,
                 name: format!("Cut & Sew {next_seam_id}"),
-                a: EdgeRef {
+                sides_a: vec![EdgeRef {
                     piece_id: mate_source.id, curve: BoundaryCurve::Outline,
                     segment_start: mate_a_start as u32, segment_end: mate_a_end as u32, reversed: false,
-                },
-                b: EdgeRef {
+                }.into()],
+                sides_b: vec![EdgeRef {
                     piece_id: *mate_second_id, curve: BoundaryCurve::Outline,
                     segment_start: mate_b_start as u32, segment_end: mate_b_end as u32, reversed: true,
-                },
+                }.into()],
                 ease_meters: 0.0,
             });
         }
@@ -2861,32 +3060,225 @@ impl ClothEvoApp {
         }
     }
 
-    fn seam_edges_from_controls(&self) -> Result<(EdgeRef, EdgeRef), String> {
+    fn reset_seam_controls(&mut self) {
+        self.selected_seam_id = None;
+        self.seam_name.clear();
+        self.seam_ease_m = 0.0;
+        self.seam_a_segment = 0;
+        self.seam_b_segment = 0;
+        self.seam_a_segment_end = 1;
+        self.seam_b_segment_end = 1;
+        self.seam_sides_a.clear();
+        self.seam_sides_b.clear();
+        self.seam_a_active_path = 0;
+        self.seam_b_active_path = 0;
+        self.seam_active_side_a = true;
+        self.seam_a_reversed = false;
+        self.seam_b_reversed = false;
+        self.seam_a_start_t = 0.0;
+        self.seam_a_end_t = 1.0;
+        self.seam_b_start_t = 0.0;
+        self.seam_b_end_t = 1.0;
+        self.seam_free_mode = false;
+        self.dragging_seam_handle = None;
+        self.seam_drag_before = None;
+    }
+
+    fn load_seam_edge_to_controls(&mut self, is_a: bool, edge: &EdgePath) {
+        let Some(index) = self.pattern_project.pieces.iter().position(|piece| piece.id == edge.piece_id) else {
+            return;
+        };
+        let segment_count = self.pattern_project.pieces[index].outline.segment_count().max(1);
+        let start = (edge.start.segment as usize).min(segment_count - 1);
+        let end = (edge.end.segment as usize
+            + usize::from(edge.end.t >= 1.0 - 1.0e-9)).clamp(start + 1, segment_count);
+        if is_a {
+            self.seam_a_piece = index;
+            self.seam_a_segment = start;
+            self.seam_a_segment_end = end;
+            self.seam_a_start_t = edge.start.t;
+            self.seam_a_end_t = edge.end.t;
+            self.seam_a_reversed = edge.reversed;
+        } else {
+            self.seam_b_piece = index;
+            self.seam_b_segment = start;
+            self.seam_b_segment_end = end;
+            self.seam_b_start_t = edge.start.t;
+            self.seam_b_end_t = edge.end.t;
+            self.seam_b_reversed = edge.reversed;
+        }
+        self.seam_free_mode |= edge.start.t > 1.0e-9 || edge.end.t < 1.0 - 1.0e-9;
+    }
+
+    fn load_active_chain_edge_to_controls(&mut self, is_a: bool) {
+        let index = if is_a { self.seam_a_active_path } else { self.seam_b_active_path };
+        let edge = if is_a { self.seam_sides_a.get(index) } else { self.seam_sides_b.get(index) }.cloned();
+        if let Some(edge) = edge { self.load_seam_edge_to_controls(is_a, &edge); }
+    }
+
+    fn current_seam_sides_with_draft(&self) -> Result<(Vec<EdgePath>, Vec<EdgePath>), String> {
+        let (draft_a, draft_b) = self.seam_edges_from_controls()?;
+        let merge = |stored: &[EdgePath], active: usize, draft: EdgePath| {
+            let mut result = stored.to_vec();
+            if result.is_empty() { result.push(draft); }
+            else if active < result.len() { result[active] = draft; }
+            else { result.push(draft); }
+            result
+        };
+        Ok((
+            merge(&self.seam_sides_a, self.seam_a_active_path, draft_a),
+            merge(&self.seam_sides_b, self.seam_b_active_path, draft_b),
+        ))
+    }
+
+    fn add_draft_edge_to_side(&mut self, is_a: bool, edge: EdgePath) {
+        let target = if is_a { &mut self.seam_sides_a } else { &mut self.seam_sides_b };
+        if target.iter().any(|existing| existing.piece_id == edge.piece_id
+            && existing.curve == edge.curve
+            && existing.start_position() < edge.end_position() - 1.0e-9
+            && edge.start_position() < existing.end_position() - 1.0e-9)
+        {
+            self.pattern_message = "Essa borda já está presente ou sobreposta no lado da costura.".into();
+            return;
+        }
+        target.push(edge);
+        if is_a { self.seam_a_active_path = target.len() - 1; }
+        else { self.seam_b_active_path = target.len() - 1; }
+        self.seam_active_side_a = is_a;
+        self.load_active_chain_edge_to_controls(is_a);
+        self.pattern_message = format!("Borda adicionada ao lado {}.", if is_a { "A" } else { "B" });
+    }
+
+    fn seam_edges_from_controls(&self) -> Result<(EdgePath, EdgePath), String> {
         let count = self.pattern_project.pieces.len();
         if count < 2 { return Err("Crie pelo menos duas peças antes de costurá-las.".into()); }
         let a_piece = &self.pattern_project.pieces[self.seam_a_piece.min(count - 1)];
         let b_piece = &self.pattern_project.pieces[self.seam_b_piece.min(count - 1)];
-        let make_edge = |piece: &PatternPiece, start: usize, end: usize, reversed: bool| {
+        let make_edge = |piece: &PatternPiece, start: usize, end: usize,
+                         start_t: f64, end_t: f64, reversed: bool| {
             let segment_count = piece.outline.segment_count();
             let start = start.min(segment_count.saturating_sub(1));
             let end = end.clamp(start + 1, segment_count);
-            EdgeRef {
+            EdgePath {
                 piece_id: piece.id,
                 curve: BoundaryCurve::Outline,
-                segment_start: start as u32,
-                segment_end: end as u32,
+                start: CurveParam {
+                    segment: start as u32,
+                    t: if self.seam_free_mode { start_t.clamp(0.0, 1.0) } else { 0.0 },
+                },
+                end: CurveParam {
+                    segment: (end - 1) as u32,
+                    t: if self.seam_free_mode { end_t.clamp(0.0, 1.0) } else { 1.0 },
+                },
                 reversed,
             }
         };
         Ok((
-            make_edge(a_piece, self.seam_a_segment, self.seam_a_segment_end, self.seam_a_reversed),
-            make_edge(b_piece, self.seam_b_segment, self.seam_b_segment_end, self.seam_b_reversed),
+            make_edge(a_piece, self.seam_a_segment, self.seam_a_segment_end,
+                self.seam_a_start_t, self.seam_a_end_t, self.seam_a_reversed),
+            make_edge(b_piece, self.seam_b_segment, self.seam_b_segment_end,
+                self.seam_b_start_t, self.seam_b_end_t, self.seam_b_reversed),
         ))
     }
 
+    fn hit_test_seam_handle<F: Fn(PatternPoint2) -> egui::Pos2>(
+        &self,
+        pointer: egui::Pos2,
+        to_screen: &F,
+    ) -> Option<(bool, bool)> {
+        if !self.seam_free_mode { return None; }
+        let (edge_a, edge_b) = self.seam_edges_from_controls().ok()?;
+        for (is_a, edge) in [(true, edge_a), (false, edge_b)] {
+            let curve = edge_curve(&self.pattern_project, &edge)?;
+            let start = curve_segment_point(curve, edge.start.segment as usize, edge.start.t)?;
+            let end = curve_segment_point(curve, edge.end.segment as usize, edge.end.t)?;
+            if pointer.distance(to_screen(start)) <= 13.0 { return Some((is_a, true)); }
+            if pointer.distance(to_screen(end)) <= 13.0 { return Some((is_a, false)); }
+        }
+        None
+    }
+
+    fn update_seam_handle_from_pointer(&mut self, is_a: bool, is_start: bool, world: PatternPoint2) {
+        let piece_index = if is_a { self.seam_a_piece } else { self.seam_b_piece };
+        let Some(piece) = self.pattern_project.pieces.get(piece_index) else { return; };
+        let curve = &piece.outline;
+        let Some((mut param, _)) = closest_curve_param(curve, world) else { return; };
+        param = snap_curve_param_to_features(
+            curve, &piece.notches, param, world,
+            self.seam_snap_tolerance_px as f64 / self.pattern_zoom.max(1.0) as f64,
+        );
+        let (start_t, end_t, start_segment, end_exclusive) = if is_a {
+            (self.seam_a_start_t, self.seam_a_end_t,
+             self.seam_a_segment, self.seam_a_segment_end)
+        } else {
+            (self.seam_b_start_t, self.seam_b_end_t,
+             self.seam_b_segment, self.seam_b_segment_end)
+        };
+        let current_start = CurveParam { segment: start_segment as u32, t: start_t };
+        let current_end = CurveParam {
+            segment: end_exclusive.saturating_sub(1) as u32, t: end_t,
+        };
+        let segment_count = curve.segment_count();
+        let new_param = if is_start {
+            let maximum = current_end.segment as f64 + current_end.t - 1.0e-4;
+            param = param_at_curve_position(param.segment as f64 + param.t, segment_count, maximum);
+            if param.segment as f64 + param.t >= current_end.segment as f64 + current_end.t {
+                return;
+            }
+            param
+        } else {
+            let minimum = current_start.segment as f64 + current_start.t + 1.0e-4;
+            param = param_at_curve_position(param.segment as f64 + param.t, segment_count, f64::INFINITY);
+            if param.segment as f64 + param.t <= minimum {
+                param = param_at_curve_position(minimum, segment_count, f64::INFINITY);
+            }
+            param
+        };
+
+        if is_a {
+            if is_start {
+                self.seam_a_segment = new_param.segment as usize;
+                self.seam_a_start_t = new_param.t;
+            } else {
+                self.seam_a_segment_end = new_param.segment as usize + 1;
+                self.seam_a_end_t = new_param.t;
+            }
+            self.seam_a_segment_end = self.seam_a_segment_end.clamp(self.seam_a_segment + 1, segment_count);
+        } else {
+            if is_start {
+                self.seam_b_segment = new_param.segment as usize;
+                self.seam_b_start_t = new_param.t;
+            } else {
+                self.seam_b_segment_end = new_param.segment as usize + 1;
+                self.seam_b_end_t = new_param.t;
+            }
+            self.seam_b_segment_end = self.seam_b_segment_end.clamp(self.seam_b_segment + 1, segment_count);
+        }
+    }
+
+    fn commit_seam_handle_drag(&mut self) {
+        let Some(before) = self.seam_drag_before.take() else { return; };
+        let Some(id) = self.selected_seam_id else { return; };
+        let (sides_a, sides_b) = match self.current_seam_sides_with_draft() {
+            Ok(sides) => sides,
+            Err(error) => { self.pattern_message = error; return; }
+        };
+        let mut staged = self.pattern_project.clone();
+        let Some(seam) = staged.seams.iter_mut().find(|seam| seam.id == id) else { return; };
+        seam.sides_a = sides_a;
+        seam.sides_b = sides_b;
+        if let Err(error) = staged.validate() {
+            self.pattern_message = format!("A extremidade não foi aplicada: {error}");
+            return;
+        }
+        self.pattern_project = staged;
+        self.remember_pattern_change(before);
+        self.pattern_message = format!("Extremidades da costura '{id}' atualizadas.");
+    }
+
     fn add_seam_from_controls(&mut self) {
-        let (edge_a, edge_b) = match self.seam_edges_from_controls() {
-            Ok(edges) => edges,
+        let (sides_a, sides_b) = match self.current_seam_sides_with_draft() {
+            Ok(sides) => sides,
             Err(error) => { self.pattern_message = error; return; }
         };
         let next_id = self.pattern_project.seams.iter().map(|seam| seam.id).max().unwrap_or(0) + 1;
@@ -2896,8 +3288,8 @@ impl ClothEvoApp {
         let seam = SeamDefinition {
             id: next_id,
             name: name.clone(),
-            a: edge_a,
-            b: edge_b,
+            sides_a,
+            sides_b,
             ease_meters: self.seam_ease_m,
         };
         let before = self.editor_snapshot();
@@ -2919,8 +3311,8 @@ impl ClothEvoApp {
             self.add_seam_from_controls();
             return;
         };
-        let (edge_a, edge_b) = match self.seam_edges_from_controls() {
-            Ok(edges) => edges,
+        let (sides_a, sides_b) = match self.current_seam_sides_with_draft() {
+            Ok(sides) => sides,
             Err(error) => { self.pattern_message = error; return; }
         };
         let before = self.editor_snapshot();
@@ -2933,8 +3325,8 @@ impl ClothEvoApp {
         seam.name = if self.seam_name.trim().is_empty() {
             format!("Costura {id}")
         } else { self.seam_name.trim().to_owned() };
-        seam.a = edge_a;
-        seam.b = edge_b;
+        seam.sides_a = sides_a;
+        seam.sides_b = sides_b;
         seam.ease_meters = self.seam_ease_m;
         if let Err(error) = staged.validate() {
             self.pattern_message = error;
@@ -2942,6 +3334,54 @@ impl ClothEvoApp {
         }
         self.pattern_project = staged;
         self.pattern_message = format!("Costura '{id}' atualizada.");
+        self.remember_pattern_change(before);
+    }
+
+    fn apply_selected_auto_seams(&mut self) {
+        let chosen = self.auto_seam_suggestions.iter().zip(self.auto_seam_selected.iter())
+            .filter_map(|(suggestion, selected)| (*selected).then_some(suggestion.clone()))
+            .collect::<Vec<_>>();
+        if chosen.is_empty() {
+            self.pattern_message = "Marque pelo menos uma sugestão antes de aplicar.".into();
+            return;
+        }
+
+        let before = self.editor_snapshot();
+        let mut staged = self.pattern_project.clone();
+        let mut next_id = staged.seams.iter().map(|seam| seam.id).max().unwrap_or(0) + 1;
+        for suggestion in &chosen {
+            staged.seams.push(SeamDefinition {
+                id: next_id,
+                name: format!("Sugestão automática {next_id}"),
+                sides_a: vec![suggestion.a.clone()],
+                sides_b: vec![suggestion.b.clone()],
+                ease_meters: 0.0,
+            });
+            next_id += 1;
+        }
+        if let Err(error) = staged.validate() {
+            self.pattern_message = format!("Lote de sugestões não aplicado: {error}");
+            return;
+        }
+
+        self.pattern_project = staged;
+        self.selected_seam_id = Some(next_id - 1);
+        if let Some(seam) = self.pattern_project.seams.iter().find(|seam| seam.id == next_id - 1).cloned() {
+            self.seam_sides_a = seam.sides_a;
+            self.seam_sides_b = seam.sides_b;
+            self.seam_a_active_path = 0;
+            self.seam_b_active_path = 0;
+            if let Some(edge) = self.seam_sides_a.first().cloned() { self.load_seam_edge_to_controls(true, &edge); }
+            if let Some(edge) = self.seam_sides_b.first().cloned() { self.load_seam_edge_to_controls(false, &edge); }
+            self.seam_name = seam.name;
+        }
+        self.auto_seam_suggestions.clear();
+        self.auto_seam_selected.clear();
+        self.hovered_auto_suggestion = None;
+        self.pattern_message = format!(
+            "{} costura(s) sugerida(s) aplicada(s) como um único lote de undo.",
+            chosen.len()
+        );
         self.remember_pattern_change(before);
     }
 
@@ -3328,37 +3768,143 @@ impl ClothEvoApp {
             }
         }
 
-        // Cada costura é sobreposta às duas bordas vinculadas. Vermelho indica que a diferença
-        // geométrica medida não coincide com a folga-alvo; amarelo marca a costura selecionada.
+        // Desenha cada caminho sem criar segmentos artificiais entre bordas desconectadas.
+        // Ao passar o cursor numa costura selecionada, realça os dois lados e liga piques pareados.
+        let hovered_pointer = ui.input(|input| input.pointer.hover_pos());
         for seam in &self.pattern_project.seams {
-            let la = edge_length_meters(&self.pattern_project, &seam.a);
-            let lb = edge_length_meters(&self.pattern_project, &seam.b);
+            let selected = self.selected_seam_id == Some(seam.id);
+            let (draw_a, draw_b) = if selected {
+                self.current_seam_sides_with_draft()
+                    .unwrap_or((seam.sides_a.clone(), seam.sides_b.clone()))
+            } else {
+                (seam.sides_a.clone(), seam.sides_b.clone())
+            };
+            let la = draw_a.iter().map(|edge| edge_length_meters(&self.pattern_project, edge)).sum::<f64>();
+            let lb = draw_b.iter().map(|edge| edge_length_meters(&self.pattern_project, edge)).sum::<f64>();
             let mismatch = (la - lb - seam.ease_meters).abs();
+            let screen_a = draw_a.iter().map(|edge| edge_path_points(&self.pattern_project, edge, 24)
+                .into_iter().map(to_screen).collect::<Vec<_>>()).collect::<Vec<_>>();
+            let screen_b = draw_b.iter().map(|edge| edge_path_points(&self.pattern_project, edge, 24)
+                .into_iter().map(to_screen).collect::<Vec<_>>()).collect::<Vec<_>>();
+            let hovering_selected_seam = selected && response.hovered() && hovered_pointer.map(|pointer| {
+                screen_a.iter().chain(screen_b.iter())
+                    .map(|path| distance_to_screen_path(pointer, path))
+                    .fold(f32::INFINITY, f32::min) <= 9.0
+            }).unwrap_or(false);
             let color = if mismatch > 0.02 {
                 egui::Color32::from_rgb(255, 92, 92)
-            } else if self.selected_seam_id == Some(seam.id) {
-                egui::Color32::from_rgb(255, 205, 82)
+            } else if selected || hovering_selected_seam {
+                egui::Color32::from_rgb(255, 220, 110)
             } else {
                 egui::Color32::from_rgb(64, 221, 206)
             };
-            for edge in [&seam.a, &seam.b] {
-                let path = edge_path_points(&self.pattern_project, edge, 12);
-                for pair in path.windows(2) {
+            for side in [&screen_a, &screen_b] {
+                for path in side {
+                    for pair in path.windows(2) {
+                        painter.line_segment(
+                            [pair[0], pair[1]],
+                            egui::Stroke::new(if selected || hovering_selected_seam { 4.0 } else { 2.6 }, color),
+                        );
+                    }
+                    if hovering_selected_seam { draw_path_direction_arrow(&painter, path, color); }
+                }
+            }
+            if hovering_selected_seam {
+                for (progress_a, progress_b) in paired_chain_notch_markers(&self.pattern_project, &draw_a, &draw_b) {
+                    if let (Some(a), Some(b)) = (
+                        point_on_edge_chain_at_progress(&self.pattern_project, &draw_a, progress_a),
+                        point_on_edge_chain_at_progress(&self.pattern_project, &draw_b, progress_b),
+                    ) {
+                        painter.line_segment(
+                            [to_screen(a), to_screen(b)],
+                            egui::Stroke::new(1.1, egui::Color32::from_rgba_unmultiplied(255, 225, 130, 180)),
+                        );
+                    }
+                }
+            }
+            if selected {
+                let first_a = draw_a.first().and_then(|edge| edge_path_points(&self.pattern_project, edge, 12).get(6).copied());
+                let first_b = draw_b.first().and_then(|edge| edge_path_points(&self.pattern_project, edge, 12).get(6).copied());
+                if let (Some(a), Some(b)) = (first_a, first_b) {
+                    painter.text(to_screen(a), egui::Align2::CENTER_BOTTOM,
+                        format!("C{} · {:.1} cm", seam.id, mismatch * 100.0),
+                        egui::FontId::proportional(10.0), color);
+                    painter.text(to_screen(b), egui::Align2::CENTER_TOP,
+                        format!("C{}", seam.id), egui::FontId::proportional(10.0), color);
+                }
+            }
+        }
+
+        // Prévia sem efeitos colaterais da sugestão sob o cursor na lista de Auto Sewing.
+        if let Some(index) = self.hovered_auto_suggestion {
+            if let Some(suggestion) = self.auto_seam_suggestions.get(index) {
+                let color = egui::Color32::from_rgb(210, 115, 255);
+                let path_a = edge_path_points(&self.pattern_project, &suggestion.a, 32);
+                let path_b = edge_path_points(&self.pattern_project, &suggestion.b, 32);
+                for path in [&path_a, &path_b] {
+                    for pair in path.windows(2) {
+                        painter.line_segment(
+                            [to_screen(pair[0]), to_screen(pair[1])],
+                            egui::Stroke::new(4.0, color),
+                        );
+                    }
+                }
+                if let (Some(a), Some(b)) = (
+                    path_a.get(path_a.len() / 2),
+                    path_b.get(path_b.len() / 2),
+                ) {
                     painter.line_segment(
-                        [to_screen(pair[0]), to_screen(pair[1])],
-                        egui::Stroke::new(if self.selected_seam_id == Some(seam.id) { 4.0 } else { 2.6 }, color),
+                        [to_screen(*a), to_screen(*b)],
+                        egui::Stroke::new(1.8, color),
+                    );
+                    painter.text(
+                        to_screen(*a), egui::Align2::CENTER_BOTTOM,
+                        format!("Sugestão {:.0}%", suggestion.score * 100.0),
+                        egui::FontId::proportional(11.0), color,
                     );
                 }
             }
-            if self.selected_seam_id == Some(seam.id) {
-                let center_a = edge_path_points(&self.pattern_project, &seam.a, 4);
-                let center_b = edge_path_points(&self.pattern_project, &seam.b, 4);
-                if let (Some(a), Some(b)) = (center_a.get(center_a.len()/2), center_b.get(center_b.len()/2)) {
-                    painter.text(to_screen(*a), egui::Align2::CENTER_BOTTOM,
-                        format!("C{} · {:.1} cm", seam.id, mismatch * 100.0),
-                        egui::FontId::proportional(10.0), color);
-                    painter.text(to_screen(*b), egui::Align2::CENTER_TOP,
-                        format!("C{}", seam.id), egui::FontId::proportional(10.0), color);
+        }
+
+        // Preview do lado atual: os extremos do caminho ativo podem ser arrastados livremente.
+        if self.seam_free_mode {
+            if let Ok((draft_a, draft_b)) = self.seam_edges_from_controls() {
+                let paths_a = self.seam_sides_a.clone();
+                let paths_b = self.seam_sides_b.clone();
+                let active_a = self.seam_a_active_path;
+                let active_b = self.seam_b_active_path;
+                let mut sides = [paths_a, paths_b];
+                let drafts = [draft_a, draft_b];
+                let active = [active_a, active_b];
+                for side_index in 0..2 {
+                    let is_a = side_index == 0;
+                    let list = &mut sides[side_index];
+                    let index = active[side_index];
+                    if list.is_empty() { list.push(drafts[side_index].clone()); }
+                    else if index < list.len() { list[index] = drafts[side_index].clone(); }
+                    else { list.push(drafts[side_index].clone()); }
+                    let color = if is_a { egui::Color32::from_rgb(255, 190, 74) } else { egui::Color32::from_rgb(94, 224, 207) };
+                    for (path_index, edge) in list.iter().enumerate() {
+                        let path = edge_path_points(&self.pattern_project, edge, 24);
+                        let screen_path = path.iter().copied().map(to_screen).collect::<Vec<_>>();
+                        for pair in screen_path.windows(2) {
+                            painter.line_segment([pair[0], pair[1]], egui::Stroke::new(3.0, color));
+                        }
+                        if path_index != index { continue; }
+                        if let Some(curve) = edge_curve(&self.pattern_project, edge) {
+                            for (is_start, param) in [(true, edge.start), (false, edge.end)] {
+                                if let Some(point) = curve_segment_point(curve, param.segment as usize, param.t) {
+                                    let screen = to_screen(point);
+                                    painter.circle_filled(screen, 6.0, color);
+                                    painter.circle_stroke(screen, 9.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
+                                    painter.text(screen + egui::vec2(8.0, if is_start { -8.0 } else { 8.0 }),
+                                        egui::Align2::LEFT_CENTER,
+                                        format!("{}{}", if is_a { "A" } else { "B" }, if is_start { " início" } else { " fim" }),
+                                        egui::FontId::proportional(9.0), color);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3394,21 +3940,31 @@ impl ClothEvoApp {
         if self.pattern_tool == PatternTool::Select {
             if response.drag_started_by(egui::PointerButton::Primary) {
                 if let Some(pointer) = response.interact_pointer_pos() {
-                    self.selected_target = self.hit_test_pattern(pointer, center);
-                    if let Some(target) = self.selected_target {
-                        self.selected_piece = target.piece().min(self.pattern_project.pieces.len().saturating_sub(1));
-                        self.dragging_target = if target.is_movable() { Some(target) } else { None };
-                        self.dragging_before = self.dragging_target.map(|_| self.editor_snapshot());
-                        self.drag_last_world = Some(to_world(pointer));
-                    } else {
+                    if let Some(handle) = self.hit_test_seam_handle(pointer, &to_screen) {
+                        self.dragging_seam_handle = Some(handle);
+                        self.seam_drag_before = Some(self.editor_snapshot());
                         self.dragging_target = None;
                         self.dragging_before = None;
                         self.drag_last_world = None;
+                    } else {
+                        self.selected_target = self.hit_test_pattern(pointer, center);
+                        if let Some(target) = self.selected_target {
+                            self.selected_piece = target.piece().min(self.pattern_project.pieces.len().saturating_sub(1));
+                            self.dragging_target = if target.is_movable() { Some(target) } else { None };
+                            self.dragging_before = self.dragging_target.map(|_| self.editor_snapshot());
+                            self.drag_last_world = Some(to_world(pointer));
+                        } else {
+                            self.dragging_target = None;
+                            self.dragging_before = None;
+                            self.drag_last_world = None;
+                        }
                     }
                 }
             }
             if response.dragged_by(egui::PointerButton::Primary) {
-                if let (Some(target), Some(pointer)) = (self.dragging_target, response.interact_pointer_pos()) {
+                if let (Some((is_a, is_start)), Some(pointer)) = (self.dragging_seam_handle, response.interact_pointer_pos()) {
+                    self.update_seam_handle_from_pointer(is_a, is_start, to_world(pointer));
+                } else if let (Some(target), Some(pointer)) = (self.dragging_target, response.interact_pointer_pos()) {
                     let mut world = to_world(pointer);
                     if self.pattern_snap {
                         world.x = (world.x * 100.0).round() / 100.0;
@@ -3433,17 +3989,34 @@ impl ClothEvoApp {
                 }
             }
             if response.drag_stopped_by(egui::PointerButton::Primary) {
-                if let Some(before) = self.dragging_before.take() {
+                if self.dragging_seam_handle.take().is_some() {
+                    self.commit_seam_handle_drag();
+                    self.seam_drag_before = None;
+                } else if let Some(before) = self.dragging_before.take() {
                     self.remember_pattern_change(before);
                 }
                 self.dragging_target = None;
                 self.drag_last_world = None;
             }
-            if response.clicked() && self.dragging_target.is_none() {
+            if response.clicked() && self.dragging_target.is_none() && self.dragging_seam_handle.is_none() {
                 if let Some(pointer) = response.interact_pointer_pos() {
-                    self.selected_target = self.hit_test_pattern(pointer, center);
-                    if let Some(target) = self.selected_target {
-                        self.selected_piece = target.piece().min(self.pattern_project.pieces.len().saturating_sub(1));
+                    let target = self.hit_test_pattern(pointer, center);
+                    let shift = ui.input(|input| input.modifiers.shift);
+                    if shift {
+                        if let Some(PatternEditTarget::Edge { piece, segment, .. }) = target {
+                            if let Some(data) = self.pattern_project.pieces.get(piece) {
+                                let edge = EdgePath::from_segments(
+                                    data.id, BoundaryCurve::Outline,
+                                    segment as u32, segment as u32 + 1, false,
+                                );
+                                self.add_draft_edge_to_side(self.seam_active_side_a, edge);
+                            }
+                        }
+                    } else {
+                        self.selected_target = target;
+                        if let Some(target) = self.selected_target {
+                            self.selected_piece = target.piece().min(self.pattern_project.pieces.len().saturating_sub(1));
+                        }
                     }
                 }
             }
@@ -3473,6 +4046,29 @@ impl ClothEvoApp {
         self.pattern_project.validate()?;
         if self.pattern_project.pieces.is_empty() {
             return Err("O projeto não contém peças.".into());
+        }
+
+        // Força todos os piques e extremos de costura para dentro da amostragem de contorno
+        // antes da triangulação. As extremidades não são aproximadas ao vértice vizinho.
+        let mut forced_by_piece: std::collections::HashMap<u64, Vec<(u32, f64)>> =
+            std::collections::HashMap::new();
+        for piece in &self.pattern_project.pieces {
+            forced_by_piece.entry(piece.id).or_default()
+                .extend(piece.notches.iter().map(|notch| (notch.segment_index, notch.t)));
+        }
+        for seam in &self.pattern_project.seams {
+            for edge in seam.sides_a.iter().chain(seam.sides_b.iter()) {
+                if edge.curve != BoundaryCurve::Outline { continue; }
+                let points = forced_by_piece.entry(edge.piece_id).or_default();
+                points.push((edge.start.segment, edge.start.t));
+                points.push((edge.end.segment, edge.end.t));
+            }
+        }
+        for params in forced_by_piece.values_mut() {
+            params.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| {
+                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+            }));
+            params.dedup_by(|a, b| a.0 == b.0 && (a.1 - b.1).abs() <= 1.0e-9);
         }
 
         // Cada molde usa a sua própria distância entre partículas. As coordenadas da malha
@@ -3509,17 +4105,23 @@ impl ClothEvoApp {
                 .ok_or_else(|| format!("A amostragem do molde '{}' não foi gerada.", piece.name))?;
             validate_simple_polygon(&sampled.points)
                 .map_err(|e| format!("Contorno inválido em '{}': {e}", piece.name))?;
-            let mesh = triangulate_outline(&sampled.points, particle_distance)
-                .map_err(|e| format!("Não foi possível triangular '{}': {e}", piece.name))?;
+            let mesh = triangulate_outline_with_forced_vertices(
+                &sampled.points, particle_distance, &forced_indices,
+            ).map_err(|e| format!("Não foi possível triangular '{}': {e}", piece.name))?;
             if mesh.boundary_vertex_count != sampled.points.len() {
                 return Err(format!("Mapeamento de contorno inválido na peça '{}'.", piece.name));
             }
+            let mapping = PieceSampleMapping {
+                ranges: sampled.segment_vertex_ranges,
+                forced_vertices: params.iter().copied().zip(forced_indices.iter().copied())
+                    .map(|((segment, t), index)| (segment, t, index)).collect(),
+            };
             let grain = piece.grain_line.as_ref().map(|line| {
                 Vec2::new((line.end.x - line.start.x) as f32, (line.end.y - line.start.y) as f32)
             }).unwrap_or(Vec2::Y);
             prepared.push((
                 piece.id,
-                sampled.segment_vertex_ranges,
+                mapping,
                 mesh,
                 piece.fabric.clone(),
                 piece.assembly.clone(),
@@ -3554,7 +4156,7 @@ impl ClothEvoApp {
         struct PieceBuildInfo {
             id: u64,
             handle: cloth_sim::PanelHandle,
-            ranges: Vec<(usize, usize)>,
+            sample: PieceSampleMapping,
             boundary_count: usize,
             base_rotation: Quat,
             pivot: Vec3,
@@ -3565,7 +4167,7 @@ impl ClothEvoApp {
         let x_span = (max_x - min_x).max(1.0e-6);
         let origin_y = (0.9 - min_y) as f32;
 
-        for (piece_index, (id, ranges, mesh, fabric, assembly, grain, name)) in
+        for (piece_index, (id, sample, mesh, fabric, assembly, grain, name)) in
             prepared.into_iter().enumerate()
         {
             let mesh_min_x = mesh.vertices.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
@@ -3639,7 +4241,7 @@ impl ClothEvoApp {
             // segmento anterior. Os índices são os mesmos que o editor exibe ao selecionar nós.
             for anchor in &assembly.pinned_anchors {
                 let anchor_index = *anchor as usize;
-                if anchor_index >= ranges.len() {
+                if anchor_index >= sample.ranges.len() {
                     return Err(format!(
                         "O vértice fixado {} não existe no contorno de '{}'.",
                         anchor_index + 1, name
@@ -3648,7 +4250,7 @@ impl ClothEvoApp {
                 let local_index = if anchor_index == 0 {
                     0
                 } else {
-                    ranges[anchor_index - 1].1 % mesh.boundary_vertex_count
+                    sample.ranges[anchor_index - 1].1 % mesh.boundary_vertex_count
                 };
                 builder.pin(handle.global(local_index as u32));
             }
@@ -3656,7 +4258,7 @@ impl ClothEvoApp {
             infos.push(PieceBuildInfo {
                 id,
                 handle,
-                ranges,
+                sample,
                 boundary_count: mesh.boundary_vertex_count,
                 base_rotation,
                 pivot: translation,
@@ -3664,22 +4266,30 @@ impl ClothEvoApp {
         }
 
         for seam in &self.pattern_project.seams {
-            if seam.a.curve != BoundaryCurve::Outline || seam.b.curve != BoundaryCurve::Outline {
-                return Err(format!(
-                    "A costura '{}' usa uma linha de costura interna; a simulação atual suporta bordas do contorno.",
-                    seam.name
-                ));
-            }
-            let info_a = infos.iter().find(|info| info.id == seam.a.piece_id)
-                .ok_or_else(|| format!("Peça A ausente na costura '{}'.", seam.name))?;
-            let info_b = infos.iter().find(|info| info.id == seam.b.piece_id)
-                .ok_or_else(|| format!("Peça B ausente na costura '{}'.", seam.name))?;
-            let locals_a = sampled_edge_indices(&seam.a, &info_a.ranges, info_a.boundary_count)?;
-            let locals_b = sampled_edge_indices(&seam.b, &info_b.ranges, info_b.boundary_count)?;
-            let globals_a = info_a.handle.globals(&locals_a);
-            let globals_b = info_b.handle.globals(&locals_b);
-            let notch_markers = paired_notch_markers(&self.pattern_project, &seam.a, &seam.b);
-            builder.sew_synchronized_with_markers(
+            let map_side = |paths: &[EdgePath]| -> Result<Vec<Vec<u32>>, String> {
+                let mut result = Vec::with_capacity(paths.len());
+                for edge in paths {
+                    if edge.curve != BoundaryCurve::Outline {
+                        return Err(format!(
+                            "A costura '{}' usa uma linha interna; a simulação atual suporta bordas do contorno.",
+                            seam.name
+                        ));
+                    }
+                    let info = infos.iter().find(|info| info.id == edge.piece_id)
+                        .ok_or_else(|| format!("Peça ausente na costura '{}'.", seam.name))?;
+                    let locals = sampled_edge_indices(
+                        edge, &info.sample.ranges, &info.sample.forced_vertices, info.boundary_count,
+                    )?;
+                    result.push(info.handle.globals(&locals));
+                }
+                Ok(result)
+            };
+            let globals_a = map_side(&seam.sides_a)?;
+            let globals_b = map_side(&seam.sides_b)?;
+            let notch_markers = paired_chain_notch_markers(
+                &self.pattern_project, &seam.sides_a, &seam.sides_b,
+            );
+            builder.sew_with_path_chains(
                 &globals_a, &globals_b, seam.ease_meters as f32, &notch_markers,
             );
         }
@@ -3997,27 +4607,79 @@ fn curve_segment_point(curve: &Curve2D, segment_index: usize, t: f64) -> Option<
     })
 }
 
-/// Comprimento de arco aproximado até t; linear é exato e Bézier usa amostragem uniforme.
-fn curve_segment_arc_length(curve: &Curve2D, segment_index: usize, end_t: f64) -> f64 {
-    let Some(start) = curve_segment_point(curve, segment_index, 0.0) else { return 0.0; };
-    let Some(segment) = curve.segments.get(segment_index) else { return 0.0; };
-    let end_t = end_t.clamp(0.0, 1.0);
-    if let CurveSegment::Line { to } = segment {
-        return start.distance(curve_segment_point(curve, segment_index, end_t).unwrap_or(*to));
+/// Comprimento de arco entre dois parâmetros locais do mesmo segmento.
+fn param_at_curve_position(position: f64, segment_count: usize, upper_bound: f64) -> CurveParam {
+    let max_position = segment_count as f64;
+    let upper = if upper_bound.is_finite() { upper_bound.min(max_position) } else { max_position };
+    let position = position.clamp(0.0, upper.max(0.0));
+    if segment_count == 0 { return CurveParam { segment: 0, t: 0.0 }; }
+    if position >= max_position {
+        return CurveParam { segment: (segment_count - 1) as u32, t: 1.0 };
     }
-    let steps = 32usize;
-    let mut previous = start;
-    let mut length = 0.0;
-    for step in 1..=steps {
-        let t = end_t * step as f64 / steps as f64;
-        let Some(point) = curve_segment_point(curve, segment_index, t) else { continue; };
-        length += previous.distance(point);
-        previous = point;
-    }
-    length
+    let segment = position.floor() as usize;
+    CurveParam { segment: segment as u32, t: (position - segment as f64).clamp(0.0, 1.0) }
 }
 
-fn edge_curve<'a>(project: &'a PatternProject, edge: &EdgeRef) -> Option<&'a Curve2D> {
+/// Projeta um ponto sobre a curva amostrando cada segmento; retorna o parâmetro com menor erro.
+fn closest_curve_param(curve: &Curve2D, point: PatternPoint2) -> Option<(CurveParam, f64)> {
+    const STEPS: usize = 64;
+    if curve.segments.is_empty() { return None; }
+    let mut best: Option<(CurveParam, f64)> = None;
+    for segment in 0..curve.segments.len() {
+        for step in 0..STEPS {
+            let t0 = step as f64 / STEPS as f64;
+            let t1 = (step + 1) as f64 / STEPS as f64;
+            let a = curve_segment_point(curve, segment, t0)?;
+            let b = curve_segment_point(curve, segment, t1)?;
+            let dx = b.x - a.x;
+            let dy = b.y - a.y;
+            let length_sq = dx * dx + dy * dy;
+            let alpha = if length_sq > 1.0e-18 {
+                (((point.x - a.x) * dx + (point.y - a.y) * dy) / length_sq).clamp(0.0, 1.0)
+            } else { 0.0 };
+            let projected = PatternPoint2::new(a.x + dx * alpha, a.y + dy * alpha);
+            let distance = point.distance(projected);
+            let param = CurveParam { segment: segment as u32, t: t0 + (t1 - t0) * alpha };
+            if best.as_ref().map(|(_, d)| distance < *d).unwrap_or(true) {
+                best = Some((param, distance));
+            }
+        }
+    }
+    best
+}
+
+fn snap_curve_param_to_features(
+    curve: &Curve2D,
+    notches: &[Notch],
+    fallback: CurveParam,
+    pointer: PatternPoint2,
+    tolerance_world: f64,
+) -> CurveParam {
+    let mut best = (fallback, pointer.distance(
+        curve_segment_point(curve, fallback.segment as usize, fallback.t).unwrap_or(pointer)
+    ));
+    let mut consider = |param: CurveParam| {
+        if let Some(point) = curve_segment_point(curve, param.segment as usize, param.t) {
+            let distance = pointer.distance(point);
+            if distance < best.1 { best = (param, distance); }
+        }
+    };
+    for segment in 0..curve.segments.len() {
+        consider(CurveParam { segment: segment as u32, t: 0.0 });
+        consider(CurveParam { segment: segment as u32, t: 1.0 });
+    }
+    for notch in notches {
+        if (notch.segment_index as usize) < curve.segments.len() && notch.t.is_finite() {
+            consider(CurveParam {
+                segment: notch.segment_index,
+                t: notch.t.clamp(0.0, 1.0),
+            });
+        }
+    }
+    if best.1 <= tolerance_world { best.0 } else { fallback }
+}
+
+fn edge_curve<'a>(project: &'a PatternProject, edge: &EdgePath) -> Option<&'a Curve2D> {
     let piece = project.pieces.iter().find(|piece| piece.id == edge.piece_id)?;
     match edge.curve {
         BoundaryCurve::Outline => Some(&piece.outline),
@@ -4026,35 +4688,34 @@ fn edge_curve<'a>(project: &'a PatternProject, edge: &EdgeRef) -> Option<&'a Cur
 }
 
 /// Mede a extensão real do intervalo de segmentos, inclusive para intervalos Bézier.
-fn edge_length_meters(project: &PatternProject, edge: &EdgeRef) -> f64 {
-    let Some(curve) = edge_curve(project, edge) else { return 0.0; };
-    let start = edge.segment_start as usize;
-    let end = (edge.segment_end as usize).min(curve.segments.len());
-    if start >= end { return 0.0; }
-    (start..end).map(|index| curve_segment_arc_length(curve, index, 1.0)).sum()
+fn edge_length_meters(project: &PatternProject, edge: &EdgePath) -> f64 {
+    project.edge_length_meters(edge).unwrap_or(0.0)
 }
 
 /// Posição de cada pique como progresso de arco normalizado na borda de costura.
-fn edge_notch_positions(project: &PatternProject, edge: &EdgeRef) -> Vec<f32> {
+fn edge_notch_positions(project: &PatternProject, edge: &EdgePath) -> Vec<f32> {
     if edge.curve != BoundaryCurve::Outline { return Vec::new(); }
     let Some(piece) = project.pieces.iter().find(|piece| piece.id == edge.piece_id) else {
         return Vec::new();
     };
-    let curve = &piece.outline;
-    let start = edge.segment_start as usize;
-    let end = (edge.segment_end as usize).min(curve.segments.len());
-    if start >= end { return Vec::new(); }
-    let lengths: Vec<f64> = (start..end)
-        .map(|index| curve_segment_arc_length(curve, index, 1.0)).collect();
-    let total: f64 = lengths.iter().sum();
-    if total <= 1e-9 { return Vec::new(); }
+    let total = edge_length_meters(project, edge);
+    if total <= 1.0e-9 { return Vec::new(); }
 
     let mut out = piece.notches.iter().filter_map(|notch| {
-        let index = notch.segment_index as usize;
-        if index < start || index >= end || !notch.t.is_finite() { return None; }
-        let prefix: f64 = lengths.iter().take(index - start).sum();
-        let partial = curve_segment_arc_length(curve, index, notch.t);
-        let mut progress = ((prefix + partial) / total).clamp(0.0, 1.0);
+        let scalar = notch.segment_index as f64 + notch.t;
+        if scalar < edge.start_position() - 1.0e-9
+            || scalar > edge.end_position() + 1.0e-9
+            || !notch.t.is_finite()
+        { return None; }
+        let prefix_path = EdgePath {
+            piece_id: edge.piece_id,
+            curve: edge.curve,
+            start: edge.start,
+            end: CurveParam { segment: notch.segment_index, t: notch.t },
+            reversed: false,
+        };
+        let prefix = project.edge_length_meters(&prefix_path).unwrap_or(0.0);
+        let mut progress = (prefix / total).clamp(0.0, 1.0);
         if edge.reversed { progress = 1.0 - progress; }
         Some(progress as f32)
     }).collect::<Vec<_>>();
@@ -4065,32 +4726,134 @@ fn edge_notch_positions(project: &PatternProject, edge: &EdgeRef) -> Vec<f32> {
 /// Gera marcadores de notch para que cada pique pareado receba uma restrição explícita do solver.
 fn paired_notch_markers(
     project: &PatternProject,
-    edge_a: &EdgeRef,
-    edge_b: &EdgeRef,
+    edge_a: &EdgePath,
+    edge_b: &EdgePath,
 ) -> Vec<(f32, f32)> {
     edge_notch_positions(project, edge_a).into_iter()
         .zip(edge_notch_positions(project, edge_b))
         .collect()
 }
 
+fn edge_chain_length_meters(project: &PatternProject, paths: &[EdgePath]) -> f64 {
+    paths.iter().map(|edge| edge_length_meters(project, edge)).sum()
+}
+
+fn edge_chain_notch_positions(project: &PatternProject, paths: &[EdgePath]) -> Vec<f32> {
+    let total = edge_chain_length_meters(project, paths);
+    if total <= 1.0e-9 { return Vec::new(); }
+    let mut prefix = 0.0;
+    let mut out = Vec::new();
+    for edge in paths {
+        let length = edge_length_meters(project, edge);
+        if length > 1.0e-9 {
+            out.extend(edge_notch_positions(project, edge).into_iter()
+                .map(|local| ((prefix + local as f64 * length) / total).clamp(0.0, 1.0) as f32));
+            prefix += length;
+        }
+    }
+    out.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
+fn paired_chain_notch_markers(
+    project: &PatternProject,
+    paths_a: &[EdgePath],
+    paths_b: &[EdgePath],
+) -> Vec<(f32, f32)> {
+    edge_chain_notch_positions(project, paths_a).into_iter()
+        .zip(edge_chain_notch_positions(project, paths_b))
+        .collect()
+}
+
+fn point_on_edge_chain_at_progress(
+    project: &PatternProject,
+    paths: &[EdgePath],
+    progress: f32,
+) -> Option<PatternPoint2> {
+    let total = edge_chain_length_meters(project, paths);
+    if total <= 1.0e-9 { return None; }
+    let mut target = total * progress.clamp(0.0, 1.0) as f64;
+    for edge in paths {
+        let length = edge_length_meters(project, edge);
+        if length <= 1.0e-9 { continue; }
+        if target <= length {
+            let local = (target / length).clamp(0.0, 1.0) as f32;
+            let points = edge_path_points(project, edge, 32);
+            return point_on_path_at_progress(&points, local);
+        }
+        target -= length;
+    }
+    paths.last().and_then(|edge| edge_path_points(project, edge, 32).last().copied())
+}
+
 /// Amostra apenas o intervalo de segmentos referenciado pela costura, para o overlay do canvas.
-fn edge_path_points(project: &PatternProject, edge: &EdgeRef, steps: usize) -> Vec<PatternPoint2> {
+fn edge_path_points(project: &PatternProject, edge: &EdgePath, steps: usize) -> Vec<PatternPoint2> {
     let Some(curve) = edge_curve(project, edge) else { return Vec::new(); };
-    let start = edge.segment_start as usize;
-    let end = (edge.segment_end as usize).min(curve.segments.len());
-    if start >= end { return Vec::new(); }
+    if edge.start_position() >= edge.end_position()
+        || edge.end.segment as usize >= curve.segments.len()
+    { return Vec::new(); }
     let steps = steps.max(1);
     let mut points = Vec::new();
-    for index in start..end {
+    for index in edge.start.segment as usize..=edge.end.segment as usize {
+        let t0 = if index == edge.start.segment as usize { edge.start.t } else { 0.0 };
+        let t1 = if index == edge.end.segment as usize { edge.end.t } else { 1.0 };
+        if t1 < t0 { return Vec::new(); }
         for step in 0..=steps {
-            if index > start && step == 0 { continue; }
-            if let Some(point) = curve_segment_point(curve, index, step as f64 / steps as f64) {
-                points.push(point);
-            }
+            if index > edge.start.segment as usize && step == 0 { continue; }
+            let t = t0 + (t1 - t0) * step as f64 / steps as f64;
+            if let Some(point) = curve_segment_point(curve, index, t) { points.push(point); }
         }
     }
     if edge.reversed { points.reverse(); }
     points
+}
+
+fn point_on_path_at_progress(points: &[PatternPoint2], progress: f32) -> Option<PatternPoint2> {
+    if points.len() < 2 { return points.first().copied(); }
+    let lengths = points.windows(2).map(|pair| pair[0].distance(pair[1])).collect::<Vec<_>>();
+    let total: f64 = lengths.iter().sum();
+    if total <= 1.0e-9 { return points.first().copied(); }
+    let mut target = total * progress.clamp(0.0, 1.0) as f64;
+    for (index, length) in lengths.iter().copied().enumerate() {
+        if target <= length || index + 1 == lengths.len() {
+            let t = if length > 1.0e-9 { (target / length).clamp(0.0, 1.0) } else { 0.0 };
+            return Some(PatternPoint2::new(
+                points[index].x + (points[index + 1].x - points[index].x) * t,
+                points[index].y + (points[index + 1].y - points[index].y) * t,
+            ));
+        }
+        target -= length;
+    }
+    points.last().copied()
+}
+
+fn distance_to_screen_path(point: egui::Pos2, points: &[egui::Pos2]) -> f32 {
+    let mut best = f32::INFINITY;
+    for pair in points.windows(2) {
+        let delta = pair[1] - pair[0];
+        let length_sq = delta.length_sq();
+        let t = if length_sq > 1.0e-6 {
+            ((point - pair[0]).dot(delta) / length_sq).clamp(0.0, 1.0)
+        } else { 0.0 };
+        best = best.min(point.distance(pair[0] + delta * t));
+    }
+    best
+}
+
+fn draw_path_direction_arrow(
+    painter: &egui::Painter,
+    points: &[egui::Pos2],
+    color: egui::Color32,
+) {
+    if points.len() < 3 { return; }
+    let index = points.len() / 2;
+    let tip = points[index];
+    let direction = (points[index] - points[index - 1]).normalized();
+    if direction.length_sq() <= 1.0e-6 { return; }
+    let normal = egui::vec2(-direction.y, direction.x);
+    let base = tip - direction * 9.0;
+    painter.line_segment([tip, base + normal * 4.0], egui::Stroke::new(1.8, color));
+    painter.line_segment([tip, base - normal * 4.0], egui::Stroke::new(1.8, color));
 }
 
 fn translate_curve(curve: &mut Curve2D, dx: f64, dy: f64) {
@@ -4544,19 +5307,19 @@ fn split_piece_metadata(
 }
 
 fn remap_edge_after_cut(
-    edge: &mut EdgeRef,
+    edge: &mut EdgePath,
     mapping: &[Vec<SourceSegmentFragment>],
     first_id: u64,
     second_id: u64,
 ) -> Result<(), String> {
-    let start = edge.segment_start as usize;
-    let end = edge.segment_end as usize;
-    if start >= end || end > mapping.len() {
+    let start = edge.start.segment as usize;
+    let end = edge.end.segment as usize;
+    if start > end || end >= mapping.len() || edge.start_position() >= edge.end_position() {
         return Err("uma costura existente referencia um intervalo inválido".into());
     }
     let mut side = None;
     let mut first_new_index: Option<usize> = None;
-    for source_index in start..end {
+    for source_index in start..=end {
         let fragments = &mapping[source_index];
         if fragments.len() != 1 {
             return Err(format!(
@@ -4582,8 +5345,8 @@ fn remap_edge_after_cut(
     }
     let side = side.ok_or_else(|| "intervalo de costura vazio".to_string())?;
     edge.piece_id = if side == 0 { first_id } else { second_id };
-    edge.segment_start = first_new_index.unwrap() as u32;
-    edge.segment_end = edge.segment_start + (end - start) as u32;
+    edge.start.segment = first_new_index.unwrap() as u32;
+    edge.end.segment = edge.start.segment + (end - start) as u32;
     Ok(())
 }
 
@@ -4784,21 +5547,33 @@ fn split_project_segment(
         }
     }
 
-    // Atualiza os intervalos de costura que referenciam a curva subdividida.
+    // Reparametriza as extremidades sobre os segmentos Bézier/lineares recém-criados.
     for seam in &mut staged.seams {
-        for edge in [&mut seam.a, &mut seam.b] {
+        for edge in seam.sides_a.iter_mut().chain(seam.sides_b.iter_mut()) {
             if edge.piece_id != piece_id || edge.curve != BoundaryCurve::Outline { continue; }
-            if edge.segment_start as usize > segment_index {
-                edge.segment_start += 1;
-                edge.segment_end += 1;
-            } else if edge.segment_end as usize > segment_index {
-                edge.segment_end += 1;
-            }
+            remap_param_after_segment_split(&mut edge.start, segment_index, t);
+            remap_param_after_segment_split(&mut edge.end, segment_index, t);
         }
     }
     staged.validate()?;
     *project = staged;
     Ok(segment_index + 1)
+}
+
+fn remap_param_after_segment_split(param: &mut CurveParam, segment_index: usize, split_t: f64) {
+    let index = segment_index as u32;
+    if param.segment > index {
+        param.segment += 1;
+    } else if param.segment == index {
+        if param.t < split_t - 1.0e-9 {
+            param.t = (param.t / split_t).clamp(0.0, 1.0);
+        } else if param.t > split_t + 1.0e-9 {
+            param.segment += 1;
+            param.t = ((param.t - split_t) / (1.0 - split_t)).clamp(0.0, 1.0);
+        } else {
+            param.t = 1.0;
+        }
+    }
 }
 
 fn convert_project_segment_to_bezier(
@@ -4878,10 +5653,26 @@ fn delete_project_anchor(
     };
 
     for seam in &mut staged.seams {
-        for edge in [&mut seam.a, &mut seam.b] {
+        for edge in seam.sides_a.iter_mut().chain(seam.sides_b.iter_mut()) {
             if edge.piece_id != piece_id || edge.curve != BoundaryCurve::Outline { continue; }
-            let original: Vec<usize> = (edge.segment_start as usize..edge.segment_end as usize)
-                .filter(|&i| i < n)
+            let start_segment = edge.start.segment as usize;
+            let end_segment = edge.end.segment as usize;
+            if start_segment >= n || end_segment >= n || start_segment > end_segment {
+                return Err("Uma costura referencia o segmento que seria removido.".into());
+            }
+            let affected = if anchor_index == 0 {
+                [Some(0usize), Some(n - 1)]
+            } else {
+                [Some(anchor_index - 1), Some(anchor_index)]
+            };
+            for param in [&edge.start, &edge.end] {
+                if affected.iter().flatten().any(|&segment| segment == param.segment as usize)
+                    && param.t > 1.0e-9 && param.t < 1.0 - 1.0e-9
+                {
+                    return Err("Não é possível excluir o vértice porque uma extremidade de costura livre está em um dos segmentos que seriam unidos.".into());
+                }
+            }
+            let original: Vec<usize> = (start_segment..=end_segment)
                 .map(map_segment)
                 .collect();
             if original.is_empty() {
@@ -4895,8 +5686,11 @@ fn delete_project_anchor(
             if max - min + 1 != unique.len() {
                 return Err("Não é possível excluir esse vértice sem fragmentar um intervalo de costura. Ajuste a costura primeiro.".into());
             }
-            edge.segment_start = min as u32;
-            edge.segment_end = (max + 1) as u32;
+            edge.start.segment = map_segment(start_segment) as u32;
+            edge.end.segment = map_segment(end_segment) as u32;
+            if edge.start.segment > edge.end.segment {
+                return Err("A exclusão fragmentaria a ordem dos parâmetros da costura.".into());
+            }
         }
     }
 
@@ -4934,34 +5728,48 @@ fn delete_project_anchor(
 }
 
 fn sampled_edge_indices(
-    edge: &EdgeRef,
+    edge: &EdgePath,
     ranges: &[(usize, usize)],
+    forced_vertices: &[(u32, f64, usize)],
     boundary_count: usize,
-  ) -> Result<Vec<u32>, String> {
-    if boundary_count < 2 || edge.segment_start >= edge.segment_end {
+) -> Result<Vec<u32>, String> {
+    if boundary_count < 2 || edge.start_position() >= edge.end_position() {
         return Err("Intervalo de costura sem vértices suficientes.".into());
     }
-    if edge.segment_end as usize > ranges.len() {
+    if edge.end.segment as usize >= ranges.len() {
         return Err("Intervalo de costura fora da curva amostrada.".into());
     }
-    let mut indices: Vec<u32> = Vec::new();
-    for segment_index in edge.segment_start as usize..edge.segment_end as usize {
-        let (start, end) = ranges[segment_index];
-        if indices.last().copied() != Some(start as u32) {
-            indices.push(start as u32);
+
+    let vertex_for_param = |param: CurveParam| -> Option<usize> {
+        if param.t.abs() <= 1.0e-9 {
+            return ranges.get(param.segment as usize).map(|range| range.0);
         }
-        if end >= start {
-            for index in (start + 1)..=end {
-                let wrapped = (index % boundary_count) as u32;
-                if indices.last().copied() != Some(wrapped) { indices.push(wrapped); }
-            }
+        if (param.t - 1.0).abs() <= 1.0e-9 {
+            return ranges.get(param.segment as usize).map(|range| range.1 % boundary_count);
+        }
+        forced_vertices.iter().find_map(|(segment, t, index)| {
+            (*segment == param.segment && (*t - param.t).abs() <= 1.0e-9).then_some(*index)
+        })
+    };
+    let start_index = vertex_for_param(edge.start)
+        .ok_or_else(|| "O início da costura livre não está presente como vértice forçado na malha.".to_string())?;
+    let end_index = vertex_for_param(edge.end)
+        .ok_or_else(|| "O fim da costura livre não está presente como vértice forçado na malha.".to_string())?;
+
+    let append = |indices: &mut Vec<u32>, index: usize| {
+        let wrapped = (index % boundary_count) as u32;
+        if indices.last().copied() != Some(wrapped) { indices.push(wrapped); }
+    };
+    let mut indices: Vec<u32> = Vec::new();
+    for segment_index in edge.start.segment as usize..=edge.end.segment as usize {
+        let (range_start, range_end) = ranges[segment_index];
+        let begin = if segment_index == edge.start.segment as usize { start_index } else { range_start };
+        let finish = if segment_index == edge.end.segment as usize { end_index } else { range_end % boundary_count };
+        if begin <= finish {
+            for index in begin..=finish { append(&mut indices, index); }
         } else {
-            for index in (start + 1)..boundary_count {
-                let wrapped = index as u32;
-                if indices.last().copied() != Some(wrapped) { indices.push(wrapped); }
-            }
-            let wrapped = (end % boundary_count) as u32;
-            if indices.last().copied() != Some(wrapped) { indices.push(wrapped); }
+            for index in begin..boundary_count { append(&mut indices, index); }
+            for index in 0..=finish { append(&mut indices, index); }
         }
     }
     if edge.reversed { indices.reverse(); }
@@ -5150,8 +5958,8 @@ mod pattern_editor_tests {
         project.seams.push(SeamDefinition {
             id: 1,
             name: "A-B".into(),
-            a: EdgeRef::single_segment(1, 1),
-            b: EdgeRef::single_segment(2, 3),
+            sides_a: vec![EdgeRef::single_segment(1, 1).into()],
+            sides_b: vec![EdgeRef::single_segment(2, 3).into()],
             ease_meters: 0.0,
         });
         project
@@ -5174,11 +5982,11 @@ mod pattern_editor_tests {
             id: 1, segment_index: 3, t: 0.5, depth_meters: 0.008, width_meters: 0.012,
         });
         let seam = project.seams[0].clone();
-        assert!((edge_length_meters(&project, &seam.a) - 1.0).abs() < 1e-6);
-        assert!((edge_length_meters(&project, &seam.b) - 1.0).abs() < 1e-6);
-        assert_eq!(paired_notch_markers(&project, &seam.a, &seam.b), vec![(0.5, 0.5)]);
+        assert!((edge_length_meters(&project, &seam.sides_a[0]) - 1.0).abs() < 1e-6);
+        assert!((edge_length_meters(&project, &seam.sides_b[0]) - 1.0).abs() < 1e-6);
+        assert_eq!(paired_notch_markers(&project, &seam.sides_a[0], &seam.sides_b[0]), vec![(0.5, 0.5)]);
 
-        let mut reversed = seam.b.clone();
+        let mut reversed = seam.sides_b[0].clone();
         reversed.reversed = true;
         assert_eq!(edge_notch_positions(&project, &reversed), vec![0.5]);
     }
@@ -5209,13 +6017,13 @@ mod pattern_editor_tests {
         ], false).unwrap();
         let cut = cut_closed_outline(&outline, &path, 0.02).unwrap();
 
-        let mut untouched = EdgeRef::single_segment(1, 1);
+        let mut untouched: EdgePath = EdgeRef::single_segment(1, 1).into();
         remap_edge_after_cut(&mut untouched, &cut.source_segment_fragments, 1, 10).unwrap();
         assert_eq!(untouched.piece_id, 1);
-        assert_eq!(untouched.segment_start, 1);
-        assert_eq!(untouched.segment_end, 2);
+        assert_eq!(untouched.start.segment, 1);
+        assert_eq!(untouched.end.segment, 1);
 
-        let mut divided = EdgeRef::single_segment(1, 0);
+        let mut divided: EdgePath = EdgeRef::single_segment(1, 0).into();
         assert!(remap_edge_after_cut(&mut divided, &cut.source_segment_fragments, 1, 10).is_err());
     }
 
@@ -5393,7 +6201,7 @@ mod pattern_editor_tests {
         let moved = &project.pieces[0];
         assert_eq!(moved.outline.start, PatternPoint2::new(before.outline.start.x + 2.0, before.outline.start.y - 0.5));
         assert_eq!(moved.id, before.id);
-        assert_eq!(project.seams[0].a.piece_id, 1);
+        assert_eq!(project.seams[0].sides_a[0].piece_id, 1);
         assert!((pattern_geom::curve_length(&moved.outline, 32) - pattern_geom::curve_length(&before.outline, 32)).abs() < 1.0e-6);
     }
 
@@ -5451,10 +6259,10 @@ mod pattern_editor_tests {
         let after = pattern_geom::curve_length(&project.pieces[0].outline, 32);
         assert!((before - after).abs() < 1.0e-6);
         assert_eq!(project.pieces[0].outline.segments.len(), 5);
-        assert_eq!(project.seams[0].a.segment_start, 1);
-        assert_eq!(project.seams[0].a.segment_end, 3);
-        assert_eq!(project.seams[0].b.segment_start, 3);
-        assert_eq!(project.seams[0].b.segment_end, 4);
+        assert_eq!(project.seams[0].sides_a[0].start.segment, 1);
+        assert_eq!(project.seams[0].sides_a[0].end.segment, 2);
+        assert_eq!(project.seams[0].sides_b[0].start.segment, 3);
+        assert_eq!(project.seams[0].sides_b[0].end.segment, 3);
         project.validate().unwrap();
     }
 
@@ -5463,8 +6271,8 @@ mod pattern_editor_tests {
         let mut project = square_project();
         delete_project_anchor(&mut project, 1, 1).unwrap();
         assert_eq!(project.pieces[0].outline.segments.len(), 3);
-        assert_eq!(project.seams[0].a.segment_start, 0);
-        assert_eq!(project.seams[0].a.segment_end, 1);
+        assert_eq!(project.seams[0].sides_a[0].start.segment, 0);
+        assert_eq!(project.seams[0].sides_a[0].end.segment, 0);
         project.validate().unwrap();
     }
 
@@ -5474,8 +6282,8 @@ mod pattern_editor_tests {
         convert_project_segment_to_bezier(&mut project, 1, 1).unwrap();
         let segment = &project.pieces[0].outline.segments[1];
         assert!(matches!(segment, CurveSegment::CubicBezier { .. }));
-        assert_eq!(project.seams[0].a.segment_start, 1);
-        assert_eq!(project.seams[0].a.segment_end, 2);
+        assert_eq!(project.seams[0].sides_a[0].start.segment, 1);
+        assert_eq!(project.seams[0].sides_a[0].end.segment, 1);
         assert!((pattern_geom::curve_length(&project.pieces[0].outline, 64) - 4.0).abs() < 1.0e-4);
         project.validate().unwrap();
     }
