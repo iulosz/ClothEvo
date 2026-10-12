@@ -539,6 +539,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn physical_fold_edge_sets_rest_angle_and_local_bending_compliance() {
+        let mesh = PanelMesh {
+            uv: vec![
+                Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.0),
+                Vec2::new(1.0, 1.0), Vec2::new(0.0, 1.0),
+            ],
+            triangles: vec![[0, 1, 2], [0, 2, 3]],
+        };
+        let mut flat_builder = ClothBuilder::new();
+        flat_builder.add_panel(&mesh, Placement::at(Vec3::ZERO));
+        let flat = flat_builder.build(SimParams::default());
+
+        let mut folded_builder = ClothBuilder::new();
+        let handle = folded_builder.add_panel(&mesh, Placement::at(Vec3::ZERO));
+        folded_builder.add_fold_edge(handle, 0, 2, 0.5, 0.4);
+        let folded = folded_builder.build(SimParams::default());
+
+        let find_hinge = |sim: &Simulation| sim.bending.iter().find(|bend| {
+            bend.p.contains(&0) && bend.p.contains(&2)
+        }).unwrap();
+        let flat_hinge = find_hinge(&flat);
+        let fold_hinge = find_hinge(&folded);
+        assert_eq!(flat_hinge.rest_angle, 0.0);
+        assert!((fold_hinge.rest_angle - 0.4).abs() < 1e-6);
+        assert!((fold_hinge.scale / flat_hinge.scale - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
     fn seam_ease_adjusts_rest_length_to_requested_signed_difference() {
         let uv = vec![
             Vec2::new(0.0, 0.0), Vec2::new(0.0, 1.0),
