@@ -112,6 +112,7 @@ struct PanelPlacementRange {
     end: usize,
     boundary_count: usize,
     base_rotation: Quat,
+    pivot: Vec3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -757,6 +758,9 @@ impl ClothEvoApp {
         if !self.sim.translate_particles(first, end, delta) {
             return;
         }
+        if let Some(range) = self.placement_ranges.iter_mut().find(|range| range.piece_id == piece_id) {
+            range.pivot += delta;
+        }
         if let Some(piece) = self.pattern_project.pieces.iter_mut().find(|piece| piece.id == piece_id) {
             piece.assembly.translation_meters[0] += delta.x as f64;
             piece.assembly.translation_meters[1] += delta.y as f64;
@@ -780,8 +784,8 @@ impl ClothEvoApp {
         let range = self.placement_ranges.iter().find(|range| range.piece_id == piece_id)?;
         let positions = self.sim.pos.get(range.first..range.end)?;
         if positions.is_empty() { return None; }
-        let center = positions.iter().fold(Vec3::ZERO, |sum, position| sum + *position)
-            / positions.len() as f32;
+        let center = range.pivot;
+        if !center.is_finite() { return None; }
         let piece = self.pattern_project.pieces.iter().find(|piece| piece.id == piece_id)?;
         let [x, y, z] = piece.assembly.rotation_degrees.map(|degrees| (degrees as f32).to_radians());
         let qx = Quat::from_rotation_x(x);
@@ -916,7 +920,7 @@ impl ClothEvoApp {
         }
         let Some(range) = self.placement_ranges.iter().find(|range| range.piece_id == piece_id).copied()
         else { return; };
-        let Some((center, _, _)) = self.placement_gizmo_axes(piece_id) else { return; };
+        let center = range.pivot;
         let rotation = Quat::from_axis_angle(axis_world.normalize(), degrees.to_radians());
         if !self.sim.rotate_particles(range.first, range.end, center, rotation) {
             return;
@@ -931,7 +935,8 @@ impl ClothEvoApp {
         if axis >= 3 || !factor.is_finite() || factor <= 0.0 { return; }
         let Some(range) = self.placement_ranges.iter().find(|range| range.piece_id == piece_id).copied()
         else { return; };
-        let Some((center, object_axes, _)) = self.placement_gizmo_axes(piece_id) else { return; };
+        let Some((_, object_axes, _)) = self.placement_gizmo_axes(piece_id) else { return; };
+        let center = range.pivot;
         let scaled_axes: &[usize] = if axis == 2 { &[0, 1] } else { &[axis] };
         for &scale_axis in scaled_axes {
             let old_scale = self.pattern_project.pieces.iter()
@@ -3251,6 +3256,7 @@ impl ClothEvoApp {
             ranges: Vec<(usize, usize)>,
             boundary_count: usize,
             base_rotation: Quat,
+            pivot: Vec3,
         }
         let mut infos: Vec<PieceBuildInfo> = Vec::new();
         let piece_count = prepared.len();
@@ -3341,6 +3347,7 @@ impl ClothEvoApp {
                 ranges,
                 boundary_count: mesh.boundary_vertex_count,
                 base_rotation,
+                pivot: translation,
             });
         }
 
@@ -3374,6 +3381,7 @@ impl ClothEvoApp {
             end: (info.handle.first + info.handle.count) as usize,
             boundary_count: info.boundary_count,
             base_rotation: info.base_rotation,
+            pivot: info.pivot,
         }).collect();
         self.sim = builder.build(self.sim.params.clone());
         self.seam_pairs = self.sim.seam_pairs();
@@ -4422,6 +4430,74 @@ impl eframe::App for ClothEvoApp {
 }
 
 
+
+fn gizmo_axis_color(axis: usize) -> egui::Color32 {
+    match axis {
+        0 => egui::Color32::from_rgb(245, 86, 83),
+        1 => egui::Color32::from_rgb(103, 220, 125),
+        _ => egui::Color32::from_rgb(83, 164, 255),
+    }
+}
+
+fn draw_gizmo_arrow_head(
+    painter: &egui::Painter,
+    tip: egui::Pos2,
+    direction: egui::Vec2,
+    color: egui::Color32,
+) {
+    let direction = direction.normalized();
+    if direction.length_sq() < 1.0e-6 { return; }
+    let perpendicular = egui::vec2(-direction.y, direction.x);
+    let base = tip - direction * 10.0;
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            tip,
+            base + perpendicular * 4.0,
+            base - perpendicular * 4.0,
+        ],
+        color,
+        egui::Stroke::NONE,
+    ));
+}
+
+/// Distância do ponteiro ao segmento e parâmetro projetado t em [0, 1].
+fn point_segment_distance(
+    point: egui::Pos2,
+    a: egui::Pos2,
+    b: egui::Pos2,
+) -> (f32, f32) {
+    let ab = b - a;
+    let length_squared = ab.length_sq();
+    if length_squared <= 1.0e-6 {
+        return (point.distance(a), 0.0);
+    }
+    let t = ((point - a).dot(ab) / length_squared).clamp(0.0, 1.0);
+    let closest = a + ab * t;
+    (point.distance(closest), t)
+}
+
+fn projected_rotation_ring(
+    center: Vec3,
+    axis: Vec3,
+    radius: f32,
+    view_proj: glam::Mat4,
+    rect: egui::Rect,
+) -> Vec<egui::Pos2> {
+    let axis = axis.normalize_or_zero();
+    let helper = if axis.dot(Vec3::Y).abs() > 0.88 { Vec3::X } else { Vec3::Y };
+    let u = axis.cross(helper).normalize_or_zero();
+    let v = axis.cross(u).normalize_or_zero();
+    if u.length_squared() < 1.0e-8 || v.length_squared() < 1.0e-8 { return Vec::new(); }
+    let mut points = Vec::with_capacity(49);
+    for step in 0..=48 {
+        let angle = std::f32::consts::TAU * step as f32 / 48.0;
+        let world = center + (u * angle.cos() + v * angle.sin()) * radius;
+        if let Some((screen, _)) = project_world_to_screen(world, view_proj, rect) {
+            points.push(screen);
+        }
+    }
+    points
+}
 
 /// Projeta um ponto 3D para a viewport egui, mantendo a convenção de profundidade [0, 1] do wgpu.
 fn project_world_to_screen(
