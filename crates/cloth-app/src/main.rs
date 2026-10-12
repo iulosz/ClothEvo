@@ -2647,12 +2647,17 @@ impl ClothEvoApp {
         // costura selecionada, ambos os lados ganham destaque, setas de direção e ligações entre piques.
         let hovered_pointer = ui.input(|input| input.pointer.hover_pos());
         for seam in &self.pattern_project.seams {
-            let la = edge_length_meters(&self.pattern_project, &seam.a);
-            let lb = edge_length_meters(&self.pattern_project, &seam.b);
-            let mismatch = (la - lb - seam.ease_meters).abs();
             let selected = self.selected_seam_id == Some(seam.id);
-            let path_a = edge_path_points(&self.pattern_project, &seam.a, 24);
-            let path_b = edge_path_points(&self.pattern_project, &seam.b, 24);
+            let (draw_a, draw_b) = if selected {
+                self.seam_edges_from_controls().unwrap_or((seam.a.clone(), seam.b.clone()))
+            } else {
+                (seam.a.clone(), seam.b.clone())
+            };
+            let la = edge_length_meters(&self.pattern_project, &draw_a);
+            let lb = edge_length_meters(&self.pattern_project, &draw_b);
+            let mismatch = (la - lb - seam.ease_meters).abs();
+            let path_a = edge_path_points(&self.pattern_project, &draw_a, 24);
+            let path_b = edge_path_points(&self.pattern_project, &draw_b, 24);
             let screen_a = path_a.iter().copied().map(to_screen).collect::<Vec<_>>();
             let screen_b = path_b.iter().copied().map(to_screen).collect::<Vec<_>>();
             let hovering_selected_seam = selected && response.hovered()
@@ -2677,7 +2682,7 @@ impl ClothEvoApp {
             if hovering_selected_seam {
                 draw_path_direction_arrow(&painter, &screen_a, color);
                 draw_path_direction_arrow(&painter, &screen_b, color);
-                for (progress_a, progress_b) in paired_notch_markers(&self.pattern_project, &seam.a, &seam.b) {
+                for (progress_a, progress_b) in paired_notch_markers(&self.pattern_project, &draw_a, &draw_b) {
                     if let (Some(a), Some(b)) = (
                         point_on_path_at_progress(&path_a, progress_a),
                         point_on_path_at_progress(&path_b, progress_b),
@@ -2696,6 +2701,34 @@ impl ClothEvoApp {
                         egui::FontId::proportional(10.0), color);
                     painter.text(to_screen(*b), egui::Align2::CENTER_TOP,
                         format!("C{}", seam.id), egui::FontId::proportional(10.0), color);
+                }
+            }
+        }
+
+        // Preview da nova costura e alças arrastáveis do Free Sewing, inclusive antes de salvar.
+        if self.seam_free_mode {
+            if let Ok((edge_a, edge_b)) = self.seam_edges_from_controls() {
+                let tint_a = egui::Color32::from_rgb(255, 190, 74);
+                let tint_b = egui::Color32::from_rgb(94, 224, 207);
+                for (is_a, edge, color) in [(true, edge_a, tint_a), (false, edge_b, tint_b)] {
+                    let path = edge_path_points(&self.pattern_project, &edge, 24);
+                    let screen_path = path.iter().copied().map(to_screen).collect::<Vec<_>>();
+                    for pair in screen_path.windows(2) {
+                        painter.line_segment([pair[0], pair[1]], egui::Stroke::new(3.0, color));
+                    }
+                    if let Some(curve) = edge_curve(&self.pattern_project, &edge) {
+                        for (is_start, param) in [(true, edge.start), (false, edge.end)] {
+                            if let Some(point) = curve_segment_point(curve, param.segment as usize, param.t) {
+                                let screen = to_screen(point);
+                                painter.circle_filled(screen, 6.0, color);
+                                painter.circle_stroke(screen, 9.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
+                                painter.text(screen + egui::vec2(8.0, if is_start { -8.0 } else { 8.0 }),
+                                    egui::Align2::LEFT_CENTER,
+                                    format!("{}{}", if is_a { "A" } else { "B" }, if is_start { " início" } else { " fim" }),
+                                    egui::FontId::proportional(9.0), color);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2731,21 +2764,31 @@ impl ClothEvoApp {
         if self.pattern_tool == PatternTool::Select {
             if response.drag_started_by(egui::PointerButton::Primary) {
                 if let Some(pointer) = response.interact_pointer_pos() {
-                    self.selected_target = self.hit_test_pattern(pointer, center);
-                    if let Some(target) = self.selected_target {
-                        self.selected_piece = target.piece().min(self.pattern_project.pieces.len().saturating_sub(1));
-                        self.dragging_target = if target.is_movable() { Some(target) } else { None };
-                        self.dragging_before = self.dragging_target.map(|_| self.editor_snapshot());
-                        self.drag_last_world = Some(to_world(pointer));
-                    } else {
+                    if let Some(handle) = self.hit_test_seam_handle(pointer, &to_screen) {
+                        self.dragging_seam_handle = Some(handle);
+                        self.seam_drag_before = Some(self.editor_snapshot());
                         self.dragging_target = None;
                         self.dragging_before = None;
                         self.drag_last_world = None;
+                    } else {
+                        self.selected_target = self.hit_test_pattern(pointer, center);
+                        if let Some(target) = self.selected_target {
+                            self.selected_piece = target.piece().min(self.pattern_project.pieces.len().saturating_sub(1));
+                            self.dragging_target = if target.is_movable() { Some(target) } else { None };
+                            self.dragging_before = self.dragging_target.map(|_| self.editor_snapshot());
+                            self.drag_last_world = Some(to_world(pointer));
+                        } else {
+                            self.dragging_target = None;
+                            self.dragging_before = None;
+                            self.drag_last_world = None;
+                        }
                     }
                 }
             }
             if response.dragged_by(egui::PointerButton::Primary) {
-                if let (Some(target), Some(pointer)) = (self.dragging_target, response.interact_pointer_pos()) {
+                if let (Some((is_a, is_start)), Some(pointer)) = (self.dragging_seam_handle, response.interact_pointer_pos()) {
+                    self.update_seam_handle_from_pointer(is_a, is_start, to_world(pointer));
+                } else if let (Some(target), Some(pointer)) = (self.dragging_target, response.interact_pointer_pos()) {
                     let mut world = to_world(pointer);
                     if self.pattern_snap {
                         world.x = (world.x * 100.0).round() / 100.0;
@@ -2770,13 +2813,16 @@ impl ClothEvoApp {
                 }
             }
             if response.drag_stopped_by(egui::PointerButton::Primary) {
-                if let Some(before) = self.dragging_before.take() {
+                if self.dragging_seam_handle.take().is_some() {
+                    self.commit_seam_handle_drag();
+                    self.seam_drag_before = None;
+                } else if let Some(before) = self.dragging_before.take() {
                     self.remember_pattern_change(before);
                 }
                 self.dragging_target = None;
                 self.drag_last_world = None;
             }
-            if response.clicked() && self.dragging_target.is_none() {
+            if response.clicked() && self.dragging_target.is_none() && self.dragging_seam_handle.is_none() {
                 if let Some(pointer) = response.interact_pointer_pos() {
                     self.selected_target = self.hit_test_pattern(pointer, center);
                     if let Some(target) = self.selected_target {
