@@ -3687,8 +3687,24 @@ fn delete_project_anchor(
     for seam in &mut staged.seams {
         for edge in [&mut seam.a, &mut seam.b] {
             if edge.piece_id != piece_id || edge.curve != BoundaryCurve::Outline { continue; }
-            let original: Vec<usize> = (edge.segment_start as usize..edge.segment_end as usize)
-                .filter(|&i| i < n)
+            let start_segment = edge.start.segment as usize;
+            let end_segment = edge.end.segment as usize;
+            if start_segment >= n || end_segment >= n || start_segment > end_segment {
+                return Err("Uma costura referencia o segmento que seria removido.".into());
+            }
+            let affected = if anchor_index == 0 {
+                [Some(0usize), Some(n - 1)]
+            } else {
+                [Some(anchor_index - 1), Some(anchor_index)]
+            };
+            for param in [&edge.start, &edge.end] {
+                if affected.iter().flatten().any(|&segment| segment == param.segment as usize)
+                    && param.t > 1.0e-9 && param.t < 1.0 - 1.0e-9
+                {
+                    return Err("Não é possível excluir o vértice porque uma extremidade de costura livre está em um dos segmentos que seriam unidos.".into());
+                }
+            }
+            let original: Vec<usize> = (start_segment..=end_segment)
                 .map(map_segment)
                 .collect();
             if original.is_empty() {
@@ -3702,8 +3718,11 @@ fn delete_project_anchor(
             if max - min + 1 != unique.len() {
                 return Err("Não é possível excluir esse vértice sem fragmentar um intervalo de costura. Ajuste a costura primeiro.".into());
             }
-            edge.segment_start = min as u32;
-            edge.segment_end = (max + 1) as u32;
+            edge.start.segment = map_segment(start_segment) as u32;
+            edge.end.segment = map_segment(end_segment) as u32;
+            if edge.start.segment > edge.end.segment {
+                return Err("A exclusão fragmentaria a ordem dos parâmetros da costura.".into());
+            }
         }
     }
 
