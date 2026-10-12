@@ -14,6 +14,8 @@ pub use editor_ops::{
 };
 
 const EPS: f64 = 1.0e-9;
+/// Orçamento global por curva para manter amostragem/sincronização limitada.
+const MAX_CURVE_SAMPLES: usize = 4_096;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GeometryError {
@@ -120,7 +122,7 @@ fn cubic_parameters(
     max_spacing: f64,
     depth: u32,
     out: &mut Vec<f64>,
-) {
+) -> Result<(), GeometryError> {
     let p0 = point_on_segment(curve, segment_index, t0);
     let p1 = point_on_segment(curve, segment_index, t1);
     let span = t1 - t0;
@@ -134,18 +136,26 @@ fn cubic_parameters(
     let sufficiently_flat = polyline_length - chord_length <= max_spacing * 0.04;
 
     if depth >= 18 || (sufficiently_short && sufficiently_flat) {
+        if out.len() >= MAX_CURVE_SAMPLES {
+            return Err(GeometryError::InvalidParameter);
+        }
         out.push(t1);
-        return;
+        return Ok(());
     }
     let mid = (t0 + t1) * 0.5;
-    cubic_parameters(curve, segment_index, t0, mid, max_spacing, depth + 1, out);
-    cubic_parameters(curve, segment_index, mid, t1, max_spacing, depth + 1, out);
+    cubic_parameters(curve, segment_index, t0, mid, max_spacing, depth + 1, out)?;
+    cubic_parameters(curve, segment_index, mid, t1, max_spacing, depth + 1, out)?;
+    Ok(())
 }
 
 fn segment_parameters(curve: &Curve2D, max_spacing: f64) -> Result<SegmentParameters, GeometryError> {
-    if !max_spacing.is_finite() || max_spacing <= 0.0 {
+    if !max_spacing.is_finite() || max_spacing <= 0.0
+        || curve.segments.len().saturating_add(1) > MAX_CURVE_SAMPLES
+    {
         return Err(GeometryError::InvalidParameter);
     }
+    // Count all vertices across the whole curve, not just per individual segment.
+    let mut total_samples = 1usize;
     let mut result = Vec::with_capacity(curve.segments.len());
     for (index, segment) in curve.segments.iter().enumerate() {
         match segment {
@@ -157,15 +167,24 @@ fn segment_parameters(curve: &Curve2D, max_spacing: f64) -> Result<SegmentParame
                 };
                 let length = start.distance(*to);
                 let count = (length / max_spacing).ceil().max(1.0);
-                if !count.is_finite() || count > 1_000_000.0 {
+                if !count.is_finite() || count > MAX_CURVE_SAMPLES as f64 {
                     return Err(GeometryError::InvalidParameter);
                 }
                 let count = count as usize;
+                if total_samples.saturating_add(count) > MAX_CURVE_SAMPLES {
+                    return Err(GeometryError::InvalidParameter);
+                }
+                total_samples += count;
                 result.push((0..=count).map(|i| i as f64 / count as f64).collect());
             }
             CurveSegment::CubicBezier { .. } => {
                 let mut params = vec![0.0];
-                cubic_parameters(curve, index, 0.0, 1.0, max_spacing, 0, &mut params);
+                cubic_parameters(curve, index, 0.0, 1.0, max_spacing, 0, &mut params)?;
+                let added = params.len().saturating_sub(1);
+                if total_samples.saturating_add(added) > MAX_CURVE_SAMPLES {
+                    return Err(GeometryError::InvalidParameter);
+                }
+                total_samples += added;
                 result.push(params);
             }
         }
@@ -337,6 +356,9 @@ pub fn sample_pattern_outlines_with_seam_sync(
         fractions.extend(edge_sample_fractions(&piece_b.outline, params_b, &seam.b)?);
         fractions.sort_by(f64::total_cmp);
         fractions.dedup_by(|a, b| (*a - *b).abs() <= 1.0e-8);
+        if fractions.len() > MAX_CURVE_SAMPLES {
+            return Err(GeometryError::InvalidParameter);
+        }
 
         // Todas as frações partem da amostragem base e são mapeadas antes de qualquer mutação.
         // Assim, múltiplas costuras podem compartilhar uma curva sem depender da ordem do loop.
@@ -354,6 +376,15 @@ pub fn sample_pattern_outlines_with_seam_sync(
         for (segment, t) in mapped_b {
             synchronized_params.get_mut(&piece_b.id).ok_or(GeometryError::InvalidSegment)?
                 .get_mut(segment).ok_or(GeometryError::InvalidSegment)?.push(t);
+        }
+        for piece_id in [piece_a.id, piece_b.id] {
+            let params = synchronized_params.get(&piece_id).ok_or(GeometryError::InvalidSegment)?;
+            let total = 1usize.saturating_add(
+                params.iter().map(|segment| segment.len().saturating_sub(1)).sum::<usize>()
+            );
+            if total > MAX_CURVE_SAMPLES {
+                return Err(GeometryError::InvalidParameter);
+            }
         }
     }
 
@@ -651,6 +682,18 @@ mod tests {
         }
         let total = cumulative.last().copied().unwrap_or(0.0).max(EPS);
         cumulative.iter().map(|length| length / total).collect()
+    }
+
+    #[test]
+    fn sampling_rejects_aggregate_vertex_overflow_across_multiple_segments() {
+        let mut piece = PatternPiece::from_polygon(77, "Alta resolução", &[
+            Point2::new(0.0, 0.0),
+            Point2::new(1.1, 0.0),
+            Point2::new(1.1, 1.1),
+            Point2::new(0.0, 1.1),
+        ]).unwrap();
+        piece.fabric.particle_distance_meters = 0.001;
+        assert!(sample_pattern_outlines_with_seam_sync(&[piece], &[]).is_err());
     }
 
     #[test]
