@@ -239,7 +239,8 @@ impl ClothBuilder {
                 // Linhas de dobra coincidentes combinam seus alvos; preserva a menor rigidez.
                 existing.stiffness = existing.stiffness.min(spec.stiffness);
                 existing.rest_angle =
-                    (existing.rest_angle + spec.rest_angle).clamp(-std::f32::consts::PI, std::f32::consts::PI);
+                    ((existing.rest_angle + spec.rest_angle) * 0.5)
+                        .clamp(-std::f32::consts::PI, std::f32::consts::PI);
             })
             .or_insert(spec);
     }
