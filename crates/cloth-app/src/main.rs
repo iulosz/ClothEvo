@@ -794,6 +794,8 @@ impl ClothEvoApp {
                 0.0..=0.05,
             ).text("margem (m)"));
             if allowance_response.changed() {
+                let piece_id = self.pattern_project.pieces[self.selected_piece].id;
+                self.sync_symmetric_mate(piece_id);
                 self.remember_pattern_change(allowance_before);
             }
         }
@@ -1309,7 +1311,9 @@ impl ClothEvoApp {
             Err(error) => { self.pattern_message = error; return; }
         };
         let before = self.editor_snapshot();
+        let piece_id = self.pattern_project.pieces[piece_index].id;
         self.pattern_project.pieces[piece_index].internal_lines.push(curve);
+        self.sync_symmetric_mate(piece_id);
         self.draft_points.clear();
         self.pattern_tool = PatternTool::Select;
         self.pattern_message = "Linha interna adicionada ao molde.".into();
@@ -1322,11 +1326,13 @@ impl ClothEvoApp {
             Err(error) => { self.pattern_message = error; return; }
         };
         let before = self.editor_snapshot();
+        let piece_id = self.pattern_project.pieces[piece_index].id;
         self.pattern_project.pieces[piece_index].fold_lines.push(FoldLine {
             curve,
             kind: FoldKind::Valley,
             stiffness: 0.35,
         });
+        self.sync_symmetric_mate(piece_id);
         self.draft_points.clear();
         self.pattern_tool = PatternTool::Select;
         self.pattern_message = "Linha de dobra (vale) adicionada; rigidez inicial 0,35.".into();
@@ -1339,11 +1345,13 @@ impl ClothEvoApp {
             Err(error) => { self.pattern_message = error; return; }
         };
         let before = self.editor_snapshot();
+        let piece_id = self.pattern_project.pieces[piece_index].id;
         self.pattern_project.pieces[piece_index].pleats.push(Pleat {
             axis,
             depth_meters: 0.02,
             angle_radians: std::f64::consts::FRAC_PI_4,
         });
+        self.sync_symmetric_mate(piece_id);
         self.draft_points.clear();
         self.pattern_tool = PatternTool::Select;
         self.pattern_message = "Prega criada com profundidade inicial de 2 cm e ângulo de 45°.".into();
@@ -1362,7 +1370,9 @@ impl ClothEvoApp {
         let start = curve.start;
         let Some(end) = curve.endpoint() else { return; };
         let before = self.editor_snapshot();
+        let piece_id = self.pattern_project.pieces[piece_index].id;
         self.pattern_project.pieces[piece_index].grain_line = Some(GrainLine { start, end });
+        self.sync_symmetric_mate(piece_id);
         self.draft_points.clear();
         self.pattern_tool = PatternTool::Select;
         self.pattern_message = "Linha de fio atualizada.".into();
