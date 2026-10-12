@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use glam::{Vec2, Vec3};
 use pattern_core::{polyline_length_meters, Point2};
@@ -32,6 +32,8 @@ struct SeamSpec {
     pairs: Vec<(u32, u32)>,
     edge_a: Vec<u32>,
     edge_b: Vec<u32>,
+    edge_a_paths: Vec<Vec<u32>>,
+    edge_b_paths: Vec<Vec<u32>>,
     /// Diferença-alvo de comprimento A − B, em metros. Positivo significa A mais longa.
     ease_meters: f32,
 }
@@ -149,25 +151,37 @@ impl ClothBuilder {
         ease_meters: f32,
         notch_markers: &[(f32, f32)],
     ) {
-        if edge_a.len() < 2 || edge_b.len() < 2 || !ease_meters.is_finite() {
-            return;
-        }
-        let mut pairs = pair_by_arc_length(edge_a, edge_b, &self.uv);
-        let ta = edge_arc_params(edge_a, &self.uv);
-        let tb = edge_arc_params(edge_b, &self.uv);
+        self.sew_with_path_chains(&[edge_a.to_vec()], &[edge_b.to_vec()], ease_meters, notch_markers);
+    }
+
+    /// Costura cadeias M:N. O arco acumulado reinicia a cada borda de entrada, sem inventar
+    /// um segmento entre peças/trechos desconectados da mesma cadeia.
+    pub fn sew_with_path_chains(
+        &mut self,
+        paths_a: &[Vec<u32>],
+        paths_b: &[Vec<u32>],
+        ease_meters: f32,
+        notch_markers: &[(f32, f32)],
+    ) {
+        if !ease_meters.is_finite() { return; }
+        let (edge_a, ta) = flatten_path_chain(paths_a, &self.uv);
+        let (edge_b, tb) = flatten_path_chain(paths_b, &self.uv);
+        if edge_a.len() < 2 || edge_b.len() < 2 { return; }
+
+        let mut pairs = pair_by_arc_progress(&edge_a, &ta, &edge_b, &tb);
         for &(marker_a, marker_b) in notch_markers {
             let Some(&a) = edge_a.get(nearest_arc_index(marker_a, &ta)) else { continue; };
             let Some(&b) = edge_b.get(nearest_arc_index(marker_b, &tb)) else { continue; };
-            if a != b {
-                pairs.push((a, b));
-            }
+            if a != b { pairs.push((a, b)); }
         }
         pairs.sort_unstable();
         pairs.dedup();
         self.seams.push(SeamSpec {
             pairs,
-            edge_a: edge_a.to_vec(),
-            edge_b: edge_b.to_vec(),
+            edge_a,
+            edge_b,
+            edge_a_paths: paths_a.to_vec(),
+            edge_b_paths: paths_b.to_vec(),
             ease_meters,
         });
     }
@@ -367,6 +381,46 @@ impl ClothBuilder {
 }
 
 /// Parâmetros de arco normalizados para uma cadeia de vértices da borda.
+fn flatten_path_chain(paths: &[Vec<u32>], uv: &[Vec2]) -> (Vec<u32>, Vec<f32>) {
+    let total = paths.iter().map(|path| chain_length(path, uv)).sum::<f32>();
+    if total <= 1.0e-8 { return (Vec::new(), Vec::new()); }
+    let mut edge = Vec::new();
+    let mut progress = Vec::new();
+    let mut prefix = 0.0_f32;
+    for path in paths {
+        let length = chain_length(path, uv);
+        if path.len() < 2 || length <= 1.0e-8 { continue; }
+        let local = edge_arc_params(path, uv);
+        for (&index, &t) in path.iter().zip(local.iter()) {
+            let global_t = ((prefix + t * length) / total).clamp(0.0, 1.0);
+            if edge.last().copied() == Some(index) {
+                if let Some(last) = progress.last_mut() { *last = global_t; }
+            } else {
+                edge.push(index);
+                progress.push(global_t);
+            }
+        }
+        prefix += length;
+    }
+    (edge, progress)
+}
+
+fn pair_by_arc_progress(a: &[u32], ta: &[f32], b: &[u32], tb: &[f32]) -> Vec<(u32, u32)> {
+    if a.len() < 2 || b.len() < 2 || ta.len() != a.len() || tb.len() != b.len() {
+        return Vec::new();
+    }
+    let mut pairs = Vec::with_capacity(a.len() + b.len());
+    for (index, &t) in ta.iter().enumerate() {
+        pairs.push((a[index], b[nearest_arc_index(t, tb)]));
+    }
+    for (index, &t) in tb.iter().enumerate() {
+        pairs.push((a[nearest_arc_index(t, ta)], b[index]));
+    }
+    pairs.sort_unstable();
+    pairs.dedup();
+    pairs
+}
+
 fn edge_arc_params(edge: &[u32], uv: &[Vec2]) -> Vec<f32> {
     let mut t = vec![0.0f32; edge.len()];
     for k in 1..edge.len() {
