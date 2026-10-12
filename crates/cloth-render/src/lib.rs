@@ -139,9 +139,11 @@ struct ClothGpu {
     wire_count: u32,
     seam_indices: wgpu::Buffer,
     seam_count: u32,
+    seam_warning_indices: wgpu::Buffer,
     surface: DrawSlot,
     wire: DrawSlot,
     seams: DrawSlot,
+    seam_warnings: DrawSlot,
 }
 
 /// Recursos de GPU do viewport. Fica guardado em `callback_resources` do egui.
@@ -305,9 +307,12 @@ impl SceneRenderer {
             wire_count: wire.len() as u32,
             seam_indices: index_buffer(device, "cloth seams", &seams),
             seam_count: seams.len() as u32,
+            // Capacidade de todos os vínculos; cada frame escreve apenas os avisos atuais.
+            seam_warning_indices: index_buffer(device, "cloth seam warnings", &seams),
             surface: DrawSlot::new(device, &self.layout, "cloth surface uniforms"),
             wire: DrawSlot::new(device, &self.layout, "cloth wire uniforms"),
             seams: DrawSlot::new(device, &self.layout, "cloth seam uniforms"),
+            seam_warnings: DrawSlot::new(device, &self.layout, "cloth seam warning uniforms"),
         });
     }
 }
@@ -322,6 +327,8 @@ pub struct ViewportCallback {
     pub eye: Vec3,
     /// Posições e normais atuais do tecido (mesmo tamanho de `ClothTopology::vertex_count`).
     pub cloth_vertices: Vec<Vertex>,
+    /// Vínculos de costura cuja abertura supera o limite visual de diagnóstico.
+    pub warning_seam_pairs: Vec<(u32, u32)>,
     pub style: ViewStyle,
 }
 
@@ -374,6 +381,13 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             queue.write_buffer(&c.wire.buffer, 0, bytemuck::bytes_of(&wire));
             let seam = self.uniforms([1.0, 0.82, 0.10], [1.0, 0.82, 0.10], KIND_LINE, gamma);
             queue.write_buffer(&c.seams.buffer, 0, bytemuck::bytes_of(&seam));
+            let seam_warning = self.uniforms([1.0, 0.08, 0.10], [1.0, 0.08, 0.10], KIND_LINE, gamma);
+            queue.write_buffer(&c.seam_warnings.buffer, 0, bytemuck::bytes_of(&seam_warning));
+            if !self.warning_seam_pairs.is_empty() {
+                let indices: Vec<u32> = self.warning_seam_pairs.iter()
+                    .flat_map(|&(a, b)| [a, b]).collect();
+                queue.write_buffer(&c.seam_warning_indices, 0, bytemuck::cast_slice(&indices));
+            }
         }
         Vec::new()
     }
@@ -423,6 +437,11 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             pass.set_bind_group(0, &c.seams.bind_group, &[]);
             pass.set_index_buffer(c.seam_indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..c.seam_count, 0, 0..1);
+            if !self.warning_seam_pairs.is_empty() {
+                pass.set_bind_group(0, &c.seam_warnings.bind_group, &[]);
+                pass.set_index_buffer(c.seam_warning_indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..(self.warning_seam_pairs.len() as u32 * 2), 0, 0..1);
+            }
         }
     }
 }
