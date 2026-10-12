@@ -271,6 +271,14 @@ impl PatternPiece {
     }
 }
 
+/// Par de moldes espelhados em torno do eixo vertical x = axis_x.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SymmetryLink {
+    pub piece_a_id: PieceId,
+    pub piece_b_id: PieceId,
+    pub axis_x: f64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PatternProject {
     pub schema_version: u32,
@@ -280,6 +288,8 @@ pub struct PatternProject {
     pub seams: Vec<SeamDefinition>,
     #[serde(default)]
     pub grading_rules: Vec<GradingRule>,
+    #[serde(default)]
+    pub symmetry_links: Vec<SymmetryLink>,
 }
 
 impl PatternProject {
@@ -293,6 +303,7 @@ impl PatternProject {
             pieces: Vec::new(),
             seams: Vec::new(),
             grading_rules: Vec::new(),
+            symmetry_links: Vec::new(),
         }
     }
 
@@ -319,6 +330,27 @@ impl PatternProject {
                 !p.x.is_finite() || !p.y.is_finite()
             }) {
                 return Err(format!("O contorno da peça '{}' contém coordenadas não finitas.", piece.name));
+            }
+        }
+
+        let mut symmetry_pairs = HashSet::new();
+        for link in &self.symmetry_links {
+            if link.piece_a_id == link.piece_b_id {
+                return Err("Um molde não pode ser vinculado à própria cópia espelhada.".into());
+            }
+            if !link.axis_x.is_finite() {
+                return Err("O eixo de simetria contém coordenada inválida.".into());
+            }
+            if !piece_ids.contains(&link.piece_a_id) || !piece_ids.contains(&link.piece_b_id) {
+                return Err("Uma relação de simetria referencia um molde inexistente.".into());
+            }
+            let pair = if link.piece_a_id < link.piece_b_id {
+                (link.piece_a_id, link.piece_b_id)
+            } else {
+                (link.piece_b_id, link.piece_a_id)
+            };
+            if !symmetry_pairs.insert(pair) {
+                return Err("Há mais de uma relação de simetria entre o mesmo par de moldes.".into());
             }
         }
 
@@ -403,6 +435,35 @@ mod tests {
         assert!(project.pieces[0].fold_lines.is_empty());
         assert!(project.pieces[0].pleats.is_empty());
         assert_eq!(project.pieces[0].fabric, FabricProperties::default());
+    }
+
+    #[test]
+    fn old_project_json_defaults_symmetry_links_to_empty() {
+        let json = r#"{
+            "schema_version":1,"name":"Legado","units":"Centimeter",
+            "pieces":[],"seams":[]
+        }"#;
+        let project = PatternProject::from_json(json).unwrap();
+        assert!(project.symmetry_links.is_empty());
+    }
+
+    #[test]
+    fn symmetry_links_validate_piece_ids_and_axis() {
+        let mut project = PatternProject::new("Simetria");
+        project.pieces.push(PatternPiece::from_polygon(1, "A", &[
+            Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
+            Point2::new(1.0, 1.0), Point2::new(0.0, 1.0),
+        ]).unwrap());
+        project.pieces.push(PatternPiece::from_polygon(2, "B", &[
+            Point2::new(2.0, 0.0), Point2::new(3.0, 0.0),
+            Point2::new(3.0, 1.0), Point2::new(2.0, 1.0),
+        ]).unwrap());
+        project.symmetry_links.push(SymmetryLink {
+            piece_a_id: 1, piece_b_id: 2, axis_x: 1.5,
+        });
+        assert!(project.validate().is_ok());
+        project.symmetry_links[0].axis_x = f64::NAN;
+        assert!(project.validate().is_err());
     }
 
     #[test]
