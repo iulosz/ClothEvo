@@ -189,3 +189,17 @@ impl PanelMaterial {
     }
 }
 
+
+
+#[cfg(test)]
+mod panel_material_validation_tests {
+    use super::*;
+
+    #[test]
+    fn panel_material_allows_zero_friction_and_rejects_negative_friction() {
+        let no_friction = PanelMaterial { friction_coefficient: 0.0, ..PanelMaterial::default() };
+        assert!(no_friction.validate().is_ok());
+        let negative = PanelMaterial { friction_coefficient: -0.1, ..PanelMaterial::default() };
+        assert!(negative.validate().is_err());
+    }
+}
