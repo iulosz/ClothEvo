@@ -979,7 +979,7 @@ impl ClothEvoApp {
         }
 
         ui.separator();
-        let avatar_before = self.editor_snapshot();
+        let avatar_before = self.pattern_project.avatar.clone();
         let mut avatar_changed = false;
         ui.collapsing("Avatar 3D e colisão corporal", |ui| {
             ui.label("Manequim procedural usado na montagem 3D e na colisão tecido-corpo.");
@@ -994,7 +994,9 @@ impl ClothEvoApp {
             ui.weak("Usa 18 colisores SDF de elipsoides e cápsulas. Importação de malhas OBJ/FBX/glTF ainda não está implementada.");
         });
         if avatar_changed {
-            self.remember_pattern_change(avatar_before);
+            let mut before = self.editor_snapshot();
+            before.project.avatar = avatar_before;
+            self.remember_pattern_change(before);
         }
 
         ui.separator();
