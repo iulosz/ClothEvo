@@ -4817,6 +4817,14 @@ mod placement_ui_tests {
     }
 
     #[test]
+    fn t_pose_reference_png_is_loaded_as_the_original_raster_dimensions() {
+        let reference = image::load_from_memory(include_bytes!("../../../assets/t_pose_reference.png"))
+            .expect("T-pose reference PNG must be a decodable raster image");
+        assert_eq!(reference.width(), 585);
+        assert_eq!(reference.height(), 632);
+    }
+
+    #[test]
     fn triangle_hit_test_accepts_inside_and_rejects_outside_points() {
         let a = egui::pos2(0.0, 0.0);
         let b = egui::pos2(10.0, 0.0);
