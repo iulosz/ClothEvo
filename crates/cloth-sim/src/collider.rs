@@ -44,14 +44,35 @@ impl Collider {
         match *self {
             Collider::Plane { normal, .. } => normal,
             Collider::Sphere { center, .. } => (p - center).try_normalize().unwrap_or(Vec3::Y),
-            Collider::Cylinder { .. } => {
+            Collider::Cylinder { a, b, .. } => {
                 const E: f32 = 1e-3;
                 let g = Vec3::new(
                     self.sdf(p + Vec3::X * E) - self.sdf(p - Vec3::X * E),
                     self.sdf(p + Vec3::Y * E) - self.sdf(p - Vec3::Y * E),
                     self.sdf(p + Vec3::Z * E) - self.sdf(p - Vec3::Z * E),
                 );
-                g.try_normalize().unwrap_or(Vec3::Y)
+                if let Some(normal) = g.try_normalize() {
+                    return normal;
+                }
+
+                // No eixo do cilindro, a derivada radial numérica é zero por simetria.
+                // Usar +Y como fallback empurrava o tecido para cima, injetando energia.
+                let axis = b - a;
+                let length = axis.length();
+                if length < 1e-9 {
+                    return (p - a).try_normalize().unwrap_or(Vec3::X);
+                }
+                let axis_dir = axis / length;
+                let axial_position = (p - a).dot(axis_dir);
+                if axial_position < 0.0 {
+                    return -axis_dir;
+                }
+                if axial_position > length {
+                    return axis_dir;
+                }
+
+                let helper = if axis_dir.x.abs() < 0.9 { Vec3::X } else { Vec3::Z };
+                axis_dir.cross(helper).try_normalize().unwrap_or(Vec3::Z)
             }
         }
     }
@@ -67,6 +88,21 @@ mod tests {
         assert!((s.sdf(Vec3::new(2.0, 0.0, 0.0)) - 1.0).abs() < 1e-6);
         assert!(s.sdf(Vec3::new(0.5, 0.0, 0.0)) < 0.0);
         assert!((s.normal(Vec3::new(0.0, 3.0, 0.0)) - Vec3::Y).length() < 1e-6);
+    }
+
+    #[test]
+    fn cylinder_normal_on_axis_is_radial_not_axial() {
+        let cylinder = Collider::Cylinder {
+            a: Vec3::ZERO,
+            b: Vec3::new(0.0, 1.5, 0.0),
+            radius: 0.14,
+        };
+        // A derivada do SDF é zero no eixo, então o fallback deve apontar radialmente,
+        // nunca para cima: a normal +Y introduzia velocidade vertical enorme em uma colisão.
+        let normal = cylinder.normal(Vec3::new(0.0, 0.75, 0.0));
+        assert!(normal.is_finite());
+        assert!((normal.length() - 1.0).abs() < 1e-5);
+        assert!(normal.dot(Vec3::Y).abs() < 1e-5, "normal inesperadamente axial: {normal:?}");
     }
 
     #[test]

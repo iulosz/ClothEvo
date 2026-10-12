@@ -23,6 +23,15 @@ use pattern_mesh::triangulate_outline;
 const FIXED_DT: f32 = 1.0 / 60.0;
 const DEFAULT_RES: u32 = 40;
 const PATTERN_PIXELS_PER_METER: f32 = 360.0;
+const PATTERN_SIM_BODY_RADIUS: f32 = 0.14;
+const PATTERN_SIM_PERTURBATION: f32 = 0.001;
+const PATTERN_SIM_LAYER_SPACING: f32 = 0.003;
+
+/// Mantém os moldes do lado externo do colisor corporal, inclusive após o ruído inicial.
+fn pattern_sim_layer_z(piece_index: usize, thickness: f32) -> f32 {
+    PATTERN_SIM_BODY_RADIUS + thickness + PATTERN_SIM_PERTURBATION
+        + piece_index as f32 * PATTERN_SIM_LAYER_SPACING
+}
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -1364,9 +1373,9 @@ impl ClothEvoApp {
         let mut builder = ClothBuilder::new();
         builder.add_collider(Collider::ground());
         builder.add_collider(Collider::Cylinder {
-            a: Vec3::new(0.0, 0.0, 0.0),
+            a: Vec3::ZERO,
             b: Vec3::new(0.0, 1.5, 0.0),
-            radius: 0.14,
+            radius: PATTERN_SIM_BODY_RADIUS,
         });
 
         struct PieceBuildInfo {
@@ -1381,13 +1390,15 @@ impl ClothEvoApp {
         let origin_y = (0.9 - min_y) as f32;
 
         for (piece_index, (id, ranges, mesh)) in prepared.into_iter().enumerate() {
-            // Mantém as coordenadas relativas entre peças; só aplica uma translação global.
-            // Uma pequena separação em Z evita coincidência perfeita das superfícies no frame inicial.
+            // Mantém as coordenadas relativas do molde no plano XY. Os painéis ficam tangentes
+            // ao lado frontal do colisor corporal, com folga para espessura e ruído inicial.
+            // Camadas anteriores foram centradas em Z=0 e começavam atravessando o cilindro;
+            // a correção de colisão em posições se convertia em velocidades enormes no primeiro frame.
             let uv = mesh.vertices.iter()
                 .map(|p| Vec2::new(p.x as f32, p.y as f32))
                 .collect();
             let panel_mesh = PanelMesh { uv, triangles: mesh.triangles };
-            let z = (piece_index as f32 - (piece_count.saturating_sub(1)) as f32 * 0.5) * 0.04;
+            let z = pattern_sim_layer_z(piece_index, self.sim.params.thickness);
             let handle = builder.add_panel_with_grain(
                 &panel_mesh,
                 Placement::new(Vec3::new(origin_x, origin_y, z), Quat::IDENTITY),
@@ -1416,7 +1427,7 @@ impl ClothEvoApp {
             builder.sew(&globals_a, &globals_b);
         }
 
-        builder.perturb(0.001);
+        builder.perturb(PATTERN_SIM_PERTURBATION);
         self.sim = builder.build(self.sim.params.clone());
         self.seam_pairs = self.sim.seam_pairs();
         self.diverged = false;
@@ -1870,6 +1881,20 @@ mod pattern_editor_tests {
             ease_meters: 0.0,
         });
         project
+    }
+
+    #[test]
+    fn pattern_sim_layers_start_outside_the_body_collision_shell() {
+        let thickness = 0.005;
+        for index in 0..12 {
+            let layer_z = pattern_sim_layer_z(index, thickness);
+            // perturb() pode deslocar Z para ambos os lados em até sua amplitude.
+            let lowest_z = layer_z - PATTERN_SIM_PERTURBATION;
+            assert!(
+                lowest_z >= PATTERN_SIM_BODY_RADIUS + thickness - 1e-6,
+                "a camada {index} começa dentro do colisor: z mínimo {lowest_z}"
+            );
+        }
     }
 
     #[test]
