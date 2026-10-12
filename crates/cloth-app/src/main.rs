@@ -2949,6 +2949,37 @@ impl ClothEvoApp {
             }
         }
 
+        // Prévia sem efeitos colaterais da sugestão sob o cursor na lista de Auto Sewing.
+        if let Some(index) = self.hovered_auto_suggestion {
+            if let Some(suggestion) = self.auto_seam_suggestions.get(index) {
+                let color = egui::Color32::from_rgb(210, 115, 255);
+                let path_a = edge_path_points(&self.pattern_project, &suggestion.a, 32);
+                let path_b = edge_path_points(&self.pattern_project, &suggestion.b, 32);
+                for path in [&path_a, &path_b] {
+                    for pair in path.windows(2) {
+                        painter.line_segment(
+                            [to_screen(pair[0]), to_screen(pair[1])],
+                            egui::Stroke::new(4.0, color),
+                        );
+                    }
+                }
+                if let (Some(a), Some(b)) = (
+                    path_a.get(path_a.len() / 2),
+                    path_b.get(path_b.len() / 2),
+                ) {
+                    painter.line_segment(
+                        [to_screen(*a), to_screen(*b)],
+                        egui::Stroke::new(1.8, color),
+                    );
+                    painter.text(
+                        to_screen(*a), egui::Align2::CENTER_BOTTOM,
+                        format!("Sugestão {:.0}%", suggestion.score * 100.0),
+                        egui::FontId::proportional(11.0), color,
+                    );
+                }
+            }
+        }
+
         // Preview do lado atual: os extremos do caminho ativo podem ser arrastados livremente.
         if self.seam_free_mode {
             if let Ok((draft_a, draft_b)) = self.seam_edges_from_controls() {
