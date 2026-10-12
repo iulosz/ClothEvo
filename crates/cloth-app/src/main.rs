@@ -9,8 +9,8 @@ use cloth_render::{
     ViewStyle, ViewportCallback,
 };
 use cloth_sim::{
-    build_scene, ClothBuilder, Collider, FabricPreset, PanelMaterial, PanelMesh, Placement,
-    SceneKind, Simulation, SimParams,
+    build_avatar_colliders, build_scene, AvatarConfig, ClothBuilder, Collider, FabricPreset,
+    PanelMaterial, PanelMesh, Placement, SceneKind, Simulation, SimParams,
 };
 use eframe::{egui, egui_wgpu};
 use glam::{EulerRot, Quat, Vec2, Vec3};
@@ -164,6 +164,14 @@ fn statics_from(colliders: &[Collider]) -> Vec<StaticMeshData> {
             }
             Collider::Sphere { center, radius } => {
                 out.push(primitives::uv_sphere(center, radius, 48, 24, [0.78, 0.78, 0.80]));
+            }
+            Collider::Ellipsoid { center, radii } => {
+                out.push(primitives::ellipsoid(center, radii, 40, 20, [0.69, 0.73, 0.77]));
+            }
+            Collider::Capsule { a, b, radius } => {
+                out.push(primitives::cylinder(a, b, radius, 32, [0.69, 0.73, 0.77]));
+                out.push(primitives::uv_sphere(a, radius, 24, 12, [0.69, 0.73, 0.77]));
+                out.push(primitives::uv_sphere(b, radius, 24, 12, [0.69, 0.73, 0.77]));
             }
             Collider::Cylinder { a, b, radius } => {
                 out.push(primitives::cylinder(a, b, radius, 48, [0.70, 0.76, 0.70]));
@@ -968,6 +976,25 @@ impl ClothEvoApp {
             ui.label(format!("Costuras no projeto: {}", self.pattern_project.seams.len()));
         } else {
             ui.weak("Crie ao menos duas peças para configurar uma costura.");
+        }
+
+        ui.separator();
+        let avatar_before = self.editor_snapshot();
+        let mut avatar_changed = false;
+        ui.collapsing("Avatar 3D e colisão corporal", |ui| {
+            ui.label("Manequim procedural usado na montagem 3D e na colisão tecido-corpo.");
+            avatar_changed |= ui.add(egui::Slider::new(&mut self.pattern_project.avatar.height_meters, 1.20..=2.20)
+                .text("Altura (m)")).changed();
+            avatar_changed |= ui.add(egui::Slider::new(&mut self.pattern_project.avatar.shoulder_width_meters, 0.25..=0.70)
+                .text("Largura dos ombros (m)")).changed();
+            avatar_changed |= ui.add(egui::Slider::new(&mut self.pattern_project.avatar.waist_width_meters, 0.18..=0.60)
+                .text("Largura da cintura (m)")).changed();
+            avatar_changed |= ui.add(egui::Slider::new(&mut self.pattern_project.avatar.hip_width_meters, 0.22..=0.70)
+                .text("Largura do quadril (m)")).changed();
+            ui.weak("Usa 18 colisores SDF de elipsoides e cápsulas. Importação de malhas OBJ/FBX/glTF ainda não está implementada.");
+        });
+        if avatar_changed {
+            self.remember_pattern_change(avatar_before);
         }
 
         ui.separator();
@@ -2168,13 +2195,18 @@ impl ClothEvoApp {
             .flat_map(|(_, _, mesh, _, _, _, _)| mesh.vertices.iter().map(|p| p.y))
             .fold(f64::INFINITY, f64::min);
 
+        let avatar = AvatarConfig {
+            height_m: self.pattern_project.avatar.height_meters as f32,
+            shoulder_width_m: self.pattern_project.avatar.shoulder_width_meters as f32,
+            waist_width_m: self.pattern_project.avatar.waist_width_meters as f32,
+            hip_width_m: self.pattern_project.avatar.hip_width_meters as f32,
+        };
+        let body_colliders = build_avatar_colliders(&avatar)?;
         let mut builder = ClothBuilder::new();
         builder.add_collider(Collider::ground());
-        builder.add_collider(Collider::Cylinder {
-            a: Vec3::ZERO,
-            b: Vec3::new(0.0, 1.5, 0.0),
-            radius: PATTERN_SIM_BODY_RADIUS,
-        });
+        for collider in body_colliders {
+            builder.add_collider(collider);
+        }
 
         struct PieceBuildInfo {
             id: u64,
@@ -2296,9 +2328,14 @@ impl ClothEvoApp {
         let pinned = self.pattern_project.pieces.iter()
             .map(|piece| piece.assembly.pinned_anchors.len())
             .sum::<usize>();
+        let body_collider_count = self.sim.colliders.len().saturating_sub(1);
         self.pattern_message = format!(
-            "Montagem 3D pronta: {} moldes distribuídos ao redor do colisor corporal, {} costuras e {} âncoras fixadas. Materiais e resolução aplicados por molde.",
-            piece_count, self.pattern_project.seams.len(), pinned
+            "Montagem 3D pronta: {} moldes, {} costuras, {} âncoras fixadas e manequim com {} volumes de colisão. Avatar: {:.2} m; ombros {:.2} m, cintura {:.2} m e quadril {:.2} m.",
+            piece_count, self.pattern_project.seams.len(), pinned, body_collider_count,
+            self.pattern_project.avatar.height_meters,
+            self.pattern_project.avatar.shoulder_width_meters,
+            self.pattern_project.avatar.waist_width_meters,
+            self.pattern_project.avatar.hip_width_meters,
         );
         Ok(())
     }

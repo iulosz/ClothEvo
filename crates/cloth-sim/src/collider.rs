@@ -7,6 +7,10 @@ pub enum Collider {
     /// Semiespaço: `dot(normal, p) - offset`. A `normal` deve estar normalizada.
     Plane { normal: Vec3, offset: f32 },
     Sphere { center: Vec3, radius: f32 },
+    /// Elipsoide alinhado aos eixos; `radii` contém os semieixos X/Y/Z.
+    Ellipsoid { center: Vec3, radii: Vec3 },
+    /// Cápsula com extremidades arredondadas, ao longo do segmento a–b.
+    Capsule { a: Vec3, b: Vec3, radius: f32 },
     /// Cilindro com tampas planas, do ponto `a` ao ponto `b`.
     Cylinder { a: Vec3, b: Vec3, radius: f32 },
 }
@@ -21,6 +25,25 @@ impl Collider {
         match *self {
             Collider::Plane { normal, offset } => normal.dot(p) - offset,
             Collider::Sphere { center, radius } => (p - center).length() - radius,
+            Collider::Ellipsoid { center, radii } => {
+                // Aproximação de distância assinada de um elipsoide (positiva fora).
+                let q = p - center;
+                let scaled = Vec3::new(q.x / radii.x, q.y / radii.y, q.z / radii.z);
+                let k0 = scaled.length();
+                let k1 = Vec3::new(
+                    q.x / (radii.x * radii.x),
+                    q.y / (radii.y * radii.y),
+                    q.z / (radii.z * radii.z),
+                ).length();
+                if k1 < 1e-9 { -radii.min_element() } else { k0 * (k0 - 1.0) / k1 }
+            }
+            Collider::Capsule { a, b, radius } => {
+                let ab = b - a;
+                let t = if ab.length_squared() > 1e-12 {
+                    ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0)
+                } else { 0.0 };
+                (p - (a + ab * t)).length() - radius
+            }
             Collider::Cylinder { a, b, radius } => {
                 let axis = b - a;
                 let h = axis.length();
@@ -44,6 +67,18 @@ impl Collider {
         match *self {
             Collider::Plane { normal, .. } => normal,
             Collider::Sphere { center, .. } => (p - center).try_normalize().unwrap_or(Vec3::Y),
+            Collider::Ellipsoid { center, radii } => {
+                let q = p - center;
+                Vec3::new(q.x / (radii.x * radii.x), q.y / (radii.y * radii.y), q.z / (radii.z * radii.z))
+                    .try_normalize().unwrap_or(Vec3::Y)
+            }
+            Collider::Capsule { a, b, .. } => {
+                let ab = b - a;
+                let t = if ab.length_squared() > 1e-12 {
+                    ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0)
+                } else { 0.0 };
+                (p - (a + ab * t)).try_normalize().unwrap_or(Vec3::X)
+            }
             Collider::Cylinder { a, b, .. } => {
                 const E: f32 = 1e-3;
                 let g = Vec3::new(
@@ -103,6 +138,19 @@ mod tests {
         assert!(normal.is_finite());
         assert!((normal.length() - 1.0).abs() < 1e-5);
         assert!(normal.dot(Vec3::Y).abs() < 1e-5, "normal inesperadamente axial: {normal:?}");
+    }
+
+    #[test]
+    fn ellipsoid_and_capsule_sdf_and_normals() {
+        let e = Collider::Ellipsoid { center: Vec3::ZERO, radii: Vec3::new(0.2, 0.4, 0.1) };
+        assert!(e.sdf(Vec3::ZERO) < 0.0);
+        assert!(e.sdf(Vec3::new(0.4, 0.0, 0.0)) > 0.0);
+        assert!(e.sdf(Vec3::new(0.2, 0.0, 0.0)).abs() < 1e-5);
+        assert!(e.normal(Vec3::new(0.3, 0.0, 0.0)).dot(Vec3::X) > 0.99);
+        let c = Collider::Capsule { a: Vec3::ZERO, b: Vec3::new(0.0, 1.0, 0.0), radius: 0.1 };
+        assert!((c.sdf(Vec3::new(0.0, 0.5, 0.0)) + 0.1).abs() < 1e-6);
+        assert!((c.sdf(Vec3::new(0.0, 1.2, 0.0)) - 0.1).abs() < 1e-6);
+        assert!(c.normal(Vec3::new(0.1, 0.5, 0.0)).dot(Vec3::X) > 0.99);
     }
 
     #[test]

@@ -303,6 +303,30 @@ pub struct SymmetryLink {
     pub axis_x: f64,
 }
 
+/// Medidas do manequim procedural associado ao projeto 2D→3D.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AvatarDimensions {
+    #[serde(default = "default_avatar_height")]
+    pub height_meters: f64,
+    #[serde(default = "default_avatar_shoulders")]
+    pub shoulder_width_meters: f64,
+    #[serde(default = "default_avatar_waist")]
+    pub waist_width_meters: f64,
+    #[serde(default = "default_avatar_hips")]
+    pub hip_width_meters: f64,
+}
+fn default_avatar_height() -> f64 { 1.72 }
+fn default_avatar_shoulders() -> f64 { 0.42 }
+fn default_avatar_waist() -> f64 { 0.29 }
+fn default_avatar_hips() -> f64 { 0.36 }
+
+impl Default for AvatarDimensions {
+    fn default() -> Self {
+        Self { height_meters: default_avatar_height(), shoulder_width_meters: default_avatar_shoulders(),
+            waist_width_meters: default_avatar_waist(), hip_width_meters: default_avatar_hips() }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PatternProject {
     pub schema_version: u32,
@@ -310,6 +334,8 @@ pub struct PatternProject {
     pub units: LengthUnit,
     pub pieces: Vec<PatternPiece>,
     pub seams: Vec<SeamDefinition>,
+    #[serde(default)]
+    pub avatar: AvatarDimensions,
     #[serde(default)]
     pub grading_rules: Vec<GradingRule>,
     #[serde(default)]
@@ -326,6 +352,7 @@ impl PatternProject {
             units: LengthUnit::Centimeter,
             pieces: Vec::new(),
             seams: Vec::new(),
+            avatar: AvatarDimensions::default(),
             grading_rules: Vec::new(),
             symmetry_links: Vec::new(),
         }
@@ -338,6 +365,19 @@ impl PatternProject {
                 self.schema_version, Self::CURRENT_SCHEMA_VERSION
             ));
         }
+        let avatar_values = [self.avatar.height_meters, self.avatar.shoulder_width_meters,
+            self.avatar.waist_width_meters, self.avatar.hip_width_meters];
+        if avatar_values.iter().any(|v| !v.is_finite()) {
+            return Err("As medidas do avatar precisam ser finitas.".into());
+        }
+        if !(1.0..=2.5).contains(&self.avatar.height_meters)
+            || !(0.20..=0.90).contains(&self.avatar.shoulder_width_meters)
+            || !(0.15..=0.70).contains(&self.avatar.waist_width_meters)
+            || !(0.18..=0.80).contains(&self.avatar.hip_width_meters)
+        {
+            return Err("As medidas do avatar estão fora dos limites físicos aceitos.".into());
+        }
+
         let mut piece_ids = HashSet::new();
         for piece in &self.pieces {
             if !piece_ids.insert(piece.id) {
@@ -522,6 +562,7 @@ mod tests {
         }"#;
         let project = PatternProject::from_json(json).unwrap();
         assert!(project.symmetry_links.is_empty());
+        assert_eq!(project.avatar, AvatarDimensions::default());
     }
 
     #[test]
