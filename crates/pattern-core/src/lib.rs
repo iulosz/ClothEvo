@@ -350,10 +350,40 @@ impl PatternProject {
                 return Err(format!("O contorno da peça '{}' precisa ser fechado e ter ao menos 3 segmentos.", piece.name));
             }
             if piece.outline.segments.iter().any(|s| {
-                let p = s.endpoint();
-                !p.x.is_finite() || !p.y.is_finite()
-            }) {
+                let points = match s {
+                    CurveSegment::Line { to } => vec![*to],
+                    CurveSegment::CubicBezier { control1, control2, to } => vec![*control1, *control2, *to],
+                };
+                points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite())
+            }) || !piece.outline.start.x.is_finite() || !piece.outline.start.y.is_finite() {
                 return Err(format!("O contorno da peça '{}' contém coordenadas não finitas.", piece.name));
+            }
+            let fabric_values = [
+                piece.fabric.density_kg_m2,
+                piece.fabric.stretch_warp_n_m,
+                piece.fabric.stretch_weft_n_m,
+                piece.fabric.shear_n_m,
+                piece.fabric.bend_nm,
+                piece.fabric.thickness_meters,
+                piece.fabric.particle_distance_meters,
+            ];
+            if fabric_values.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+                return Err(format!("As propriedades físicas do molde '{}' precisam ser finitas e positivas.", piece.name));
+            }
+            if piece.assembly.translation_meters.iter().chain(piece.assembly.rotation_degrees.iter())
+                .any(|value| !value.is_finite())
+            {
+                return Err(format!("A transformação 3D do molde '{}' contém valores não finitos.", piece.name));
+            }
+            let anchor_count = piece.outline.segments.len().saturating_sub(1);
+            let mut pinned = HashSet::new();
+            for anchor in &piece.assembly.pinned_anchors {
+                if *anchor as usize >= anchor_count {
+                    return Err(format!("O molde '{}' referencia o vértice fixado {} que não existe.", piece.name, anchor + 1));
+                }
+                if !pinned.insert(*anchor) {
+                    return Err(format!("O vértice {} do molde '{}' está fixado mais de uma vez.", anchor + 1, piece.name));
+                }
             }
         }
 
