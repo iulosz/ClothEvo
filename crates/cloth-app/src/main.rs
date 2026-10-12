@@ -318,10 +318,13 @@ impl ClothEvoApp {
         while self.accumulator >= FIXED_DT {
             self.sim.step(FIXED_DT);
             self.accumulator -= FIXED_DT;
-        }
-        if !self.sim.is_finite() {
-            self.playing = false;
-            self.diverged = true;
+            if !self.sim.is_finite() {
+                self.playing = false;
+                self.diverged = true;
+                self.accumulator = 0.0;
+                self.sim.reset();
+                return;
+            }
         }
     }
 
@@ -383,20 +386,36 @@ impl ClothEvoApp {
         ui.horizontal(|ui| {
             let label = if self.playing { "⏸ Pausar" } else { "▶ Continuar" };
             if ui.button(label).clicked() {
-                self.playing = !self.playing;
-                self.diverged = false;
+                if self.diverged {
+                    self.sim.reset();
+                    self.accumulator = 0.0;
+                    self.diverged = false;
+                    self.playing = true;
+                } else {
+                    self.playing = !self.playing;
+                }
             }
-            if ui.button("⏭ Passo").clicked() {
+            if ui.button("⏭ Passo único").clicked() {
+                self.playing = false;
+                self.accumulator = 0.0;
                 self.sim.step(FIXED_DT);
+                if !self.sim.is_finite() {
+                    self.sim.reset();
+                    self.diverged = true;
+                }
             }
             if ui.button("↺ Reiniciar").clicked() {
                 self.sim.reset();
+                self.playing = false;
                 self.diverged = false;
                 self.accumulator = 0.0;
             }
         });
         if self.diverged {
-            ui.colored_label(egui::Color32::LIGHT_RED, "A simulação divergiu (NaN). Reinicie e aumente os substeps.");
+            ui.colored_label(
+                egui::Color32::LIGHT_RED,
+                "Instabilidade numérica detectada: simulação pausada e restaurada ao estado inicial. Aumente substeps/iterações ou reduza rigidez.",
+            );
         }
 
         // ----- Tecido
@@ -426,9 +445,13 @@ impl ClothEvoApp {
 
         // ----- Solver
         ui.separator();
-        ui.strong("Solver");
-        ui.add(egui::Slider::new(&mut p.substeps, 1..=60).text("substeps"));
-        ui.add(egui::Slider::new(&mut p.iterations, 1..=8).text("iterações"));
+        ui.strong("Solver e estabilidade");
+        ui.add(egui::Slider::new(&mut p.substeps, 1..=80).text("substeps por quadro"));
+        ui.add(egui::Slider::new(&mut p.iterations, 1..=12).text("iterações por substep"));
+        ui.add(egui::Slider::new(&mut p.max_particle_speed, 2.0..=60.0)
+            .text("limite de velocidade (m/s)"));
+        ui.checkbox(&mut p.self_collision, "Auto-colisão (mais custo)");
+        ui.weak("A auto-colisão usa hash espacial vértice-vértice; vértices vizinhos e costuras são excluídos.");
         ui.checkbox(&mut p.parallel, "paralelo (rayon)");
 
         // ----- Visualização
@@ -453,6 +476,17 @@ impl ClothEvoApp {
         ui.colored_label(color, format!("passo: {ms:.2} ms (orçamento {budget:.1} ms a 60 Hz)"));
         ui.label(format!("deformação máx.: {:.1} %", sim.max_strain() * 100.0));
         ui.label(format!("energia cinética: {:.4} J", sim.kinetic_energy()));
+        ui.label(format!("velocidade máx.: {:.2} m/s · deslocamento do substep: {:.1} mm",
+            sim.max_particle_speed(), sim.max_particle_displacement() * 1000.0));
+        let unstable = sim.unstable_particle_count(10.0);
+        if unstable > 0 {
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 92, 92),
+                format!("Partículas instáveis: {} acima de 10 m/s ou com dados inválidos", unstable),
+            );
+        } else {
+            ui.colored_label(egui::Color32::LIGHT_GREEN, "Partículas: estáveis (limiar de 10 m/s)");
+        }
         if !self.seam_pairs.is_empty() {
             ui.label(format!("abertura máx. das costuras: {:.1} mm", self.seam_gap_max() * 1000.0));
         }
@@ -866,6 +900,9 @@ impl ClothEvoApp {
                     changed |= ui.add(egui::Slider::new(
                         &mut piece.fabric.thickness_meters, 0.0001..=0.01,
                     ).text("Espessura (m)")).changed();
+                    changed |= ui.add(egui::Slider::new(
+                        &mut piece.fabric.friction_coefficient, 0.0..=1.5,
+                    ).text("Atrito deste tecido")).changed();
                     changed |= ui.add(egui::Slider::new(
                         &mut piece.fabric.particle_distance_meters, 0.01..=0.20,
                     ).text("Distância entre partículas (m)")).changed();
@@ -2653,6 +2690,7 @@ impl ClothEvoApp {
                 shear_n_m: fabric.shear_n_m as f32,
                 bend_nm: fabric.bend_nm as f32,
                 thickness_meters: fabric.thickness_meters as f32,
+                friction_coefficient: fabric.friction_coefficient as f32,
             };
             let handle = builder.add_panel_with_grain_and_material(
                 &panel_mesh,
