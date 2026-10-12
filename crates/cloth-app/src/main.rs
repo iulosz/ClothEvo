@@ -1378,14 +1378,9 @@ impl ClothEvoApp {
             self.pattern_message = "Crie um molde antes de executar Cut & Sew.".into();
             return;
         }
+
         let source_index = self.selected_piece.min(self.pattern_project.pieces.len() - 1);
         let source = self.pattern_project.pieces[source_index].clone();
-        if self.pattern_project.symmetry_links.iter().any(|link| {
-            link.piece_a_id == source.id || link.piece_b_id == source.id
-        }) {
-            self.pattern_message = "Desvincule o par de simetria antes de executar Cut & Sew. O corte simultâneo dos dois moldes será habilitado após o remapeamento topológico pareado.".into();
-            return;
-        }
         let cut_path = match Curve2D::polyline(&self.draft_points, false) {
             Ok(curve) => curve,
             Err(error) => { self.pattern_message = error; return; }
@@ -1404,9 +1399,41 @@ impl ClothEvoApp {
             }
         };
 
+        let symmetry_link = self.pattern_project.symmetry_links.iter()
+            .find(|link| link.piece_a_id == source.id || link.piece_b_id == source.id)
+            .cloned();
+        let max_piece_id = self.pattern_project.pieces.iter()
+            .map(|piece| piece.id).max().unwrap_or(0);
+        let second_id = max_piece_id + 1;
+
+        // If the source has a linked mirror, cut the mate with the reflected path in the same
+        // transaction. This keeps both sides topologically paired instead of silently diverging.
+        let paired_cut: Option<(usize, PatternPiece, CutAndSewResult, u64, f64)> =
+            if let Some(link) = &symmetry_link {
+                let mate_id = if link.piece_a_id == source.id { link.piece_b_id } else { link.piece_a_id };
+                let Some(mate_index) = self.pattern_project.pieces.iter()
+                    .position(|piece| piece.id == mate_id) else {
+                    self.pattern_message = "O par espelhado referencia um molde inexistente.".into();
+                    return;
+                };
+                let mate_source = self.pattern_project.pieces[mate_index].clone();
+                let mirrored_path = match mirror_curve_x(&cut_path, link.axis_x) {
+                    Ok(path) => path,
+                    Err(error) => { self.pattern_message = error.to_string(); return; }
+                };
+                let mate_result = match cut_closed_outline(&mate_source.outline, &mirrored_path, 0.035) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        self.pattern_message = format!(
+                            "O corte do par espelhado não pôde ser validado ({error}); nenhum dos moldes foi alterado."
+                        );
+                        return;
+                    }
+                };
+                Some((mate_index, mate_source, mate_result, max_piece_id + 2, link.axis_x))
+            } else { None };
+
         let first_id = source.id;
-        let second_id = self.pattern_project.pieces.iter()
-            .map(|piece| piece.id).max().unwrap_or(0) + 1;
         let mut first = source.clone();
         let mut second = source.clone();
         first.name = format!("{} (A)", source.name);
@@ -1427,16 +1454,56 @@ impl ClothEvoApp {
             }
         };
 
-        // Remap existing seam references before replacing the source piece. If a referenced
-        // interval spans both sides of the cut, refuse rather than silently corrupting it.
+        let mut mate_pieces: Option<(PatternPiece, PatternPiece, usize, u64, Option<usize>)> = None;
+        if let Some((mate_index, mate_source, mate_result, mate_second_id, _)) = &paired_cut {
+            let mut mate_first = mate_source.clone();
+            let mut mate_second = mate_source.clone();
+            mate_first.name = format!("{} (A)", mate_source.name);
+            mate_second.id = *mate_second_id;
+            mate_second.name = format!("{} (B)", mate_source.name);
+            mate_first.outline = mate_result.first.clone();
+            mate_second.outline = mate_result.second.clone();
+            let mate_polygon_a = sample_curve(&mate_first.outline, 24);
+            let mate_polygon_b = sample_curve(&mate_second.outline, 24);
+            let mate_sewing_side = match split_piece_metadata(
+                mate_source, &mut mate_first, &mut mate_second, mate_result,
+                &mate_polygon_a, &mate_polygon_b,
+            ) {
+                Ok(side) => side,
+                Err(error) => {
+                    self.pattern_message = format!(
+                        "Cut & Sew cancelado: não foi possível particionar os metadados do molde espelhado: {error}"
+                    );
+                    return;
+                }
+            };
+            mate_pieces = Some((
+                mate_first,
+                mate_second,
+                *mate_index,
+                mate_source.id,
+                mate_sewing_side,
+            ));
+        }
+
         let mut project = self.pattern_project.clone();
+        // Remap existing references on both source pieces before replacing them. If a previous
+        // seam crosses a segment split by the new cut, reject atomically rather than corrupt it.
         for seam in &mut project.seams {
             for edge in [&mut seam.a, &mut seam.b] {
-                if edge.piece_id != first_id { continue; }
+                let target = if edge.piece_id == first_id {
+                    Some((&cut_result, first_id, second_id, sewing_side))
+                } else if let Some((_, mate_source, mate_result, mate_second_id, _)) = &paired_cut {
+                    if edge.piece_id == mate_source.id {
+                        Some((mate_result, mate_source.id, *mate_second_id,
+                            mate_pieces.as_ref().and_then(|entry| entry.4)))
+                    } else { None }
+                } else { None };
+                let Some((result, base_id, new_id, source_sewing_side)) = target else { continue; };
                 match edge.curve {
                     BoundaryCurve::Outline => {
                         if let Err(error) = remap_edge_after_cut(
-                            edge, &cut_result.source_segment_fragments, first_id, second_id,
+                            edge, &result.source_segment_fragments, base_id, new_id,
                         ) {
                             self.pattern_message = format!(
                                 "Cut & Sew cancelado: {error} A costura original foi preservada."
@@ -1445,11 +1512,11 @@ impl ClothEvoApp {
                         }
                     }
                     BoundaryCurve::SewingLine => {
-                        let Some(side) = sewing_side else {
-                            self.pattern_message = "Cut & Sew cancelado: uma costura existente referencia a linha de costura, mas ela não pôde ser atribuída a uma das peças.".into();
+                        let Some(side) = source_sewing_side else {
+                            self.pattern_message = "Cut & Sew cancelado: uma costura existente usa uma linha de costura que não pôde ser atribuída a um dos lados.".into();
                             return;
                         };
-                        edge.piece_id = if side == 0 { first_id } else { second_id };
+                        edge.piece_id = if side == 0 { base_id } else { new_id };
                     }
                 }
             }
@@ -1457,8 +1524,21 @@ impl ClothEvoApp {
 
         project.pieces[source_index] = first;
         project.pieces.push(second);
+        if let Some((mate_first, mate_second, mate_index, mate_source_id, _)) = mate_pieces {
+            project.pieces[mate_index] = mate_first;
+            project.pieces.push(mate_second);
 
-        let next_seam_id = project.seams.iter()
+            if let Some((_, _, _, mate_second_id, axis_x)) = &paired_cut {
+                project.symmetry_links.push(SymmetryLink {
+                    piece_a_id: second_id,
+                    piece_b_id: *mate_second_id,
+                    axis_x: *axis_x,
+                });
+            }
+            let _ = mate_source_id;
+        }
+
+        let mut next_seam_id = project.seams.iter()
             .map(|seam| seam.id).max().unwrap_or(0) + 1;
         let (a_start, a_end) = cut_result.first_cut_segment_range;
         let (b_start, b_end) = cut_result.second_cut_segment_range;
@@ -1466,22 +1546,34 @@ impl ClothEvoApp {
             id: next_seam_id,
             name: format!("Cut & Sew {next_seam_id}"),
             a: EdgeRef {
-                piece_id: first_id,
-                curve: BoundaryCurve::Outline,
-                segment_start: a_start as u32,
-                segment_end: a_end as u32,
-                reversed: false,
+                piece_id: first_id, curve: BoundaryCurve::Outline,
+                segment_start: a_start as u32, segment_end: a_end as u32, reversed: false,
             },
             b: EdgeRef {
-                piece_id: second_id,
-                curve: BoundaryCurve::Outline,
-                segment_start: b_start as u32,
-                segment_end: b_end as u32,
-                // Corresponding endpoints run in opposite directions around each outline.
-                reversed: true,
+                piece_id: second_id, curve: BoundaryCurve::Outline,
+                segment_start: b_start as u32, segment_end: b_end as u32, reversed: true,
             },
             ease_meters: 0.0,
         });
+        next_seam_id += 1;
+
+        if let Some((_, mate_source, mate_result, mate_second_id, _)) = &paired_cut {
+            let (mate_a_start, mate_a_end) = mate_result.first_cut_segment_range;
+            let (mate_b_start, mate_b_end) = mate_result.second_cut_segment_range;
+            project.seams.push(SeamDefinition {
+                id: next_seam_id,
+                name: format!("Cut & Sew {next_seam_id}"),
+                a: EdgeRef {
+                    piece_id: mate_source.id, curve: BoundaryCurve::Outline,
+                    segment_start: mate_a_start as u32, segment_end: mate_a_end as u32, reversed: false,
+                },
+                b: EdgeRef {
+                    piece_id: *mate_second_id, curve: BoundaryCurve::Outline,
+                    segment_start: mate_b_start as u32, segment_end: mate_b_end as u32, reversed: true,
+                },
+                ease_meters: 0.0,
+            });
+        }
 
         if let Err(error) = project.validate() {
             self.pattern_message = format!("Cut & Sew cancelado pela validação do projeto: {error}");
@@ -1495,14 +1587,21 @@ impl ClothEvoApp {
         self.draft_points.clear();
         self.pattern_tool = PatternTool::Select;
         self.pattern_fit_pending = true;
-        self.pattern_message = format!(
-            "Cut & Sew concluído: '{}' foi dividido em duas peças, com a nova costura {}.",
-            source.name, next_seam_id
-        );
+        self.pattern_message = if paired_cut.is_some() {
+            format!(
+                "Cut & Sew concluído nos dois moldes espelhados: '{}' foi dividido em quatro peças, com duas novas costuras e o vínculo de simetria preservado.",
+                source.name
+            )
+        } else {
+            format!(
+                "Cut & Sew concluído: '{}' foi dividido em duas peças, com a nova costura {}.",
+                source.name, next_seam_id - 1
+            )
+        };
         self.remember_pattern_change(before);
     }
 
-    fn create_piece_from_draft(&mut self) {
+        fn create_piece_from_draft(&mut self) {
         if self.draft_points.len() < 3 {
             self.pattern_message = "Uma peça precisa de pelo menos 3 pontos.".into();
             return;
