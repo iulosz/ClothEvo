@@ -2985,9 +2985,23 @@ impl ClothEvoApp {
             }
             if response.clicked() && self.dragging_target.is_none() && self.dragging_seam_handle.is_none() {
                 if let Some(pointer) = response.interact_pointer_pos() {
-                    self.selected_target = self.hit_test_pattern(pointer, center);
-                    if let Some(target) = self.selected_target {
-                        self.selected_piece = target.piece().min(self.pattern_project.pieces.len().saturating_sub(1));
+                    let target = self.hit_test_pattern(pointer, center);
+                    let shift = ui.input(|input| input.modifiers.shift);
+                    if shift {
+                        if let Some(PatternEditTarget::Edge { piece, segment, .. }) = target {
+                            if let Some(data) = self.pattern_project.pieces.get(piece) {
+                                let edge = EdgePath::from_segments(
+                                    data.id, BoundaryCurve::Outline,
+                                    segment as u32, segment as u32 + 1, false,
+                                );
+                                self.add_draft_edge_to_side(self.seam_active_side_a, edge);
+                            }
+                        }
+                    } else {
+                        self.selected_target = target;
+                        if let Some(target) = self.selected_target {
+                            self.selected_piece = target.piece().min(self.pattern_project.pieces.len().saturating_sub(1));
+                        }
                     }
                 }
             }
@@ -4177,7 +4191,7 @@ fn delete_project_anchor(
     };
 
     for seam in &mut staged.seams {
-        for edge in [&mut seam.a, &mut seam.b] {
+        for edge in seam.sides_a.iter_mut().chain(seam.sides_b.iter_mut()) {
             if edge.piece_id != piece_id || edge.curve != BoundaryCurve::Outline { continue; }
             let start_segment = edge.start.segment as usize;
             let end_segment = edge.end.segment as usize;
