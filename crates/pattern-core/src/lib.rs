@@ -896,12 +896,31 @@ mod tests {
     }
 
     #[test]
+    fn legacy_edge_refs_migrate_to_single_edge_paths() {
+        let json = r#"{
+            "schema_version":1,"name":"Legacy seams","units":"Centimeter",
+            "pieces":[],"seams":[{
+                "id":1,"name":"Old seam",
+                "a":{"piece_id":10,"curve":"Outline","segment_start":2,"segment_end":5,"reversed":true},
+                "b":{"piece_id":11,"curve":"Outline","segment_start":0,"segment_end":1,"reversed":false},
+                "ease_meters":0.02
+            }]
+        }"#;
+        let project: PatternProject = serde_json::from_str(json).unwrap();
+        let seam = &project.seams[0];
+        assert_eq!(seam.sides_a.len(), 1);
+        assert_eq!(seam.sides_b.len(), 1);
+        assert_eq!(seam.sides_a[0].start, CurveParam { segment: 2, t: 0.0 });
+        assert_eq!(seam.sides_a[0].end, CurveParam { segment: 4, t: 1.0 });
+        assert!(seam.sides_a[0].reversed);
+    }
+
+    #[test]
     fn validation_rejects_seam_with_missing_piece() {
         let mut project = PatternProject::new("Teste");
         project.seams.push(SeamDefinition {
             id: 1, name: "Costura inválida".into(),
-            a: EdgeRef::single_segment(7, 0).into(),
-            b: EdgeRef::single_segment(8, 0).into(), ease_meters: 0.0,
+            sides_a: vec![EdgeRef::single_segment(7, 0).into()], sides_b: vec![EdgeRef::single_segment(8, 0).into()], ease_meters: 0.0,
         });
         assert!(project.validate().is_err());
     }
@@ -922,7 +941,7 @@ mod tests {
         ]).unwrap());
         self_seam.seams.push(SeamDefinition {
             id: 1, name: "A para A".into(),
-            a: EdgeRef::single_segment(1, 0).into(), b: EdgeRef::single_segment(1, 0).into(),
+            sides_a: vec![EdgeRef::single_segment(1, 0).into()], sides_b: vec![EdgeRef::single_segment(1, 0).into()],
             ease_meters: 0.0,
         });
         assert!(self_seam.validate().unwrap_err().contains("mesma peça"));
@@ -936,12 +955,12 @@ mod tests {
         }
         overlap.seams.push(SeamDefinition {
             id: 1, name: "Primeira".into(),
-            a: EdgeRef::single_segment(1, 0).into(), b: EdgeRef::single_segment(2, 0).into(),
+            sides_a: vec![EdgeRef::single_segment(1, 0).into()], sides_b: vec![EdgeRef::single_segment(2, 0).into()],
             ease_meters: 0.0,
         });
         overlap.seams.push(SeamDefinition {
             id: 2, name: "Duplicada".into(),
-            a: EdgeRef::single_segment(1, 0).into(), b: EdgeRef::single_segment(2, 1).into(),
+            sides_a: vec![EdgeRef::single_segment(1, 0).into()], sides_b: vec![EdgeRef::single_segment(2, 1).into()],
             ease_meters: 0.0,
         });
         assert!(overlap.validate().unwrap_err().contains("já está vinculada"));
@@ -960,7 +979,7 @@ mod tests {
         ]).unwrap());
         project.seams.push(SeamDefinition {
             id: 1, name: "Comprimentos incompatíveis".into(),
-            a: EdgeRef::single_segment(1, 0).into(), b: EdgeRef::single_segment(2, 0).into(),
+            sides_a: vec![EdgeRef::single_segment(1, 0).into()], sides_b: vec![EdgeRef::single_segment(2, 0).into()],
             ease_meters: 0.0,
         });
         assert!(project.validate().is_ok());
