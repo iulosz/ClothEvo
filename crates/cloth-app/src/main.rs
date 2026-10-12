@@ -1209,33 +1209,35 @@ impl ClothEvoApp {
                         let response = ui.selectable_label(active == index,
                             format!("{} · {} · segmentos {}–{} ({:.1} cm)",
                                 index + 1, piece_name, edge.start.segment + 1, edge.end.segment + 1, len_cm));
-                        let mut selected_path = false;
+                        let mut desired_active: Option<usize> = None;
+                        let mut list_changed = false;
                         ui.horizontal(|ui| {
-                            if response.clicked() { selected_path = true; }
+                            if response.clicked() { desired_active = Some(index); }
                             if ui.small_button("↑").clicked() && index > 0 {
                                 let target = if is_a { &mut self.seam_sides_a } else { &mut self.seam_sides_b };
                                 target.swap(index, index - 1);
-                                if is_a { self.seam_a_active_path = index - 1; } else { self.seam_b_active_path = index - 1; }
-                                selected_path = true;
+                                desired_active = Some(index - 1);
+                                list_changed = true;
                             }
                             if ui.small_button("↓").clicked() && index + 1 < paths.len() {
                                 let target = if is_a { &mut self.seam_sides_a } else { &mut self.seam_sides_b };
                                 target.swap(index, index + 1);
-                                if is_a { self.seam_a_active_path = index + 1; } else { self.seam_b_active_path = index + 1; }
-                                selected_path = true;
+                                desired_active = Some(index + 1);
+                                list_changed = true;
                             }
-                            if ui.small_button("Remover").clicked() {
+                            if paths.len() > 1 && ui.small_button("Remover").clicked() {
                                 let target = if is_a { &mut self.seam_sides_a } else { &mut self.seam_sides_b };
                                 target.remove(index);
-                                if is_a { self.seam_a_active_path = self.seam_a_active_path.min(target.len().saturating_sub(1)); }
-                                else { self.seam_b_active_path = self.seam_b_active_path.min(target.len().saturating_sub(1)); }
-                                selected_path = true;
+                                desired_active = Some(index.min(target.len() - 1));
+                                list_changed = true;
                             }
                         });
-                        if selected_path {
-                            if is_a { self.seam_a_active_path = index.min(self.seam_sides_a.len().saturating_sub(1)); }
-                            else { self.seam_b_active_path = index.min(self.seam_sides_b.len().saturating_sub(1)); }
+                        if let Some(active_index) = desired_active {
+                            if is_a { self.seam_a_active_path = active_index; }
+                            else { self.seam_b_active_path = active_index; }
                             self.seam_active_side_a = is_a;
+                            self.load_active_chain_edge_to_controls(is_a);
+                        } else if list_changed {
                             self.load_active_chain_edge_to_controls(is_a);
                         }
                     }
