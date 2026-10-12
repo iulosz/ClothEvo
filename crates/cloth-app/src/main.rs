@@ -4103,6 +4103,9 @@ impl ClothEvoApp {
             }
             let sampled = synchronized_samples.remove(&piece.id)
                 .ok_or_else(|| format!("A amostragem do molde '{}' não foi gerada.", piece.name))?;
+            let params = forced_by_piece.get(&piece.id).cloned().unwrap_or_default();
+            let forced_indices = forced_parameter_indices(piece, &sampled, &params)
+                .map_err(|error| format!("Não foi possível mapear os piques/extremos de '{}': {error}", piece.name))?;
             validate_simple_polygon(&sampled.points)
                 .map_err(|e| format!("Contorno inválido em '{}': {e}", piece.name))?;
             let mesh = triangulate_outline_with_forced_vertices(
@@ -5725,6 +5728,36 @@ fn delete_project_anchor(
     staged.validate()?;
     *project = staged;
     Ok(())
+}
+
+fn forced_parameter_indices(
+    piece: &PatternPiece,
+    sampled: &pattern_geom::SampledCurve,
+    params: &[(u32, f64)],
+) -> Result<Vec<usize>, String> {
+    if sampled.points.is_empty() { return Err("Contorno amostrado vazio.".into()); }
+    let mut indices = Vec::with_capacity(params.len());
+    for &(segment, t) in params {
+        let segment_index = segment as usize;
+        let (start, end) = *sampled.segment_vertex_ranges.get(segment_index)
+            .ok_or_else(|| "Parâmetro referencia um segmento inexistente.".to_string())?;
+        let target = curve_segment_point(&piece.outline, segment_index, t)
+            .ok_or_else(|| "Não foi possível avaliar o parâmetro da curva.".to_string())?;
+        let candidates: Box<dyn Iterator<Item = usize>> = if end >= start {
+            Box::new(start..=end)
+        } else {
+            Box::new((start..sampled.points.len()).chain(0..=end))
+        };
+        let index = candidates
+            .map(|index| index % sampled.points.len())
+            .find(|&index| sampled.points[index].distance(target) <= 1.0e-7)
+            .ok_or_else(|| format!(
+                "O parâmetro (segmento {}, t={:.6}) não foi preservado exatamente pela amostragem.",
+                segment + 1, t
+            ))?;
+        indices.push(index);
+    }
+    Ok(indices)
 }
 
 fn sampled_edge_indices(
