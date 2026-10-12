@@ -3425,19 +3425,19 @@ fn split_piece_metadata(
 }
 
 fn remap_edge_after_cut(
-    edge: &mut EdgeRef,
+    edge: &mut EdgePath,
     mapping: &[Vec<SourceSegmentFragment>],
     first_id: u64,
     second_id: u64,
 ) -> Result<(), String> {
-    let start = edge.segment_start as usize;
-    let end = edge.segment_end as usize;
-    if start >= end || end > mapping.len() {
+    let start = edge.start.segment as usize;
+    let end = edge.end.segment as usize;
+    if start > end || end >= mapping.len() || edge.start_position() >= edge.end_position() {
         return Err("uma costura existente referencia um intervalo inválido".into());
     }
     let mut side = None;
     let mut first_new_index: Option<usize> = None;
-    for source_index in start..end {
+    for source_index in start..=end {
         let fragments = &mapping[source_index];
         if fragments.len() != 1 {
             return Err(format!(
@@ -3463,8 +3463,8 @@ fn remap_edge_after_cut(
     }
     let side = side.ok_or_else(|| "intervalo de costura vazio".to_string())?;
     edge.piece_id = if side == 0 { first_id } else { second_id };
-    edge.segment_start = first_new_index.unwrap() as u32;
-    edge.segment_end = edge.segment_start + (end - start) as u32;
+    edge.start.segment = first_new_index.unwrap() as u32;
+    edge.end.segment = edge.start.segment + (end - start) as u32;
     Ok(())
 }
 
@@ -3593,22 +3593,34 @@ fn split_project_segment(
         }
     }
 
-    // Atualiza os intervalos de costura que referenciam a curva subdividida.
+    // Reparametriza as extremidades sobre os segmentos Bézier/lineares recém-criados.
     for seam in &mut project.seams {
         for edge in [&mut seam.a, &mut seam.b] {
             if edge.piece_id != piece_id || edge.curve != BoundaryCurve::Outline { continue; }
-            if edge.segment_start as usize > segment_index {
-                edge.segment_start += 1;
-                edge.segment_end += 1;
-            } else if edge.segment_end as usize > segment_index {
-                edge.segment_end += 1;
-            }
+            remap_param_after_segment_split(&mut edge.start, segment_index, t);
+            remap_param_after_segment_split(&mut edge.end, segment_index, t);
         }
     }
     // O vértice novo é o endpoint do segmento à esquerda.
     let _ = split_point;
     project.validate()?;
     Ok(segment_index + 1)
+}
+
+fn remap_param_after_segment_split(param: &mut CurveParam, segment_index: usize, split_t: f64) {
+    let index = segment_index as u32;
+    if param.segment > index {
+        param.segment += 1;
+    } else if param.segment == index {
+        if param.t < split_t - 1.0e-9 {
+            param.t = (param.t / split_t).clamp(0.0, 1.0);
+        } else if param.t > split_t + 1.0e-9 {
+            param.segment += 1;
+            param.t = ((param.t - split_t) / (1.0 - split_t)).clamp(0.0, 1.0);
+        } else {
+            param.t = 1.0;
+        }
+    }
 }
 
 fn convert_project_segment_to_bezier(
