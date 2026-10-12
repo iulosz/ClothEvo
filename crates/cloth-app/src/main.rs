@@ -138,6 +138,11 @@ struct ClothEvoApp {
     selected_piece: usize,
     seam_a_piece: usize,
     seam_b_piece: usize,
+    seam_sides_a: Vec<EdgePath>,
+    seam_sides_b: Vec<EdgePath>,
+    seam_a_active_path: usize,
+    seam_b_active_path: usize,
+    seam_active_side_a: bool,
     seam_a_segment: usize,
     seam_b_segment: usize,
     /// Fim exclusivo do intervalo selecionado (na UI, o último segmento é inclusivo).
@@ -255,6 +260,11 @@ impl ClothEvoApp {
             selected_piece: 0,
             seam_a_piece: 0,
             seam_b_piece: 1,
+            seam_sides_a: Vec::new(),
+            seam_sides_b: Vec::new(),
+            seam_a_active_path: 0,
+            seam_b_active_path: 0,
+            seam_active_side_a: true,
             seam_a_segment: 0,
             seam_b_segment: 0,
             seam_a_segment_end: 1,
@@ -1026,26 +1036,17 @@ impl ClothEvoApp {
                 self.selected_seam_id = requested_seam;
                 if let Some(id) = requested_seam {
                     if let Some(seam) = self.pattern_project.seams.iter().find(|seam| seam.id == id).cloned() {
-                        if let Some(index) = self.pattern_project.pieces.iter().position(|piece| piece.id == seam.a.piece_id) {
-                            self.seam_a_piece = index;
+                        self.seam_sides_a = seam.sides_a.clone();
+                        self.seam_sides_b = seam.sides_b.clone();
+                        self.seam_a_active_path = 0;
+                        self.seam_b_active_path = 0;
+                        self.seam_active_side_a = true;
+                        if let (Some(edge_a), Some(edge_b)) = (seam.sides_a.first(), seam.sides_b.first()) {
+                            self.load_seam_edge_to_controls(true, edge_a);
+                            self.load_seam_edge_to_controls(false, edge_b);
+                            self.seam_free_mode = [edge_a, edge_b].iter().any(|edge|
+                                edge.start.t > 1.0e-9 || edge.end.t < 1.0 - 1.0e-9);
                         }
-                        if let Some(index) = self.pattern_project.pieces.iter().position(|piece| piece.id == seam.b.piece_id) {
-                            self.seam_b_piece = index;
-                        }
-                        self.seam_a_segment = seam.a.start.segment as usize;
-                        self.seam_a_segment_end = (seam.a.end.segment as usize + usize::from(seam.a.end.t >= 1.0 - 1.0e-9))
-                            .max(self.seam_a_segment + 1);
-                        self.seam_b_segment = seam.b.start.segment as usize;
-                        self.seam_b_segment_end = (seam.b.end.segment as usize + usize::from(seam.b.end.t >= 1.0 - 1.0e-9))
-                            .max(self.seam_b_segment + 1);
-                        self.seam_a_start_t = seam.a.start.t;
-                        self.seam_a_end_t = seam.a.end.t;
-                        self.seam_b_start_t = seam.b.start.t;
-                        self.seam_b_end_t = seam.b.end.t;
-                        self.seam_a_reversed = seam.a.reversed;
-                        self.seam_b_reversed = seam.b.reversed;
-                        self.seam_free_mode = seam.a.start.t > 1.0e-9 || seam.b.start.t > 1.0e-9
-                            || seam.a.end.t < 1.0 - 1.0e-9 || seam.b.end.t < 1.0 - 1.0e-9;
                         self.seam_ease_m = seam.ease_meters;
                         self.seam_name = seam.name;
                     }
@@ -2103,6 +2104,11 @@ impl ClothEvoApp {
         self.seam_b_segment = 0;
         self.seam_a_segment_end = 1;
         self.seam_b_segment_end = 1;
+        self.seam_sides_a.clear();
+        self.seam_sides_b.clear();
+        self.seam_a_active_path = 0;
+        self.seam_b_active_path = 0;
+        self.seam_active_side_a = true;
         self.seam_a_reversed = false;
         self.seam_b_reversed = false;
         self.seam_a_start_t = 0.0;
