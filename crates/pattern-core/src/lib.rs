@@ -158,6 +158,8 @@ pub struct Pleat {
 }
 
 /// Propriedades físicas específicas do molde, em unidades SI.
+fn default_fabric_friction() -> f64 { 0.4 }
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FabricProperties {
     pub density_kg_m2: f64,
@@ -166,6 +168,9 @@ pub struct FabricProperties {
     pub shear_n_m: f64,
     pub bend_nm: f64,
     pub thickness_meters: f64,
+    /// Atrito do tecido em contato com avatar e outras partes do próprio tecido.
+    #[serde(default = "default_fabric_friction")]
+    pub friction_coefficient: f64,
     pub particle_distance_meters: f64,
 }
 
@@ -178,6 +183,7 @@ impl Default for FabricProperties {
             shear_n_m: 1_200.0,
             bend_nm: 0.0001,
             thickness_meters: 0.001,
+            friction_coefficient: default_fabric_friction(),
             particle_distance_meters: 0.04,
         }
     }
@@ -405,6 +411,7 @@ impl PatternProject {
                 piece.fabric.shear_n_m,
                 piece.fabric.bend_nm,
                 piece.fabric.thickness_meters,
+                piece.fabric.friction_coefficient,
                 piece.fabric.particle_distance_meters,
             ];
             if fabric_values.iter().any(|value| !value.is_finite() || *value <= 0.0) {
