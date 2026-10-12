@@ -17,12 +17,17 @@ pub struct PatternMesh {
     pub triangles: Vec<[u32; 3]>,
     pub boundary_edges: Vec<[u32; 2]>,
     pub boundary_vertex_count: usize,
+    /// Mapeamento de índices da curva de entrada para os vértices de contorno da malha.
+    pub input_boundary_indices: Vec<u32>,
+    /// Índices de vértices forçados, na mesma ordem da lista recebida pelo triangulador.
+    pub forced_boundary_indices: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum MeshError {
     Geometry(GeometryError),
     InvalidSpacing,
+    InvalidForcedVertex,
     Triangulation(String),
     EmptyResult,
     ResourceLimit,
@@ -33,6 +38,7 @@ impl fmt::Display for MeshError {
         match self {
             Self::Geometry(e) => write!(f, "{e}"),
             Self::InvalidSpacing => write!(f, "O espaçamento da malha deve ser positivo e finito."),
+            Self::InvalidForcedVertex => write!(f, "Um vértice forçado não existe no contorno amostrado; o triangulador não faz snap para outro vértice."),
             Self::Triangulation(e) => write!(f, "Falha na triangulação: {e}"),
             Self::EmptyResult => write!(f, "A triangulação não produziu triângulos dentro do contorno."),
             Self::ResourceLimit => write!(f, "A malha excede o orçamento seguro de geometria; aumente o espaçamento entre partículas ou simplifique o contorno."),
@@ -47,6 +53,17 @@ impl From<GeometryError> for MeshError {
 /// Triangula um polígono fechado por CDT e cria pontos interiores com espaçamento aproximado.
 /// Contornos côncavos são preservados; triângulos exteriores são filtrados pelo centróide.
 pub fn triangulate_outline(outline: &[Point2], target_spacing: f64) -> Result<PatternMesh, MeshError> {
+    triangulate_outline_with_forced_vertices(outline, target_spacing, &[])
+}
+
+/// Triangula um contorno preservando os vértices forçados exatamente nos índices fornecidos.
+/// Os pontos forçados precisam fazer parte do contorno de entrada; isso permite que o chamador
+/// amostre a curva com os parâmetros de costura/piques incluídos e evita qualquer snap aproximado.
+pub fn triangulate_outline_with_forced_vertices(
+    outline: &[Point2],
+    target_spacing: f64,
+    forced_indices: &[usize],
+) -> Result<PatternMesh, MeshError> {
     if !target_spacing.is_finite() || target_spacing <= 0.0 {
         return Err(MeshError::InvalidSpacing);
     }
@@ -61,6 +78,9 @@ pub fn triangulate_outline(outline: &[Point2], target_spacing: f64) -> Result<Pa
         return Err(MeshError::Geometry(GeometryError::InvalidParameter));
     }
     validate_simple_polygon(&boundary)?;
+    if forced_indices.iter().any(|index| *index >= boundary.len()) {
+        return Err(MeshError::InvalidForcedVertex);
+    }
 
     let min_x = boundary.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
     let min_y = boundary.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
@@ -154,7 +174,19 @@ pub fn triangulate_outline(outline: &[Point2], target_spacing: f64) -> Result<Pa
     if signed_area(&boundary) == 0.0 {
         return Err(MeshError::Geometry(GeometryError::TooFewPoints));
     }
-    Ok(PatternMesh { vertices, triangles, boundary_edges, boundary_vertex_count: boundary_count })
+    let mut input_boundary_indices = (0..boundary_count).map(|index| index as u32).collect::<Vec<_>>();
+    let forced_boundary_indices = forced_indices.iter().map(|index| *index as u32).collect::<Vec<_>>();
+    // A entrada já não deve ter ponto final duplicado (sample_curve faz essa normalização).
+    // Se o usuário o fornecer, o ponto final representa o mesmo vértice de contorno que o índice 0.
+    if outline.len() > boundary_count && outline.first().zip(outline.last())
+        .is_some_and(|(first, last)| first.distance(*last) <= 1.0e-9)
+    {
+        input_boundary_indices.push(0);
+    }
+    Ok(PatternMesh {
+        vertices, triangles, boundary_edges, boundary_vertex_count: boundary_count,
+        input_boundary_indices, forced_boundary_indices,
+    })
 }
 
 fn distance_to_boundary(point: Point2, polygon: &[Point2]) -> f64 {
