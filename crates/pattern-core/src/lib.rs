@@ -334,6 +334,7 @@ impl PatternProject {
         }
 
         let mut symmetry_pairs = HashSet::new();
+        let mut symmetry_members = HashSet::new();
         for link in &self.symmetry_links {
             if link.piece_a_id == link.piece_b_id {
                 return Err("Um molde não pode ser vinculado à própria cópia espelhada.".into());
@@ -343,6 +344,11 @@ impl PatternProject {
             }
             if !piece_ids.contains(&link.piece_a_id) || !piece_ids.contains(&link.piece_b_id) {
                 return Err("Uma relação de simetria referencia um molde inexistente.".into());
+            }
+            if !symmetry_members.insert(link.piece_a_id)
+                || !symmetry_members.insert(link.piece_b_id)
+            {
+                return Err("Cada molde só pode participar de um único par de simetria.".into());
             }
             let pair = if link.piece_a_id < link.piece_b_id {
                 (link.piece_a_id, link.piece_b_id)
