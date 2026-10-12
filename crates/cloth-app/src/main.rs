@@ -479,7 +479,10 @@ impl ClothEvoApp {
         ui.colored_label(color, format!("passo: {ms:.2} ms (orçamento {budget:.1} ms a 60 Hz)"));
         ui.label(format!("deformação máx.: {:.1} %", sim.max_strain() * 100.0));
         ui.label(format!("energia cinética: {:.4} J", sim.kinetic_energy()));
-        ui.label(format!("velocidade máxima: {:.2} m/s", sim.max_particle_speed()));
+        ui.label(format!(
+            "velocidade máxima: {:.2} m/s · deslocamento do substep: {:.1} mm",
+            sim.max_particle_speed(), sim.max_particle_displacement() * 1000.0
+        ));
         if sim.stability_corrections() > 0 {
             ui.colored_label(
                 egui::Color32::from_rgb(255, 180, 80),
@@ -504,6 +507,14 @@ impl ClothEvoApp {
         }
         if !self.seam_pairs.is_empty() {
             ui.label(format!("abertura máx. das costuras: {:.1} mm", self.seam_gap_max() * 1000.0));
+            let seam_load = sim.seam_tension_estimate_max_n();
+            let load_color = if seam_load > 100.0 {
+                egui::Color32::from_rgb(255, 92, 92)
+            } else {
+                egui::Color32::LIGHT_GREEN
+            };
+            ui.colored_label(load_color, format!("carga XPBD estimada máx. da costura: {:.2} N", seam_load));
+            ui.weak("Estimativa pelo multiplicador XPBD; indicador comparativo, não força experimental calibrada.");
         }
         let critical_seams = self.sim.seam_warning_pairs(0.015).len();
         if critical_seams > 0 {
