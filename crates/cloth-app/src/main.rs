@@ -79,7 +79,7 @@ enum PatternEditTarget {
     Edge { piece: usize, segment: usize, t: f64 },
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct PatternEditorSnapshot {
     project: PatternProject,
     draft_points: Vec<PatternPoint2>,
