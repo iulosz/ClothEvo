@@ -2784,27 +2784,29 @@ impl ClothEvoApp {
             }
         }
 
-        // As costuras são sobrepostas às bordas. Ao passar o cursor sobre qualquer lado da
-        // costura selecionada, ambos os lados ganham destaque, setas de direção e ligações entre piques.
+        // Desenha cada caminho sem criar segmentos artificiais entre bordas desconectadas.
+        // Ao passar o cursor numa costura selecionada, realça os dois lados e liga piques pareados.
         let hovered_pointer = ui.input(|input| input.pointer.hover_pos());
         for seam in &self.pattern_project.seams {
             let selected = self.selected_seam_id == Some(seam.id);
             let (draw_a, draw_b) = if selected {
-                self.seam_edges_from_controls().unwrap_or((seam.a.clone(), seam.b.clone()))
+                self.current_seam_sides_with_draft()
+                    .unwrap_or((seam.sides_a.clone(), seam.sides_b.clone()))
             } else {
-                (seam.a.clone(), seam.b.clone())
+                (seam.sides_a.clone(), seam.sides_b.clone())
             };
-            let la = edge_length_meters(&self.pattern_project, &draw_a);
-            let lb = edge_length_meters(&self.pattern_project, &draw_b);
+            let la = draw_a.iter().map(|edge| edge_length_meters(&self.pattern_project, edge)).sum::<f64>();
+            let lb = draw_b.iter().map(|edge| edge_length_meters(&self.pattern_project, edge)).sum::<f64>();
             let mismatch = (la - lb - seam.ease_meters).abs();
-            let path_a = edge_path_points(&self.pattern_project, &draw_a, 24);
-            let path_b = edge_path_points(&self.pattern_project, &draw_b, 24);
-            let screen_a = path_a.iter().copied().map(to_screen).collect::<Vec<_>>();
-            let screen_b = path_b.iter().copied().map(to_screen).collect::<Vec<_>>();
-            let hovering_selected_seam = selected && response.hovered()
-                && hovered_pointer.map(|pointer| {
-                    distance_to_screen_path(pointer, &screen_a).min(distance_to_screen_path(pointer, &screen_b)) <= 9.0
-                }).unwrap_or(false);
+            let screen_a = draw_a.iter().map(|edge| edge_path_points(&self.pattern_project, edge, 24)
+                .into_iter().map(to_screen).collect::<Vec<_>>()).collect::<Vec<_>>();
+            let screen_b = draw_b.iter().map(|edge| edge_path_points(&self.pattern_project, edge, 24)
+                .into_iter().map(to_screen).collect::<Vec<_>>()).collect::<Vec<_>>();
+            let hovering_selected_seam = selected && response.hovered() && hovered_pointer.map(|pointer| {
+                screen_a.iter().chain(screen_b.iter())
+                    .map(|path| distance_to_screen_path(pointer, path))
+                    .fold(f32::INFINITY, f32::min) <= 9.0
+            }).unwrap_or(false);
             let color = if mismatch > 0.02 {
                 egui::Color32::from_rgb(255, 92, 92)
             } else if selected || hovering_selected_seam {
@@ -2812,21 +2814,22 @@ impl ClothEvoApp {
             } else {
                 egui::Color32::from_rgb(64, 221, 206)
             };
-            for path in [&screen_a, &screen_b] {
-                for pair in path.windows(2) {
-                    painter.line_segment(
-                        [pair[0], pair[1]],
-                        egui::Stroke::new(if selected || hovering_selected_seam { 4.0 } else { 2.6 }, color),
-                    );
+            for side in [&screen_a, &screen_b] {
+                for path in side {
+                    for pair in path.windows(2) {
+                        painter.line_segment(
+                            [pair[0], pair[1]],
+                            egui::Stroke::new(if selected || hovering_selected_seam { 4.0 } else { 2.6 }, color),
+                        );
+                    }
+                    if hovering_selected_seam { draw_path_direction_arrow(&painter, path, color); }
                 }
             }
             if hovering_selected_seam {
-                draw_path_direction_arrow(&painter, &screen_a, color);
-                draw_path_direction_arrow(&painter, &screen_b, color);
-                for (progress_a, progress_b) in paired_notch_markers(&self.pattern_project, &draw_a, &draw_b) {
+                for (progress_a, progress_b) in paired_chain_notch_markers(&self.pattern_project, &draw_a, &draw_b) {
                     if let (Some(a), Some(b)) = (
-                        point_on_path_at_progress(&path_a, progress_a),
-                        point_on_path_at_progress(&path_b, progress_b),
+                        point_on_edge_chain_at_progress(&self.pattern_project, &draw_a, progress_a),
+                        point_on_edge_chain_at_progress(&self.pattern_project, &draw_b, progress_b),
                     ) {
                         painter.line_segment(
                             [to_screen(a), to_screen(b)],
@@ -2836,37 +2839,54 @@ impl ClothEvoApp {
                 }
             }
             if selected {
-                if let (Some(a), Some(b)) = (path_a.get(path_a.len()/2), path_b.get(path_b.len()/2)) {
-                    painter.text(to_screen(*a), egui::Align2::CENTER_BOTTOM,
+                let first_a = draw_a.first().and_then(|edge| edge_path_points(&self.pattern_project, edge, 12).get(6).copied());
+                let first_b = draw_b.first().and_then(|edge| edge_path_points(&self.pattern_project, edge, 12).get(6).copied());
+                if let (Some(a), Some(b)) = (first_a, first_b) {
+                    painter.text(to_screen(a), egui::Align2::CENTER_BOTTOM,
                         format!("C{} · {:.1} cm", seam.id, mismatch * 100.0),
                         egui::FontId::proportional(10.0), color);
-                    painter.text(to_screen(*b), egui::Align2::CENTER_TOP,
+                    painter.text(to_screen(b), egui::Align2::CENTER_TOP,
                         format!("C{}", seam.id), egui::FontId::proportional(10.0), color);
                 }
             }
         }
 
-        // Preview da nova costura e alças arrastáveis do Free Sewing, inclusive antes de salvar.
+        // Preview do lado atual: os extremos do caminho ativo podem ser arrastados livremente.
         if self.seam_free_mode {
-            if let Ok((edge_a, edge_b)) = self.seam_edges_from_controls() {
-                let tint_a = egui::Color32::from_rgb(255, 190, 74);
-                let tint_b = egui::Color32::from_rgb(94, 224, 207);
-                for (is_a, edge, color) in [(true, edge_a, tint_a), (false, edge_b, tint_b)] {
-                    let path = edge_path_points(&self.pattern_project, &edge, 24);
-                    let screen_path = path.iter().copied().map(to_screen).collect::<Vec<_>>();
-                    for pair in screen_path.windows(2) {
-                        painter.line_segment([pair[0], pair[1]], egui::Stroke::new(3.0, color));
-                    }
-                    if let Some(curve) = edge_curve(&self.pattern_project, &edge) {
-                        for (is_start, param) in [(true, edge.start), (false, edge.end)] {
-                            if let Some(point) = curve_segment_point(curve, param.segment as usize, param.t) {
-                                let screen = to_screen(point);
-                                painter.circle_filled(screen, 6.0, color);
-                                painter.circle_stroke(screen, 9.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
-                                painter.text(screen + egui::vec2(8.0, if is_start { -8.0 } else { 8.0 }),
-                                    egui::Align2::LEFT_CENTER,
-                                    format!("{}{}", if is_a { "A" } else { "B" }, if is_start { " início" } else { " fim" }),
-                                    egui::FontId::proportional(9.0), color);
+            if let Ok((draft_a, draft_b)) = self.seam_edges_from_controls() {
+                let paths_a = self.seam_sides_a.clone();
+                let paths_b = self.seam_sides_b.clone();
+                let active_a = self.seam_a_active_path;
+                let active_b = self.seam_b_active_path;
+                let mut sides = [paths_a, paths_b];
+                let drafts = [draft_a, draft_b];
+                let active = [active_a, active_b];
+                for side_index in 0..2 {
+                    let is_a = side_index == 0;
+                    let list = &mut sides[side_index];
+                    let index = active[side_index];
+                    if list.is_empty() { list.push(drafts[side_index].clone()); }
+                    else if index < list.len() { list[index] = drafts[side_index].clone(); }
+                    else { list.push(drafts[side_index].clone()); }
+                    let color = if is_a { egui::Color32::from_rgb(255, 190, 74) } else { egui::Color32::from_rgb(94, 224, 207) };
+                    for (path_index, edge) in list.iter().enumerate() {
+                        let path = edge_path_points(&self.pattern_project, edge, 24);
+                        let screen_path = path.iter().copied().map(to_screen).collect::<Vec<_>>();
+                        for pair in screen_path.windows(2) {
+                            painter.line_segment([pair[0], pair[1]], egui::Stroke::new(3.0, color));
+                        }
+                        if path_index != index { continue; }
+                        if let Some(curve) = edge_curve(&self.pattern_project, edge) {
+                            for (is_start, param) in [(true, edge.start), (false, edge.end)] {
+                                if let Some(point) = curve_segment_point(curve, param.segment as usize, param.t) {
+                                    let screen = to_screen(point);
+                                    painter.circle_filled(screen, 6.0, color);
+                                    painter.circle_stroke(screen, 9.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
+                                    painter.text(screen + egui::vec2(8.0, if is_start { -8.0 } else { 8.0 }),
+                                        egui::Align2::LEFT_CENTER,
+                                        format!("{}{}", if is_a { "A" } else { "B" }, if is_start { " início" } else { " fim" }),
+                                        egui::FontId::proportional(9.0), color);
+                                }
                             }
                         }
                     }
