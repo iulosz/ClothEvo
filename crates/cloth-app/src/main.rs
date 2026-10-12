@@ -235,6 +235,7 @@ fn physical_fold_edges(
         );
     }
 
+    drop(add_curve);
     combined.into_iter().map(|((a, b), (stiffness, angle))| {
         (a, b, stiffness, angle)
     }).collect()
@@ -4938,6 +4939,63 @@ mod pattern_editor_tests {
 
         let mut divided = EdgeRef::single_segment(1, 0);
         assert!(remap_edge_after_cut(&mut divided, &cut.source_segment_fragments, 1, 10).is_err());
+    }
+
+    #[test]
+    fn physical_fold_lines_map_to_internal_bending_edges() {
+        let mut piece = PatternPiece::from_polygon(21, "Painel com dobra", &[
+            PatternPoint2::new(0.0, 0.0),
+            PatternPoint2::new(1.0, 0.0),
+            PatternPoint2::new(1.0, 1.0),
+            PatternPoint2::new(0.0, 1.0),
+        ]).unwrap();
+        piece.fabric.particle_distance_meters = 0.20;
+        piece.fold_lines.push(FoldLine {
+            curve: Curve2D::polyline(&[
+                PatternPoint2::new(0.5, 0.08),
+                PatternPoint2::new(0.5, 0.92),
+            ], false).unwrap(),
+            kind: FoldKind::Valley,
+            stiffness: 0.35,
+            angle_radians: std::f64::consts::FRAC_PI_6,
+        });
+        let mesh = triangulate_outline(
+            &sample_curve_with_ranges(&piece.outline, 1).points,
+            piece.fabric.particle_distance_meters,
+        ).unwrap();
+        let folds = physical_fold_edges(&mesh.vertices, &mesh.triangles, &piece);
+        assert!(!folds.is_empty(), "a dobra deve mapear para dobradiças internas da malha");
+        assert!(folds.iter().all(|(_, _, stiffness, angle)| {
+            (*stiffness - 0.35).abs() < 1.0e-6
+                && (angle.abs() - std::f32::consts::FRAC_PI_6).abs() < 1.0e-5
+        }));
+    }
+
+    #[test]
+    fn pleat_creates_two_opposing_physical_crease_targets() {
+        let mut piece = PatternPiece::from_polygon(22, "Painel com prega", &[
+            PatternPoint2::new(0.0, 0.0),
+            PatternPoint2::new(1.0, 0.0),
+            PatternPoint2::new(1.0, 1.0),
+            PatternPoint2::new(0.0, 1.0),
+        ]).unwrap();
+        piece.fabric.particle_distance_meters = 0.20;
+        piece.pleats.push(Pleat {
+            axis: Curve2D::polyline(&[
+                PatternPoint2::new(0.1, 0.5),
+                PatternPoint2::new(0.9, 0.5),
+            ], false).unwrap(),
+            depth_meters: 0.20,
+            angle_radians: 0.50,
+        });
+        let mesh = triangulate_outline(
+            &sample_curve_with_ranges(&piece.outline, 1).points,
+            piece.fabric.particle_distance_meters,
+        ).unwrap();
+        let folds = physical_fold_edges(&mesh.vertices, &mesh.triangles, &piece);
+        assert!(!folds.is_empty(), "a prega deve mapear seus dois vincos para a malha");
+        assert!(folds.iter().any(|(_, _, _, angle)| *angle > 0.1));
+        assert!(folds.iter().any(|(_, _, _, angle)| *angle < -0.1));
     }
 
     #[test]
