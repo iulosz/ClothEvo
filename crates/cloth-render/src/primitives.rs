@@ -33,6 +33,19 @@ pub fn uv_sphere(center: Vec3, radius: f32, segments: u32, rings: u32, color: [f
     StaticMeshData { vertices, indices, color, kind: MeshKind::Shaded }
 }
 
+/// Elipsoide suave alinhado aos eixos, usado para exibir o mesmo volume do colisor SDF.
+pub fn ellipsoid(center: Vec3, radii: Vec3, segments: u32, rings: u32, color: [f32; 3]) -> StaticMeshData {
+    let mut mesh = uv_sphere(Vec3::ZERO, 1.0, segments, rings, color);
+    for vertex in &mut mesh.vertices {
+        let unit = Vec3::from(vertex.pos);
+        let n = Vec3::from(vertex.normal);
+        let normal = Vec3::new(n.x / radii.x.max(1e-6), n.y / radii.y.max(1e-6), n.z / radii.z.max(1e-6)).normalize_or_zero();
+        vertex.pos = (center + Vec3::new(unit.x * radii.x, unit.y * radii.y, unit.z * radii.z)).to_array();
+        vertex.normal = if normal.length_squared() > 1e-12 { normal.to_array() } else { Vec3::Y.to_array() };
+    }
+    mesh
+}
+
 /// Cilindro com tampas planas, do ponto `a` ao ponto `b`.
 pub fn cylinder(a: Vec3, b: Vec3, radius: f32, segments: u32, color: [f32; 3]) -> StaticMeshData {
     let segments = segments.max(3);

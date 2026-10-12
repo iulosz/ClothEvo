@@ -10,6 +10,7 @@
 //!   compartilham partículas e podem ser resolvidas em paralelo com `rayon`.
 //! * Sem dependência de render, para poder migrar o solver para GPU depois.
 
+pub mod avatar;
 pub mod builder;
 pub mod collider;
 mod coloring;
@@ -18,6 +19,7 @@ pub mod params;
 pub mod scenes;
 pub mod solver;
 
+pub use avatar::{build_avatar_colliders, AvatarConfig};
 pub use builder::{ClothBuilder, PanelHandle};
 pub use collider::Collider;
 pub use mesh::{GridPanel, PanelMesh, Placement};

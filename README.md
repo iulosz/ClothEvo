@@ -187,3 +187,12 @@ Cada molde possui um painel **Física e montagem 3D por molde** no Pattern Studi
 
 O construtor do solver aceita `PanelMaterial` por painel. As diferenças de densidade alteram a massa por partícula; as rigidezes anisotrópicas e de flexão alteram a compliance das respectivas restrições; a espessura altera o afastamento de colisão por partícula. Os controles globais continuam funcionando como multiplicadores gerais relativos à configuração com a qual a simulação foi montada. A folga diferencial (*ease*) entre costuras é preservada nos dados, mas ainda não modifica o comprimento de repouso da costura física.
 
+
+
+## Avatar procedural e colisão tecido-corpo
+
+A montagem 2D→3D utiliza um manequim procedural ajustável no Pattern Studio. As medidas são gravadas no projeto `.clothevo`: altura, largura dos ombros, cintura e quadril. Projetos antigos recebem as medidas padrão ao serem carregados.
+
+A física e a viewport usam os mesmos 18 colisores analíticos: elipsoides para cabeça, pescoço e tronco; cápsulas para braços, antebraços, coxas e canelas; e volumes elipsoidais para mãos e pés. A projeção de colisão usa campos de distância assinada (SDF), aproveitando a espessura do tecido e o atrito existentes no solver.
+
+**Limitações desta etapa:** é um manequim composto para colisão, não uma malha anatômica de alta resolução. Importação de avatares OBJ, FBX e glTF, colisão contra malhas arbitrárias e ajuste anatômico avançado continuam como etapas futuras.
