@@ -1227,6 +1227,29 @@ mod placement_transform_tests {
     }
 
     #[test]
+    fn rotating_panel_range_persists_after_reset() {
+        let mut sim = tiny_simulation();
+        let rotation = glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        assert!(sim.rotate_particles(0, 3, Vec3::ZERO, rotation));
+        assert!((sim.pos[1] - Vec3::Y).length() < 1e-5);
+        sim.reset();
+        assert!((sim.pos[1] - Vec3::Y).length() < 1e-5);
+        assert_eq!(sim.vel[1], Vec3::ZERO);
+    }
+
+    #[test]
+    fn scaling_panel_range_persists_after_reset_and_rejects_invalid_factors() {
+        let mut sim = tiny_simulation();
+        assert!(sim.scale_particles_axis(0, 3, Vec3::ZERO, Vec3::X, 2.0));
+        assert!((sim.pos[1] - Vec3::X * 2.0).length() < 1e-5);
+        assert!((sim.pos[2] - Vec3::Y).length() < 1e-5);
+        sim.reset();
+        assert!((sim.pos[1] - Vec3::X * 2.0).length() < 1e-5);
+        assert!(!sim.scale_particles_axis(0, 3, Vec3::ZERO, Vec3::ZERO, 2.0));
+        assert!(!sim.scale_particles_axis(0, 3, Vec3::ZERO, Vec3::X, 0.0));
+    }
+
+    #[test]
     fn translating_panel_range_rejects_invalid_bounds_or_delta() {
         let mut sim = tiny_simulation();
         assert!(!sim.translate_particles(2, 2, Vec3::X));
