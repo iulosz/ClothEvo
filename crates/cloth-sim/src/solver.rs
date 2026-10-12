@@ -415,21 +415,9 @@ impl Simulation {
             .fold(0.0_f32, f32::max);
         if max_thickness <= 1.0e-6 { return; }
         let cell_size = (2.0 * max_thickness).max(0.005);
-        let cell_of = |p: Vec3| -> (i32, i32, i32) {
-            (
-                (p.x / cell_size).floor() as i32,
-                (p.y / cell_size).floor() as i32,
-                (p.z / cell_size).floor() as i32,
-            )
-        };
-        let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
-        for (i, p) in self.pos.iter().enumerate() {
-            if p.is_finite() {
-                grid.entry(cell_of(*p)).or_default().push(i as u32);
-            }
-        }
 
-        // Limita o trabalho a O(partículas × limite), mesmo quando a malha colapsa.
+        // O helper constrói uma única grade espacial e limita o número de pares
+        // antes de resolvê-los, evitando alocação redundante em malhas densas.
         let pairs = bounded_self_collision_candidate_pairs(
             &self.pos,
             cell_size,
