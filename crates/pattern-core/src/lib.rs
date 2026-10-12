@@ -459,7 +459,7 @@ pub struct PatternProject {
 }
 
 impl PatternProject {
-    pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+    pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
     pub fn new(name: impl Into<String>) -> Self {
         Self {
@@ -729,7 +729,7 @@ impl PatternProject {
                             let relation = if *previous_side_a == is_a {
                                 "A mesma borda está repetida/ sobreposta dentro de um dos lados"
                             } else {
-                                "Os lados A e B da mesma costura usam bordas sobrepostas"
+                                "Os lados A e B da mesma peça possuem bordas sobrepostas"
                             };
                             return Err(format!("{relation} da costura '{}'.", seam.name));
                         }
@@ -751,8 +751,14 @@ impl PatternProject {
     }
 
     pub fn from_json(json: &str) -> Result<Self, String> {
-        let project: Self = serde_json::from_str(json)
+        let mut project: Self = serde_json::from_str(json)
             .map_err(|e| format!("Arquivo de projeto inválido: {e}"))?;
+        // Versão 1 armazenava uma costura com campos singulares a/b (EdgeRef).
+        // O desserializador já migrou esses campos para sides_a/sides_b, portanto
+        // podemos atualizar a versão de forma segura antes da validação.
+        if project.schema_version == 1 {
+            project.schema_version = Self::CURRENT_SCHEMA_VERSION;
+        }
         project.validate()?;
         Ok(project)
     }
