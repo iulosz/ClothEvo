@@ -248,24 +248,32 @@ impl Simulation {
                 continue;
             }
             let mut p = self.pos[i];
-            let q = self.prev[i];
+            let mut q = self.prev[i];
             for c in &self.colliders {
                 let d = c.sdf(p) - thickness;
                 if d < 0.0 {
                     let n = c.normal(p);
                     p -= n * d; // empurra para fora
-                    // Atrito de Coulomb em posição: o deslocamento tangencial é limitado por μ·penetração.
+
+                    // A projeção de uma penetração é uma correção geométrica, não um impulso.
+                    // Ajusta a posição anterior na direção normal para não converter uma correção
+                    // grande (por exemplo, no primeiro frame) em velocidade artificial explosiva.
+                    let normal_delta = (p - q).dot(n);
+                    q += n * normal_delta;
+
+                    // Atrito de Coulomb em posição: limita o deslocamento tangencial por μ·penetração.
                     let dx = p - q;
                     let t = dx - n * dx.dot(n);
                     let tl = t.length();
                     if tl > 1e-9 {
                         let max_friction = mu * (-d);
-                        let s = if tl <= max_friction { 1.0 } else { max_friction / tl };
-                        p -= t * s;
+                        let friction_scale = if tl <= max_friction { 1.0 } else { max_friction / tl };
+                        p -= t * friction_scale;
                     }
                 }
             }
             self.pos[i] = p;
+            self.prev[i] = q;
         }
     }
 
@@ -676,6 +684,34 @@ mod tests {
         assert!(max < 0.25, "deformação máxima alta: {max}");
         let lowest = sim.pos.iter().map(|p| p.y).fold(f32::MAX, f32::min);
         assert!(lowest > -0.01, "atravessou o chão: {lowest}");
+    }
+
+    #[test]
+    fn collider_projection_does_not_create_launch_velocity_from_initial_overlap() {
+        let panel = GridPanel::new(1.0, 1.0, 12, 12);
+        let mut builder = ClothBuilder::new();
+        // Simula o caso antigo: painel vertical coplanar com o eixo do cilindro corporal.
+        builder.add_panel(&panel.mesh, Placement::at(Vec3::new(-0.5, 0.4, 0.0)));
+        builder.add_collider(Collider::Cylinder {
+            a: Vec3::ZERO,
+            b: Vec3::new(0.0, 1.5, 0.0),
+            radius: 0.14,
+        });
+        let params = SimParams {
+            gravity: Vec3::ZERO,
+            substeps: 1,
+            damping: 0.0,
+            parallel: false,
+            ..SimParams::default()
+        };
+        let mut sim = builder.build(params);
+        sim.step(1.0 / 60.0);
+        assert!(sim.is_finite());
+        let max_speed = sim.vel.iter().map(|v| v.length()).fold(0.0, f32::max);
+        assert!(
+            max_speed < 1e-3,
+            "a correção do colisor criou velocidade artificial: {max_speed} m/s"
+        );
     }
 
     #[test]
