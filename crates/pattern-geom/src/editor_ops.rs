@@ -395,6 +395,13 @@ fn validate_cut_path(outline: &Curve2D, path: &Curve2D) -> Result<(), GeometryEr
         return Err(GeometryError::InvalidParameter);
     }
 
+    // Validate the maximum sampling/ intersection-check workload before allocating it.
+    // Each cut segment is sampled at 24 intervals below, and self-intersection checks are O(n²).
+    let estimated_samples = path.segments.len().saturating_mul(24).saturating_add(1);
+    if estimated_samples > crate::MAX_CURVE_SAMPLES {
+        return Err(GeometryError::InvalidParameter);
+    }
+
     let polygon = sample_curve(outline, 24);
     // Lines are not subdivided by sample_curve, so sample every segment explicitly here.
     let mut sampled = vec![path.start];
@@ -613,6 +620,23 @@ pub fn cut_closed_outline(
 #[cfg(test)]
 mod cut_path_intersection_tests {
     use super::*;
+
+    #[test]
+    fn cut_path_sampling_budget_is_checked_before_quadratic_intersection() {
+        let outline = Curve2D::polyline(&[
+            Point2::new(0.0, 0.0), Point2::new(2.0, 0.0),
+            Point2::new(2.0, 2.0), Point2::new(0.0, 2.0),
+        ], true).unwrap();
+        let mut points = Vec::new();
+        for index in 0..=200 {
+            points.push(Point2::new(0.2 + index as f64 * 0.001, 1.0));
+        }
+        let path = Curve2D::polyline(&points, false).unwrap();
+        assert_eq!(
+            cut_closed_outline(&outline, &path, 0.1),
+            Err(GeometryError::InvalidParameter)
+        );
+    }
 
     #[test]
     fn cut_and_sew_rejects_extreme_segment_counts_before_sampling() {

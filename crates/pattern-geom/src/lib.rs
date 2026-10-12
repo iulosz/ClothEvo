@@ -486,6 +486,9 @@ fn segments_intersect(a: Point2, b: Point2, c: Point2, d: Point2) -> bool {
 /// Valida uma borda fechada sem autointerseções. A entrada não precisa repetir o ponto inicial.
 pub fn validate_simple_polygon(polygon: &[Point2]) -> Result<(), GeometryError> {
     if polygon.len() < 3 { return Err(GeometryError::TooFewPoints); }
+    if polygon.len() > MAX_CURVE_SAMPLES {
+        return Err(GeometryError::InvalidParameter);
+    }
     if polygon.iter().any(|point| !point.x.is_finite() || !point.y.is_finite()) {
         return Err(GeometryError::InvalidParameter);
     }
@@ -787,6 +790,15 @@ mod tests {
         ];
         let offset = offset_polygon(&rect, 0.1).unwrap();
         assert!((signed_area(&offset).abs() - 2.64).abs() < 1e-6);
+    }
+
+    #[test]
+    fn simple_polygon_rejects_excessive_vertex_count_before_quadratic_checks() {
+        let polygon = (0..=MAX_CURVE_SAMPLES).map(|index| {
+            let angle = std::f64::consts::TAU * index as f64 / (MAX_CURVE_SAMPLES + 1) as f64;
+            Point2::new(angle.cos(), angle.sin())
+        }).collect::<Vec<_>>();
+        assert_eq!(validate_simple_polygon(&polygon), Err(GeometryError::InvalidParameter));
     }
 
     #[test]
