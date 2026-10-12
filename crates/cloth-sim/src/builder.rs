@@ -484,8 +484,8 @@ mod tests {
         builder.uv = uv;
         let a = [0u32, 1, 2];
         let b = [3u32, 4, 5];
-        builder.sew_with_markers(&a, &b, 0.0, &[(0.3, 0.5)]);
-        assert!(builder.seams[0].pairs.contains(&(1, 4)));
+        builder.sew_with_markers(&a, &b, 0.0, &[(1.0, 0.0)]);
+        assert!(builder.seams[0].pairs.contains(&(2, 3)));
     }
 
     #[test]
