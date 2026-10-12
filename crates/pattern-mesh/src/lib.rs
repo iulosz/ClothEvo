@@ -195,6 +195,35 @@ mod tests {
     }
 
     #[test]
+    fn real_scale_rectangle_keeps_boundary_edges_within_particle_spacing() {
+        use pattern_core::{PatternPiece, Point2};
+        use pattern_geom::sample_pattern_outlines_with_seam_sync;
+
+        let mut piece = PatternPiece::from_polygon(42, "Retângulo 50x70 cm", &[
+            Point2::new(0.0, 0.0),
+            Point2::new(0.5, 0.0),
+            Point2::new(0.5, 0.7),
+            Point2::new(0.0, 0.7),
+        ]).unwrap();
+        piece.fabric.particle_distance_meters = 0.03;
+
+        let sampled = sample_pattern_outlines_with_seam_sync(&[piece], &[]).unwrap();
+        let outline = &sampled[&42];
+        let mesh = triangulate_outline(&outline.points, 0.03).unwrap();
+
+        assert_eq!(mesh.boundary_vertex_count, outline.points.len());
+        assert!(mesh.boundary_vertex_count >= 80, "contorno inesperadamente esparso: {}", mesh.boundary_vertex_count);
+        let max_boundary_edge = mesh.boundary_edges.iter().map(|edge| {
+            mesh.vertices[edge[0] as usize].distance(mesh.vertices[edge[1] as usize])
+        }).fold(0.0_f64, f64::max);
+        assert!(
+            max_boundary_edge <= 0.030_001,
+            "aresta de contorno de {:.4} m excede o espaçamento de 0,03 m",
+            max_boundary_edge,
+        );
+    }
+
+    #[test]
     fn invalid_spacing_is_rejected() {
         assert_eq!(triangulate_outline(&rectangle(), 0.0), Err(MeshError::InvalidSpacing));
     }
