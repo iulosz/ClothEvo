@@ -557,14 +557,17 @@ mod tests {
         folded_builder.add_fold_edge(handle, 0, 2, 0.5, 0.4);
         let folded = folded_builder.build(SimParams::default());
 
-        let find_hinge = |sim: &Simulation| sim.bending_constraints().iter().find(|bend| {
-            bend.p.contains(&0) && bend.p.contains(&2)
-        }).unwrap();
-        let flat_hinge = find_hinge(&flat);
-        let fold_hinge = find_hinge(&folded);
-        assert_eq!(flat_hinge.rest_angle, 0.0);
-        assert!((fold_hinge.rest_angle - 0.4).abs() < 1e-6);
-        assert!((fold_hinge.scale / flat_hinge.scale - 2.0).abs() < 1e-5);
+        let hinge_values = |sim: &Simulation| {
+            let bend = sim.bending_constraints().iter().find(|bend| {
+                bend.p.contains(&0) && bend.p.contains(&2)
+            }).unwrap();
+            (bend.rest_angle, bend.scale)
+        };
+        let (flat_rest_angle, flat_scale) = hinge_values(&flat);
+        let (fold_rest_angle, fold_scale) = hinge_values(&folded);
+        assert_eq!(flat_rest_angle, 0.0);
+        assert!((fold_rest_angle - 0.4).abs() < 1e-6);
+        assert!((fold_scale / flat_scale - 2.0).abs() < 1e-5);
     }
 
     #[test]
