@@ -175,3 +175,15 @@ O sistema remapeia referências de costura e entalhes em trechos de borda que co
 
 As novas costuras conectam as bordas recém-criadas no grafo do projeto. A aplicação de folga diferencial (*ease*) continua sendo uma etapa separada do solver físico.
 
+## Montagem 2D → 3D e física por molde
+
+Cada molde possui um painel **Física e montagem 3D por molde** no Pattern Studio:
+
+- **Material:** densidade superficial (kg/m²), rigidez no urdume e na trama (N/m), cisalhamento (N/m), flexão (N·m) e espessura de colisão (m).
+- **Discretização:** a distância entre partículas é lida individualmente por molde durante a montagem da malha triangular. Valores menores preservam mais detalhes, mas aumentam o custo computacional.
+- **Transformação 3D:** deslocamento XYZ em metros e rotação XYZ em graus, aplicada em torno do centro do molde. A posição inicial conserva a organização relativa do layout 2D; os offsets e rotações servem para colocar os painéis ao redor do corpo antes de simular.
+- **Âncoras:** selecione um vértice do contorno e use **Fixar vértice ... na simulação** para criar um ponto preso; o vértice fica marcado em vermelho. A fixação é armazenada no projeto e mantida ao iniciar a simulação.
+- **Costuras:** o comando **Montar e simular na viewport 3D** triangula cada molde com seu próprio espaçamento, aplica as transformações e materiais, configura as âncoras e converte as referências de aresta em restrições de costura XPBD.
+
+O construtor do solver aceita `PanelMaterial` por painel. As diferenças de densidade alteram a massa por partícula; as rigidezes anisotrópicas e de flexão alteram a compliance das respectivas restrições; a espessura altera o afastamento de colisão por partícula. Os controles globais continuam funcionando como multiplicadores gerais relativos à configuração com a qual a simulação foi montada. A folga diferencial (*ease*) entre costuras é preservada nos dados, mas ainda não modifica o comprimento de repouso da costura física.
+
