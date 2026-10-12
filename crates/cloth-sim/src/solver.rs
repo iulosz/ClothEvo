@@ -308,13 +308,6 @@ impl Simulation {
             .fold(0.0_f32, f32::max);
         if max_thickness <= 1.0e-6 { return; }
         let cell_size = (2.0 * max_thickness).max(0.005);
-        let cell_of = |p: Vec3| -> (i32, i32, i32) {
-            (
-                (p.x / cell_size).floor() as i32,
-                (p.y / cell_size).floor() as i32,
-                (p.z / cell_size).floor() as i32,
-            )
-        };
         // O pareamento é limitado por vértice: se muitos pontos colapsarem na mesma célula,
         // o armazenamento permanece O(N·limite) em vez de crescer quadraticamente.
         let pairs = bounded_self_collision_candidate_pairs(
