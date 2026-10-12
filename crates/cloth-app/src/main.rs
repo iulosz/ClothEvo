@@ -4165,32 +4165,104 @@ fn closest_segment_parameter(point: egui::Pos2, a: egui::Pos2, b: egui::Pos2) ->
     (point.distance(a + ab * t), t)
 }
 
+/// Remapeia um pique quando o segmento que o contém é subdividido por De Casteljau.
+fn remap_notches_after_segment_split(notches: &mut [Notch], segment_index: usize, split_t: f64) {
+    let split_t = split_t.clamp(0.001, 0.999);
+    for notch in notches {
+        let old_segment = notch.segment_index as usize;
+        if old_segment < segment_index {
+            continue;
+        }
+        if old_segment > segment_index {
+            notch.segment_index += 1;
+            continue;
+        }
+        let old_t = notch.t.clamp(0.0, 1.0);
+        if old_t <= split_t {
+            notch.segment_index = segment_index as u32;
+            notch.t = (old_t / split_t).clamp(0.0, 1.0);
+        } else {
+            notch.segment_index = (segment_index + 1) as u32;
+            notch.t = ((old_t - split_t) / (1.0 - split_t)).clamp(0.0, 1.0);
+        }
+    }
+}
+
+/// Remapeia os piques para a nova topologia após excluir uma âncora num contorno linear.
+/// O(s) segmento(s) adjacente(s) tornam-se uma única aresta; posições são preservadas como
+/// fração do comprimento de arco antigo e reparametrizadas no segmento resultante.
+fn remap_notches_after_anchor_delete(
+    notches: &mut [Notch],
+    anchor_index: usize,
+    segment_count: usize,
+    lengths: &[f64],
+) {
+    if segment_count < 2 || lengths.len() != segment_count { return; }
+    let ratio = |first: f64, second: f64, t: f64| {
+        let total = first + second;
+        if total <= 1.0e-12 { 0.5 }
+        else { ((first + second * t.clamp(0.0, 1.0)) / total).clamp(0.0, 1.0) }
+    };
+    for notch in notches {
+        let old_segment = notch.segment_index as usize;
+        let old_t = notch.t.clamp(0.0, 1.0);
+        if anchor_index == 0 {
+            let merged_index = (segment_count - 2) as u32;
+            let denominator = (lengths[segment_count - 1] + lengths[0]).max(1.0e-12);
+            if old_segment == segment_count - 1 {
+                notch.segment_index = merged_index;
+                notch.t = (old_t * lengths[segment_count - 1] / denominator).clamp(0.0, 1.0);
+            } else if old_segment == 0 {
+                notch.segment_index = merged_index;
+                notch.t = ((lengths[segment_count - 1] + old_t * lengths[0]) / denominator)
+                    .clamp(0.0, 1.0);
+            } else {
+                notch.segment_index = (old_segment - 1) as u32;
+            }
+        } else if old_segment == anchor_index - 1 {
+            notch.segment_index = (anchor_index - 1) as u32;
+            notch.t = (old_t * lengths[anchor_index - 1]
+                / (lengths[anchor_index - 1] + lengths[anchor_index]).max(1.0e-12))
+                .clamp(0.0, 1.0);
+        } else if old_segment == anchor_index {
+            notch.segment_index = (anchor_index - 1) as u32;
+            notch.t = ratio(lengths[anchor_index - 1], lengths[anchor_index], old_t);
+        } else if old_segment > anchor_index {
+            notch.segment_index -= 1;
+        }
+    }
+}
+
 fn split_project_segment(
     project: &mut PatternProject,
     piece_id: u64,
     segment_index: usize,
     t: f64,
 ) -> Result<usize, String> {
-    let piece = project.pieces.iter_mut().find(|p| p.id == piece_id)
+    // Edição transacional: um pique ou intervalo de costura inválido não deixa o projeto
+    // parcialmente subdividido.
+    let mut staged = project.clone();
+    let piece = staged.pieces.iter_mut().find(|p| p.id == piece_id)
         .ok_or_else(|| "Peça não encontrada.".to_string())?;
-    let curve = &mut piece.outline;
-    if segment_index >= curve.segments.len() {
+    if segment_index >= piece.outline.segments.len() {
         return Err("Segmento selecionado fora do contorno.".into());
     }
     let t = t.clamp(0.001, 0.999);
+    remap_notches_after_segment_split(&mut piece.notches, segment_index, t);
+    let curve = &mut piece.outline;
     let p0 = if segment_index == 0 {
         curve.start
     } else {
         curve.segments[segment_index - 1].endpoint()
     };
     let original = curve.segments[segment_index].clone();
-    let (left, right, split_point) = match original {
+    let (left, right) = match original {
         CurveSegment::Line { to } => {
             let split = PatternPoint2::new(
                 p0.x + (to.x - p0.x) * t,
                 p0.y + (to.y - p0.y) * t,
             );
-            (CurveSegment::Line { to: split }, CurveSegment::Line { to }, split)
+            (CurveSegment::Line { to: split }, CurveSegment::Line { to })
         }
         CurveSegment::CubicBezier { control1, control2, to } => {
             let lerp = |a: PatternPoint2, b: PatternPoint2| PatternPoint2::new(
@@ -4206,7 +4278,6 @@ fn split_project_segment(
             (
                 CurveSegment::CubicBezier { control1: p01, control2: p012, to: split },
                 CurveSegment::CubicBezier { control1: p123, control2: p23, to },
-                split,
             )
         }
     };
@@ -4215,6 +4286,7 @@ fn split_project_segment(
 
     // Inserir um vértice desloca os índices das âncoras posteriores, inclusive as que estão
     // fixadas para a montagem 3D.
+    let piece = staged.pieces.iter_mut().find(|p| p.id == piece_id).unwrap();
     let new_anchor_index = segment_index + 1;
     for anchor in &mut piece.assembly.pinned_anchors {
         if *anchor as usize >= new_anchor_index {
@@ -4223,7 +4295,7 @@ fn split_project_segment(
     }
 
     // Atualiza os intervalos de costura que referenciam a curva subdividida.
-    for seam in &mut project.seams {
+    for seam in &mut staged.seams {
         for edge in [&mut seam.a, &mut seam.b] {
             if edge.piece_id != piece_id || edge.curve != BoundaryCurve::Outline { continue; }
             if edge.segment_start as usize > segment_index {
@@ -4234,9 +4306,8 @@ fn split_project_segment(
             }
         }
     }
-    // O vértice novo é o endpoint do segmento à esquerda.
-    let _ = split_point;
-    project.validate()?;
+    staged.validate()?;
+    *project = staged;
     Ok(segment_index + 1)
 }
 
@@ -4277,17 +4348,32 @@ fn delete_project_anchor(
     // Usa uma cópia transacional: se o remapeamento de costuras não puder ser representado
     // como intervalo contíguo, o projeto original permanece intacto.
     let mut staged = project.clone();
-    let piece = staged.pieces.iter_mut().find(|p| p.id == piece_id)
-        .ok_or_else(|| "Peça não encontrada.".to_string())?;
-    let curve = &mut piece.outline;
-    if !curve.closed || curve.segments.len() < 4 {
-        return Err("O contorno deve ter pelo menos quatro vértices para excluir um ponto.".into());
+    let (n, segment_lengths) = {
+        let piece = staged.pieces.iter().find(|p| p.id == piece_id)
+            .ok_or_else(|| "Peça não encontrada.".to_string())?;
+        let curve = &piece.outline;
+        if !curve.closed || curve.segments.len() < 4 {
+            return Err("O contorno deve ter pelo menos quatro vértices para excluir um ponto.".into());
+        }
+        if curve.segments.iter().any(|s| !matches!(s, CurveSegment::Line { .. })) {
+            return Err("A exclusão de vértices está disponível para contornos lineares; em Bézier use Inserir vértice e edite as alças.".into());
+        }
+        let n = curve.segments.len();
+        if anchor_index >= n { return Err("Vértice selecionado fora do contorno.".into()); }
+        let mut lengths = Vec::with_capacity(n);
+        for index in 0..n {
+            let start = if index == 0 { curve.start } else { curve.segments[index - 1].endpoint() };
+            lengths.push(start.distance(curve.segments[index].endpoint()));
+        }
+        (n, lengths)
+    };
+
+    {
+        let piece = staged.pieces.iter_mut().find(|p| p.id == piece_id).unwrap();
+        remap_notches_after_anchor_delete(
+            &mut piece.notches, anchor_index, n, &segment_lengths,
+        );
     }
-    if curve.segments.iter().any(|s| !matches!(s, CurveSegment::Line { .. })) {
-        return Err("A exclusão de vértices está disponível para contornos lineares; em Bézier use Inserir vértice e edite as alças.".into());
-    }
-    let n = curve.segments.len();
-    if anchor_index >= n { return Err("Vértice selecionado fora do contorno.".into()); }
 
     let map_segment = |old: usize| -> usize {
         if anchor_index == 0 {
