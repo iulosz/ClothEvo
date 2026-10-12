@@ -3633,6 +3633,25 @@ mod pattern_editor_tests {
     }
 
     #[test]
+    fn seam_measurements_and_notch_markers_follow_edge_arc_and_direction() {
+        let mut project = square_project();
+        project.pieces[0].notches.push(Notch {
+            id: 1, segment_index: 1, t: 0.5, depth_meters: 0.008, width_meters: 0.012,
+        });
+        project.pieces[1].notches.push(Notch {
+            id: 1, segment_index: 3, t: 0.5, depth_meters: 0.008, width_meters: 0.012,
+        });
+        let seam = project.seams[0].clone();
+        assert!((edge_length_meters(&project, &seam.a) - 1.0).abs() < 1e-6);
+        assert!((edge_length_meters(&project, &seam.b) - 1.0).abs() < 1e-6);
+        assert_eq!(paired_notch_markers(&project, &seam.a, &seam.b), vec![(0.5, 0.5)]);
+
+        let mut reversed = seam.b.clone();
+        reversed.reversed = true;
+        assert_eq!(edge_notch_positions(&project, &reversed), vec![0.5]);
+    }
+
+    #[test]
     fn pattern_sim_shell_layers_start_outside_the_body_collision_shell() {
         let thickness = 0.005;
         for index in 0..12 {
