@@ -753,4 +753,67 @@ mod tests {
         });
         assert!(project.validate().is_err());
     }
+
+    #[test]
+    fn missing_project_schema_version_defaults_to_current_version() {
+        let json = r#"{ "name":"Sem versão", "units":"Centimeter", "pieces":[], "seams":[] }"#;
+        let project = PatternProject::from_json(json).unwrap();
+        assert_eq!(project.schema_version, PatternProject::CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn validation_rejects_self_seams_and_overlapping_sewn_edges() {
+        let mut self_seam = PatternProject::new("Auto costura");
+        self_seam.pieces.push(PatternPiece::from_polygon(1, "A", &[
+            Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
+            Point2::new(1.0, 1.0), Point2::new(0.0, 1.0),
+        ]).unwrap());
+        self_seam.seams.push(SeamDefinition {
+            id: 1, name: "A para A".into(),
+            a: EdgeRef::single_segment(1, 0), b: EdgeRef::single_segment(1, 0),
+            ease_meters: 0.0,
+        });
+        assert!(self_seam.validate().unwrap_err().contains("mesma peça"));
+
+        let mut overlap = PatternProject::new("Bordas sobrepostas");
+        for id in 1..=2 {
+            overlap.pieces.push(PatternPiece::from_polygon(id, format!("P{id}"), &[
+                Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
+                Point2::new(1.0, 1.0), Point2::new(0.0, 1.0),
+            ]).unwrap());
+        }
+        overlap.seams.push(SeamDefinition {
+            id: 1, name: "Primeira".into(),
+            a: EdgeRef::single_segment(1, 0), b: EdgeRef::single_segment(2, 0),
+            ease_meters: 0.0,
+        });
+        overlap.seams.push(SeamDefinition {
+            id: 2, name: "Duplicada".into(),
+            a: EdgeRef::single_segment(1, 0), b: EdgeRef::single_segment(2, 1),
+            ease_meters: 0.0,
+        });
+        assert!(overlap.validate().unwrap_err().contains("já está vinculada"));
+    }
+
+    #[test]
+    fn excessive_seam_length_ratio_is_a_warning_not_a_validation_error() {
+        let mut project = PatternProject::new("Aviso de proporção");
+        project.pieces.push(PatternPiece::from_polygon(1, "Longa", &[
+            Point2::new(0.0, 0.0), Point2::new(4.0, 0.0),
+            Point2::new(4.0, 1.0), Point2::new(0.0, 1.0),
+        ]).unwrap());
+        project.pieces.push(PatternPiece::from_polygon(2, "Curta", &[
+            Point2::new(5.0, 0.0), Point2::new(5.5, 0.0),
+            Point2::new(5.5, 1.0), Point2::new(5.0, 1.0),
+        ]).unwrap());
+        project.seams.push(SeamDefinition {
+            id: 1, name: "Comprimentos incompatíveis".into(),
+            a: EdgeRef::single_segment(1, 0), b: EdgeRef::single_segment(2, 0),
+            ease_meters: 0.0,
+        });
+        assert!(project.validate().is_ok());
+        assert_eq!(project.validation_warnings().len(), 1);
+        assert!(project.validation_warnings()[0].contains("3:1"));
+    }
+
 }
