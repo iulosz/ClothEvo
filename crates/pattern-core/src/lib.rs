@@ -239,16 +239,22 @@ pub struct Annotation {
 pub struct AssemblyTransform {
     pub translation_meters: [f64; 3],
     pub rotation_degrees: [f64; 3],
+    /// Escala local por eixo. O valor 1.0 preserva a dimensão original.
+    #[serde(default = "default_assembly_scale")]
+    pub scale: [f64; 3],
     /// Índices de âncoras do contorno a fixar na simulação. Vazio significa peça livre.
     #[serde(default)]
     pub pinned_anchors: Vec<u32>,
 }
+
+fn default_assembly_scale() -> [f64; 3] { [1.0; 3] }
 
 impl Default for AssemblyTransform {
     fn default() -> Self {
         Self {
             translation_meters: [0.0; 3],
             rotation_degrees: [0.0; 3],
+            scale: default_assembly_scale(),
             pinned_anchors: Vec::new(),
         }
     }
