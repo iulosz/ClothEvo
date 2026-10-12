@@ -89,6 +89,8 @@ pub struct Simulation {
     last_self_collision_penetration: f32,
     /// Quantidade de recuperações/clamps no último passo.
     last_stability_corrections: usize,
+    /// Duração do último substep; usado para estimar a carga equivalente de costuras.
+    last_substep_dt: f32,
     last_density: f32,
 
     distance: Vec<DistanceConstraint>,
@@ -154,6 +156,7 @@ impl Simulation {
             last_self_collision_contacts: 0,
             last_self_collision_penetration: 0.0,
             last_stability_corrections: 0,
+            last_substep_dt: 0.0,
             dist_lambda: vec![0.0; distance.len()],
             distance,
             dist_colors,
@@ -190,6 +193,7 @@ impl Simulation {
         self.last_self_collision_contacts = 0;
         self.last_self_collision_penetration = 0.0;
         self.last_stability_corrections = 0;
+        self.last_substep_dt = 0.0;
     }
 
     fn refresh_masses(&mut self) {
@@ -215,6 +219,7 @@ impl Simulation {
         let substeps = self.params.substeps.max(1);
         let iterations = self.params.iterations.max(1);
         let h = dt / substeps as f32;
+        self.last_substep_dt = h;
         let inv_h2 = 1.0 / (h * h);
         let stiff = self.params.stiffness_table();
         let bend_k = self.params.bend.max(1e-9);
@@ -457,6 +462,26 @@ impl Simulation {
     pub fn max_particle_speed(&self) -> f32 {
         self.vel.iter().filter(|velocity| velocity.is_finite())
             .map(|velocity| velocity.length()).fold(0.0, f32::max)
+    }
+
+    /// Maior deslocamento entre pos e prev observado no último substep.
+    pub fn max_particle_displacement(&self) -> f32 {
+        self.pos.iter().zip(&self.prev)
+            .map(|(position, previous)| (*position - *previous).length())
+            .filter(|distance| distance.is_finite())
+            .fold(0.0, f32::max)
+    }
+
+    /// Carga de costura equivalente estimada pelo multiplicador XPBD do último substep.
+    /// É um indicador comparativo do solver, não uma força experimental calibrada.
+    pub fn seam_tension_estimate_max_n(&self) -> f32 {
+        if self.last_substep_dt <= 1.0e-9 { return 0.0; }
+        let inv_dt2 = 1.0 / (self.last_substep_dt * self.last_substep_dt);
+        self.distance.iter().zip(&self.dist_lambda)
+            .filter(|(constraint, _)| constraint.kind == ConstraintKind::Seam)
+            .map(|(_, lambda)| lambda.abs() * inv_dt2)
+            .filter(|force| force.is_finite())
+            .fold(0.0, f32::max)
     }
 
     pub fn self_collision_contacts(&self) -> usize { self.last_self_collision_contacts }
