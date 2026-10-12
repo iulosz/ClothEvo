@@ -425,6 +425,19 @@ impl PatternProject {
                     return Err(format!("O vértice {} do molde '{}' está fixado mais de uma vez.", anchor + 1, piece.name));
                 }
             }
+            let mut notch_ids = HashSet::new();
+            for notch in &piece.notches {
+                if !notch_ids.insert(notch.id) {
+                    return Err(format!("ID de pique duplicado {} no molde '{}'.", notch.id, piece.name));
+                }
+                if notch.segment_index as usize >= anchor_count
+                    || !notch.t.is_finite() || !(0.0..=1.0).contains(&notch.t)
+                    || !notch.depth_meters.is_finite() || notch.depth_meters <= 0.0
+                    || !notch.width_meters.is_finite() || notch.width_meters <= 0.0
+                {
+                    return Err(format!("Pique {} inválido no molde '{}'.", notch.id, piece.name));
+                }
+            }
         }
 
         let mut symmetry_pairs = HashSet::new();
@@ -563,6 +576,24 @@ mod tests {
         let project = PatternProject::from_json(json).unwrap();
         assert!(project.symmetry_links.is_empty());
         assert_eq!(project.avatar, AvatarDimensions::default());
+    }
+
+    #[test]
+    fn notches_validate_segment_position_dimensions_and_unique_ids() {
+        let mut project = PatternProject::new("Piques");
+        project.pieces.push(PatternPiece::from_polygon(1, "A", &[
+            Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
+            Point2::new(1.0, 1.0), Point2::new(0.0, 1.0),
+        ]).unwrap());
+        project.pieces[0].notches.push(Notch {
+            id: 1, segment_index: 0, t: 0.5, depth_meters: 0.008, width_meters: 0.012,
+        });
+        assert!(project.validate().is_ok());
+        project.pieces[0].notches[0].t = f64::NAN;
+        assert!(project.validate().is_err());
+        project.pieces[0].notches[0].t = 0.5;
+        project.pieces[0].notches.push(project.pieces[0].notches[0].clone());
+        assert!(project.validate().is_err());
     }
 
     #[test]
