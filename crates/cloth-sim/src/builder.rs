@@ -557,7 +557,7 @@ mod tests {
         folded_builder.add_fold_edge(handle, 0, 2, 0.5, 0.4);
         let folded = folded_builder.build(SimParams::default());
 
-        let find_hinge = |sim: &Simulation| sim.bending.iter().find(|bend| {
+        let find_hinge = |sim: &Simulation| sim.bending_constraints().iter().find(|bend| {
             bend.p.contains(&0) && bend.p.contains(&2)
         }).unwrap();
         let flat_hinge = find_hinge(&flat);
