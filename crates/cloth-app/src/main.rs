@@ -16,11 +16,12 @@ use eframe::{egui, egui_wgpu};
 use glam::{Quat, Vec2, Vec3};
 use pattern_core::{
     BoundaryCurve, Curve2D, CurveSegment, EdgeRef, FoldKind, FoldLine, GrainLine, PatternPiece,
-    PatternProject, Pleat, Point2 as PatternPoint2, SeamDefinition,
+    PatternProject, Pleat, Point2 as PatternPoint2, SeamDefinition, SymmetryLink,
 };
 use pattern_geom::{
-    cut_closed_outline, offset_polygon, point_in_polygon, rectangle, regular_polygon, sample_curve,
-    sample_curve_with_ranges, validate_simple_polygon, CutAndSewResult, SourceSegmentFragment,
+    cut_closed_outline, mirror_curve_x, offset_polygon, point_in_polygon, rectangle,
+    regular_polygon, sample_curve, sample_curve_with_ranges, validate_simple_polygon,
+    CutAndSewResult, SourceSegmentFragment,
 };
 use pattern_mesh::triangulate_outline;
 
@@ -124,6 +125,7 @@ struct ClothEvoApp {
     draft_points: Vec<PatternPoint2>,
     pattern_spacing: f64,
     pattern_polygon_sides: usize,
+    pattern_symmetry_axis_x: f64,
     pattern_show_mesh: bool,
     selected_piece: usize,
     seam_a_piece: usize,
@@ -214,6 +216,7 @@ impl ClothEvoApp {
             draft_points: Vec::new(),
             pattern_spacing: 0.08,
             pattern_polygon_sides: 6,
+            pattern_symmetry_axis_x: 0.0,
             pattern_show_mesh: true,
             selected_piece: 0,
             seam_a_piece: 0,
@@ -689,6 +692,19 @@ impl ClothEvoApp {
             }
         });
         ui.add(egui::Slider::new(&mut self.pattern_polygon_sides, 3..=12).text("lados do polígono"));
+        ui.separator();
+        ui.strong("Simetria vinculada");
+        ui.add(egui::DragValue::new(&mut self.pattern_symmetry_axis_x)
+            .speed(0.005).prefix("Eixo X (m) "));
+        ui.horizontal(|ui| {
+            if ui.button("Usar X mínimo do molde").clicked() {
+                self.set_symmetry_axis_to_min_x();
+            }
+            if ui.button("Criar par espelhado").clicked() {
+                self.create_mirrored_pair();
+            }
+        });
+        ui.weak("A edição de vértices e alças é refletida no molde vinculado.");
         ui.horizontal(|ui| {
             if ui.button("Fechar peça a partir dos pontos").clicked() {
                 self.create_piece_from_draft();
