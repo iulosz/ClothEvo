@@ -19,8 +19,8 @@ use pattern_core::{
     PatternProject, Pleat, Point2 as PatternPoint2, SeamDefinition,
 };
 use pattern_geom::{
-    offset_polygon, point_in_polygon, rectangle, regular_polygon, sample_curve,
-    sample_curve_with_ranges, validate_simple_polygon,
+    cut_closed_outline, offset_polygon, point_in_polygon, rectangle, regular_polygon, sample_curve,
+    sample_curve_with_ranges, validate_simple_polygon, CutAndSewResult, SourceSegmentFragment,
 };
 use pattern_mesh::triangulate_outline;
 
@@ -696,7 +696,11 @@ impl ClothEvoApp {
             if ui.button("Adicionar linha interna").clicked() {
                 self.create_internal_line_from_draft();
             }
+            if ui.button("Cut & Sew").clicked() {
+                self.cut_and_sew_from_draft();
+            }
         });
+        ui.weak("Cut & Sew: desenhe um caminho dentro do molde, começando e terminando no contorno.");
         ui.horizontal(|ui| {
             if ui.button("Criar dobra (vale)").clicked() {
                 self.create_fold_line_from_draft();
@@ -1183,6 +1187,133 @@ impl ClothEvoApp {
         self.draft_points.clear();
         self.pattern_tool = PatternTool::Select;
         self.pattern_message = "Linha de fio atualizada.".into();
+        self.remember_pattern_change(before);
+    }
+
+    fn cut_and_sew_from_draft(&mut self) {
+        if self.draft_points.len() < 2 {
+            self.pattern_message = "Para Cut & Sew, desenhe um caminho com pelo menos dois pontos.".into();
+            return;
+        }
+        if self.pattern_project.pieces.is_empty() {
+            self.pattern_message = "Crie um molde antes de executar Cut & Sew.".into();
+            return;
+        }
+        let source_index = self.selected_piece.min(self.pattern_project.pieces.len() - 1);
+        let source = self.pattern_project.pieces[source_index].clone();
+        let cut_path = match Curve2D::polyline(&self.draft_points, false) {
+            Ok(curve) => curve,
+            Err(error) => { self.pattern_message = error; return; }
+        };
+        let cut_result = match cut_closed_outline(&source.outline, &cut_path, 0.035) {
+            Ok(result) => result,
+            Err(error) => {
+                self.pattern_message = match error {
+                    pattern_geom::GeometryError::SelfIntersection =>
+                        "Corte inválido: o caminho se cruza. Use um caminho simples.".into(),
+                    pattern_geom::GeometryError::InvalidParameter =>
+                        "Corte inválido: mantenha o caminho dentro do molde e conecte as duas extremidades ao contorno (tolerância de 3,5 cm).".into(),
+                    _ => format!("Não foi possível dividir o molde: {error}"),
+                };
+                return;
+            }
+        };
+
+        let first_id = source.id;
+        let second_id = self.pattern_project.pieces.iter()
+            .map(|piece| piece.id).max().unwrap_or(0) + 1;
+        let mut first = source.clone();
+        let mut second = source.clone();
+        first.name = format!("{} (A)", source.name);
+        second.id = second_id;
+        second.name = format!("{} (B)", source.name);
+        first.outline = cut_result.first.clone();
+        second.outline = cut_result.second.clone();
+
+        let polygon_a = sample_curve(&first.outline, 24);
+        let polygon_b = sample_curve(&second.outline, 24);
+        let sewing_side = match split_piece_metadata(
+            &source, &mut first, &mut second, &cut_result, &polygon_a, &polygon_b,
+        ) {
+            Ok(side) => side,
+            Err(error) => {
+                self.pattern_message = format!("Cut & Sew cancelado sem alterar o molde: {error}");
+                return;
+            }
+        };
+
+        // Remap existing seam references before replacing the source piece. If a referenced
+        // interval spans both sides of the cut, refuse rather than silently corrupting it.
+        let mut project = self.pattern_project.clone();
+        for seam in &mut project.seams {
+            for edge in [&mut seam.a, &mut seam.b] {
+                if edge.piece_id != first_id { continue; }
+                match edge.curve {
+                    BoundaryCurve::Outline => {
+                        if let Err(error) = remap_edge_after_cut(
+                            edge, &cut_result.source_segment_fragments, first_id, second_id,
+                        ) {
+                            self.pattern_message = format!(
+                                "Cut & Sew cancelado: {error} A costura original foi preservada."
+                            );
+                            return;
+                        }
+                    }
+                    BoundaryCurve::SewingLine => {
+                        let Some(side) = sewing_side else {
+                            self.pattern_message = "Cut & Sew cancelado: uma costura existente referencia a linha de costura, mas ela não pôde ser atribuída a uma das peças.".into();
+                            return;
+                        };
+                        edge.piece_id = if side == 0 { first_id } else { second_id };
+                    }
+                }
+            }
+        }
+
+        project.pieces[source_index] = first;
+        project.pieces.push(second);
+
+        let next_seam_id = project.seams.iter()
+            .map(|seam| seam.id).max().unwrap_or(0) + 1;
+        let (a_start, a_end) = cut_result.first_cut_segment_range;
+        let (b_start, b_end) = cut_result.second_cut_segment_range;
+        project.seams.push(SeamDefinition {
+            id: next_seam_id,
+            name: format!("Cut & Sew {next_seam_id}"),
+            a: EdgeRef {
+                piece_id: first_id,
+                curve: BoundaryCurve::Outline,
+                segment_start: a_start as u32,
+                segment_end: a_end as u32,
+                reversed: false,
+            },
+            b: EdgeRef {
+                piece_id: second_id,
+                curve: BoundaryCurve::Outline,
+                segment_start: b_start as u32,
+                segment_end: b_end as u32,
+                // Corresponding endpoints run in opposite directions around each outline.
+                reversed: true,
+            },
+            ease_meters: 0.0,
+        });
+
+        if let Err(error) = project.validate() {
+            self.pattern_message = format!("Cut & Sew cancelado pela validação do projeto: {error}");
+            return;
+        }
+
+        let before = self.editor_snapshot();
+        self.pattern_project = project;
+        self.selected_piece = source_index;
+        self.selected_target = Some(PatternEditTarget::Piece { piece: source_index });
+        self.draft_points.clear();
+        self.pattern_tool = PatternTool::Select;
+        self.pattern_fit_pending = true;
+        self.pattern_message = format!(
+            "Cut & Sew concluído: '{}' foi dividido em duas peças, com a nova costura {}.",
+            source.name, next_seam_id
+        );
         self.remember_pattern_change(before);
     }
 
