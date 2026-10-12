@@ -586,6 +586,9 @@ mod tests {
             pairs: vec![(0, 2), (1, 3)],
             edge_a: vec![0, 1],
             edge_b: vec![2, 3],
+            // Omit path chains to exercise the backwards-compatible single-edge fallback.
+            edge_a_paths: Vec::new(),
+            edge_b_paths: Vec::new(),
             ease_meters: 0.5,
         };
         adjust_seam_ease(&mut distance, &indices, &uv, &seam, &mut HashSet::new());
