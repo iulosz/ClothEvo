@@ -141,6 +141,8 @@ pub struct PanelMaterial {
     pub shear_n_m: f32,
     pub bend_nm: f32,
     pub thickness_meters: f32,
+    /// Coeficiente de atrito por tecido (0–2), escalado pelo atrito global da simulação.
+    pub friction_coefficient: f32,
 }
 
 impl Default for PanelMaterial {
@@ -152,6 +154,7 @@ impl Default for PanelMaterial {
             shear_n_m: 300.0,
             bend_nm: 5.0e-5,
             thickness_meters: 0.005,
+            friction_coefficient: 0.4,
         }
     }
 }
@@ -168,6 +171,9 @@ impl PanelMaterial {
         ];
         if values.iter().any(|value| !value.is_finite() || *value <= 0.0) {
             return Err("As propriedades físicas do painel precisam ser finitas e positivas.");
+        }
+        if !self.friction_coefficient.is_finite() || !(0.0..=2.0).contains(&self.friction_coefficient) {
+            return Err("O atrito do painel deve estar entre 0 e 2.");
         }
         Ok(self)
     }
