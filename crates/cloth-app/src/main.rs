@@ -16,7 +16,7 @@ use eframe::{egui, egui_wgpu};
 use glam::{EulerRot, Quat, Vec2, Vec3};
 use pattern_core::{
     BoundaryCurve, Curve2D, CurveParam, CurveSegment, EdgePath, EdgeRef, FoldKind, FoldLine, GrainLine,
-    Notch, PatternPiece, PatternProject, Pleat, SeamDefinition, SeamSuggestion,
+    suggest_seams, Notch, PatternPiece, PatternProject, Pleat, SeamDefinition, SeamSuggestion,
     SeamSuggestionParams, Point2 as PatternPoint2, SymmetryLink,
 };
 use pattern_geom::{
@@ -1330,6 +1330,48 @@ impl ClothEvoApp {
                 }
             });
             ui.label(format!("Costuras no projeto: {}", self.pattern_project.seams.len()));
+
+            ui.separator();
+            ui.strong("Auto Sewing — sugestões");
+            ui.add(egui::Slider::new(&mut self.auto_seam_minimum_score, 0.0..=1.0)
+                .text("Score mínimo").custom_formatter(|value, _| format!("{:.0}%", value * 100.0)));
+            if ui.button("Sugerir costuras").clicked() {
+                self.auto_seam_suggestions = suggest_seams(&self.pattern_project, &SeamSuggestionParams {
+                    minimum_score: self.auto_seam_minimum_score,
+                    ..SeamSuggestionParams::default()
+                });
+                self.auto_seam_selected = vec![false; self.auto_seam_suggestions.len()];
+                self.hovered_auto_suggestion = None;
+                self.pattern_message = format!(
+                    "{} sugestão(ões) encontrada(s). Nenhuma costura foi criada.",
+                    self.auto_seam_suggestions.len()
+                );
+            }
+            self.hovered_auto_suggestion = None;
+            for index in 0..self.auto_seam_suggestions.len() {
+                let suggestion = self.auto_seam_suggestions[index].clone();
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.auto_seam_selected[index], "");
+                    let response = ui.selectable_label(
+                        false,
+                        format!(
+                            "#{:02} · {:.0}% · peça {} / seg. {} ↔ peça {} / seg. {}",
+                            index + 1, suggestion.score * 100.0,
+                            suggestion.a.piece_id, suggestion.a.start.segment + 1,
+                            suggestion.b.piece_id, suggestion.b.start.segment + 1,
+                        ),
+                    );
+                    if response.hovered() { self.hovered_auto_suggestion = Some(index); }
+                });
+                for reason in &suggestion.reasons {
+                    ui.weak(reason);
+                }
+            }
+            if !self.auto_seam_suggestions.is_empty()
+                && ui.button("Aplicar selecionadas").clicked()
+            {
+                self.apply_selected_auto_seams();
+            }
         } else {
             ui.weak("Crie ao menos duas peças para configurar uma costura.");
         }
@@ -2448,6 +2490,54 @@ impl ClothEvoApp {
         }
         self.pattern_project = staged;
         self.pattern_message = format!("Costura '{id}' atualizada.");
+        self.remember_pattern_change(before);
+    }
+
+    fn apply_selected_auto_seams(&mut self) {
+        let chosen = self.auto_seam_suggestions.iter().zip(self.auto_seam_selected.iter())
+            .filter_map(|(suggestion, selected)| (*selected).then_some(suggestion.clone()))
+            .collect::<Vec<_>>();
+        if chosen.is_empty() {
+            self.pattern_message = "Marque pelo menos uma sugestão antes de aplicar.".into();
+            return;
+        }
+
+        let before = self.editor_snapshot();
+        let mut staged = self.pattern_project.clone();
+        let mut next_id = staged.seams.iter().map(|seam| seam.id).max().unwrap_or(0) + 1;
+        for suggestion in &chosen {
+            staged.seams.push(SeamDefinition {
+                id: next_id,
+                name: format!("Sugestão automática {next_id}"),
+                sides_a: vec![suggestion.a.clone()],
+                sides_b: vec![suggestion.b.clone()],
+                ease_meters: 0.0,
+            });
+            next_id += 1;
+        }
+        if let Err(error) = staged.validate() {
+            self.pattern_message = format!("Lote de sugestões não aplicado: {error}");
+            return;
+        }
+
+        self.pattern_project = staged;
+        self.selected_seam_id = Some(next_id - 1);
+        if let Some(seam) = self.pattern_project.seams.iter().find(|seam| seam.id == next_id - 1).cloned() {
+            self.seam_sides_a = seam.sides_a;
+            self.seam_sides_b = seam.sides_b;
+            self.seam_a_active_path = 0;
+            self.seam_b_active_path = 0;
+            if let Some(edge) = self.seam_sides_a.first() { self.load_seam_edge_to_controls(true, edge); }
+            if let Some(edge) = self.seam_sides_b.first() { self.load_seam_edge_to_controls(false, edge); }
+            self.seam_name = seam.name;
+        }
+        self.auto_seam_suggestions.clear();
+        self.auto_seam_selected.clear();
+        self.hovered_auto_suggestion = None;
+        self.pattern_message = format!(
+            "{} costura(s) sugerida(s) aplicada(s) como um único lote de undo.",
+            chosen.len()
+        );
         self.remember_pattern_change(before);
     }
 
