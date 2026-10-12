@@ -2205,7 +2205,7 @@ impl ClothEvoApp {
             // moldes mais à esquerda/direita começam tangentes às laterais, e costuras os unem.
             let angle = (((center_x - min_x) / x_span).clamp(0.0, 1.0)
                 * std::f64::consts::PI - std::f64::consts::FRAC_PI_2) as f32;
-            let shell_radius = pattern_sim_shell_radiuspiece_index, fabric.thickness_meters as f32);
+            let shell_radius = pattern_sim_shell_radius(piece_index, fabric.thickness_meters as f32);
             let auto_origin = Vec3::new(
                 angle.sin() * shell_radius,
                 origin_y + center_y as f32,
