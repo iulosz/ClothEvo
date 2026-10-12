@@ -79,6 +79,8 @@ pub struct Simulation {
     thickness_scale: Vec<f32>,
     /// Multiplicador de atrito atribuído ao tecido de cada partícula.
     friction_scale: Vec<f32>,
+    /// Duração do último substep, usada para estimar carga das costuras pela lambda XPBD.
+    last_substep_dt: f32,
     /// Pares topologicamente adjacentes (ou unidos por costura) que não devem auto-colidir.
     self_collision_exclusions: HashSet<(u32, u32)>,
     last_density: f32,
@@ -140,6 +142,7 @@ impl Simulation {
             mass_scale,
             thickness_scale,
             friction_scale,
+            last_substep_dt: 0.0,
             self_collision_exclusions,
             dist_lambda: vec![0.0; distance.len()],
             distance,
@@ -173,6 +176,7 @@ impl Simulation {
         self.pos.copy_from_slice(&self.rest_pos);
         self.prev.copy_from_slice(&self.rest_pos);
         self.vel.fill(Vec3::ZERO);
+        self.last_substep_dt = 0.0;
         self.stats = Stats::default();
     }
 
@@ -203,6 +207,7 @@ impl Simulation {
         let substeps = self.params.substeps.clamp(1, 120);
         let iterations = self.params.iterations.clamp(1, 20);
         let h = dt / substeps as f32;
+        self.last_substep_dt = h;
         let inv_h2 = 1.0 / (h * h);
         let stiff = self.params.stiffness_table();
         let bend_k = self.params.bend.max(1e-9);
@@ -558,6 +563,18 @@ impl Simulation {
         self.distance.iter()
             .filter(|c| c.kind == ConstraintKind::Seam)
             .map(|c| (self.pos[c.a as usize] - self.pos[c.b as usize]).length())
+            .fold(0.0, f32::max)
+    }
+
+    /// Maior força equivalente estimada a partir dos multiplicadores XPBD do último substep.
+    /// É um indicador relativo do solver, não substitui uma calibração experimental do tecido.
+    pub fn seam_tension_estimate_max_n(&self) -> f32 {
+        if self.last_substep_dt <= 1.0e-9 { return 0.0; }
+        let inv_dt2 = 1.0 / (self.last_substep_dt * self.last_substep_dt);
+        self.distance.iter().zip(&self.dist_lambda)
+            .filter(|(constraint, _)| constraint.kind == ConstraintKind::Seam)
+            .map(|(_, lambda)| lambda.abs() * inv_dt2)
+            .filter(|force| force.is_finite())
             .fold(0.0, f32::max)
     }
 
