@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ops::Range;
 
 /// Coloração gulosa: itens com a mesma cor não compartilham nenhuma partícula,
@@ -5,28 +6,47 @@ use std::ops::Range;
 ///
 /// Usa uma máscara `u128` por partícula (até 128 cores; malhas triangulares precisam de ~10).
 pub fn greedy_coloring<const N: usize>(items: &[[u32; N]], particle_count: usize) -> Vec<u32> {
-    // Bitsets dinâmicos mantêm o caminho rápido em malhas normais e evitam panic
-    // quando uma entrada degenerada exige mais de 128 cores.
-    let mut used = vec![Vec::<u64>::new(); particle_count];
+    // Mantém um bitset contíguo e rápido para as primeiras 128 cores. Só vértices de
+    // grafos degenerados que excedem esse limite recebem palavras adicionais no mapa.
+    let mut used = vec![0u128; particle_count];
+    let mut overflow = HashMap::<usize, Vec<u64>>::new();
     let mut colors = Vec::with_capacity(items.len());
     for item in items {
         let mut color = 0usize;
         loop {
-            let word = color / 64;
-            let bit = 1u64 << (color % 64);
-            let available = item.iter().all(|&particle| {
-                used[particle as usize].get(word).is_none_or(|mask| mask & bit == 0)
-            });
+            let available = if color < 128 {
+                let bit = 1u128 << color;
+                item.iter().all(|&particle| used[particle as usize] & bit == 0)
+            } else {
+                let extra_color = color - 128;
+                let word = extra_color / 64;
+                let bit = 1u64 << (extra_color % 64);
+                item.iter().all(|&particle| {
+                    overflow.get(&(particle as usize))
+                        .and_then(|words| words.get(word))
+                        .is_none_or(|mask| mask & bit == 0)
+                })
+            };
             if available { break; }
             color += 1;
         }
-        let word = color / 64;
-        let bit = 1u64 << (color % 64);
-        for &particle in item {
-            if used[particle as usize].len() <= word {
-                used[particle as usize].resize(word + 1, 0);
+
+        if color < 128 {
+            let bit = 1u128 << color;
+            for &particle in item {
+                used[particle as usize] |= bit;
             }
-            used[particle as usize][word] |= bit;
+        } else {
+            let extra_color = color - 128;
+            let word = extra_color / 64;
+            let bit = 1u64 << (extra_color % 64);
+            for &particle in item {
+                let words = overflow.entry(particle as usize).or_default();
+                if words.len() <= word {
+                    words.resize(word + 1, 0);
+                }
+                words[word] |= bit;
+            }
         }
         colors.push(color as u32);
     }
