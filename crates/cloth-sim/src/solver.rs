@@ -755,6 +755,68 @@ mod tests {
     use glam::Vec2;
 
     #[test]
+    fn self_collision_separates_overlapping_non_adjacent_panels() {
+        let panel = GridPanel::new(0.1, 0.1, 1, 1);
+        let mut builder = ClothBuilder::new();
+        let a = builder.add_panel(&panel.mesh, Placement::at(Vec3::ZERO));
+        let b = builder.add_panel(&panel.mesh, Placement::at(Vec3::new(0.0, 0.0, 0.002)));
+        let mut params = SimParams::default();
+        params.gravity = Vec3::ZERO;
+        params.damping = 0.0;
+        params.substeps = 1;
+        params.iterations = 2;
+        params.thickness = 0.005;
+        params.friction = 0.0;
+        params.self_collision = true;
+        let mut sim = builder.build(params);
+
+        let before = (sim.pos[a.first as usize] - sim.pos[b.first as usize]).length();
+        assert!((before - 0.002).abs() < 1e-6);
+        sim.step(1.0 / 60.0);
+        let after = (sim.pos[a.first as usize] - sim.pos[b.first as usize]).length();
+        assert!(after >= 0.009, "sobreposição não foi resolvida: {after}");
+        assert!(sim.self_collision_contacts() > 0);
+        assert!(sim.is_finite());
+    }
+
+    #[test]
+    fn self_collision_excludes_neighbours_in_a_single_flat_panel() {
+        let panel = GridPanel::new(0.1, 0.1, 4, 4);
+        let mut builder = ClothBuilder::new();
+        builder.add_panel(&panel.mesh, Placement::at(Vec3::ZERO));
+        let mut params = SimParams::default();
+        params.gravity = Vec3::ZERO;
+        params.damping = 0.0;
+        params.substeps = 1;
+        params.iterations = 1;
+        params.thickness = 0.005;
+        params.self_collision = true;
+        let mut sim = builder.build(params);
+        sim.step(1.0 / 60.0);
+        assert_eq!(sim.self_collision_contacts(), 0);
+    }
+
+    #[test]
+    fn velocity_limit_recovers_from_extreme_particle_speed() {
+        let panel = GridPanel::new(0.1, 0.1, 2, 2);
+        let mut builder = ClothBuilder::new();
+        builder.add_panel(&panel.mesh, Placement::at(Vec3::ZERO));
+        let mut params = SimParams::default();
+        params.gravity = Vec3::ZERO;
+        params.damping = 0.0;
+        params.substeps = 1;
+        params.iterations = 1;
+        params.max_velocity = 2.0;
+        let mut sim = builder.build(params);
+        sim.vel[0] = Vec3::new(100.0, 0.0, 0.0);
+        sim.step(1.0 / 60.0);
+        assert!(sim.max_particle_speed() <= 2.001);
+        assert!(sim.stability_corrections() > 0);
+        assert!(sim.unstable_particle_count() > 0);
+        assert!(sim.is_finite());
+    }
+
+    #[test]
     fn per_panel_material_changes_mass_stretch_bend_and_collision_thickness() {
         let mesh = PanelMesh {
             uv: vec![
