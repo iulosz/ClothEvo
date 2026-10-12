@@ -1019,8 +1019,7 @@ impl ClothEvoApp {
                         self.seam_name = seam.name;
                     }
                 } else {
-                    self.seam_name.clear();
-                    self.seam_ease_m = 0.0;
+                    self.reset_seam_controls();
                 }
             }
 
@@ -1054,10 +1053,10 @@ impl ClothEvoApp {
 
             ui.horizontal(|ui| {
                 egui::ComboBox::from_id_salt("seam_a_start")
-                    .selected_text(format!("A início: {}", self.seam_a_segment + 1))
+                    .selected_text(format!("Segmentos {} a {}", self.seam_a_segment + 1, self.seam_a_segment_end))
                     .show_ui(ui, |ui| {
                         for index in 0..a_count {
-                            ui.selectable_value(&mut self.seam_a_segment, index, format!("Segmento {}", index + 1));
+                            ui.selectable_value(&mut self.seam_a_segment, index, format!("Segmentos {} a {}", index + 1, self.seam_a_segment_end));
                         }
                     });
                 egui::ComboBox::from_id_salt("seam_a_end")
@@ -1071,10 +1070,10 @@ impl ClothEvoApp {
             self.seam_a_segment_end = self.seam_a_segment_end.clamp(self.seam_a_segment + 1, a_count);
             ui.horizontal(|ui| {
                 egui::ComboBox::from_id_salt("seam_b_start")
-                    .selected_text(format!("B início: {}", self.seam_b_segment + 1))
+                    .selected_text(format!("Segmentos {} a {}", self.seam_b_segment + 1, self.seam_b_segment_end))
                     .show_ui(ui, |ui| {
                         for index in 0..b_count {
-                            ui.selectable_value(&mut self.seam_b_segment, index, format!("Segmento {}", index + 1));
+                            ui.selectable_value(&mut self.seam_b_segment, index, format!("Segmentos {} a {}", index + 1, self.seam_b_segment_end));
                         }
                     });
                 egui::ComboBox::from_id_salt("seam_b_end")
@@ -1088,7 +1087,7 @@ impl ClothEvoApp {
             self.seam_b_segment_end = self.seam_b_segment_end.clamp(self.seam_b_segment + 1, b_count);
 
             ui.horizontal(|ui| {
-                if ui.button("Borda selecionada → A").clicked() {
+                if ui.button("Usar borda selecionada como A").clicked() {
                     if let Some(PatternEditTarget::Edge { piece, segment, .. }) = self.selected_target {
                         self.seam_a_piece = piece.min(options.len() - 1);
                         self.seam_a_segment = segment;
@@ -1097,7 +1096,7 @@ impl ClothEvoApp {
                         self.pattern_message = "Selecione uma borda no canvas antes de defini-la como A.".into();
                     }
                 }
-                if ui.button("Borda selecionada → B").clicked() {
+                if ui.button("Usar borda selecionada como B").clicked() {
                     if let Some(PatternEditTarget::Edge { piece, segment, .. }) = self.selected_target {
                         self.seam_b_piece = piece.min(options.len() - 1);
                         self.seam_b_segment = segment;
@@ -1108,9 +1107,13 @@ impl ClothEvoApp {
                 }
             });
 
-            ui.text_edit_singleline(&mut self.seam_name);
-            ui.add(egui::Slider::new(&mut self.seam_ease_m, -0.50..=0.50)
-                .text("Diferença-alvo A − B (m)"));
+            ui.add(egui::TextEdit::singleline(&mut self.seam_name).hint_text("Nome da costura"));
+            let mut ease_cm = self.seam_ease_m * 100.0;
+            if ui.add(egui::Slider::new(&mut ease_cm, -50.0..=50.0)
+                .text("Diferença-alvo A − B (cm)")).changed()
+            {
+                self.seam_ease_m = ease_cm / 100.0;
+            }
             ui.weak("Folga assinada: positivo = A mais longa; negativo = B mais longa. O valor é aplicado à simulação.");
             ui.checkbox(&mut self.seam_a_reversed, "Inverter direção da borda A");
             ui.checkbox(&mut self.seam_b_reversed, "Inverter direção da borda B");
@@ -1133,6 +1136,15 @@ impl ClothEvoApp {
             ui.label(format!("Comprimento A: {:.1} cm · B: {:.1} cm", length_a * 100.0, length_b * 100.0));
             ui.label(format!("Diferença geométrica A − B: {:+.1} cm · alvo: {:+.1} cm",
                 difference * 100.0, self.seam_ease_m * 100.0));
+            let shortest = length_a.min(length_b);
+            let longest = length_a.max(length_b);
+            if shortest > 1.0e-9 && longest / shortest > 3.0 {
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 175, 80),
+                    format!("Aviso: a razão A/B é {:.2}:1 (acima de 3:1). Confira os segmentos; a costura continuará permitida.",
+                        longest / shortest),
+                );
+            }
             if (difference - self.seam_ease_m).abs() > 0.02 {
                 ui.colored_label(
                     egui::Color32::from_rgb(255, 190, 80),
@@ -1173,10 +1185,8 @@ impl ClothEvoApp {
                 } else if ui.button("Criar costura").clicked() {
                     self.add_seam_from_controls();
                 }
-                if ui.button("Nova").clicked() {
-                    self.selected_seam_id = None;
-                    self.seam_name.clear();
-                    self.seam_ease_m = 0.0;
+                if ui.button("Nova costura").clicked() {
+                    self.reset_seam_controls();
                 }
             });
             ui.label(format!("Costuras no projeto: {}", self.pattern_project.seams.len()));
@@ -2019,6 +2029,18 @@ impl ClothEvoApp {
         }
     }
 
+    fn reset_seam_controls(&mut self) {
+        self.selected_seam_id = None;
+        self.seam_name.clear();
+        self.seam_ease_m = 0.0;
+        self.seam_a_segment = 0;
+        self.seam_b_segment = 0;
+        self.seam_a_segment_end = 1;
+        self.seam_b_segment_end = 1;
+        self.seam_a_reversed = false;
+        self.seam_b_reversed = false;
+    }
+
     fn seam_edges_from_controls(&self) -> Result<(EdgeRef, EdgeRef), String> {
         let count = self.pattern_project.pieces.len();
         if count < 2 { return Err("Crie pelo menos duas peças antes de costurá-las.".into()); }
@@ -2444,32 +2466,54 @@ impl ClothEvoApp {
             }
         }
 
-        // Cada costura é sobreposta às duas bordas vinculadas. Vermelho indica que a diferença
-        // geométrica medida não coincide com a folga-alvo; amarelo marca a costura selecionada.
+        // As costuras são sobrepostas às bordas. Ao passar o cursor sobre qualquer lado da
+        // costura selecionada, ambos os lados ganham destaque, setas de direção e ligações entre piques.
+        let hovered_pointer = ui.input(|input| input.pointer.hover_pos());
         for seam in &self.pattern_project.seams {
             let la = edge_length_meters(&self.pattern_project, &seam.a);
             let lb = edge_length_meters(&self.pattern_project, &seam.b);
             let mismatch = (la - lb - seam.ease_meters).abs();
+            let selected = self.selected_seam_id == Some(seam.id);
+            let path_a = edge_path_points(&self.pattern_project, &seam.a, 24);
+            let path_b = edge_path_points(&self.pattern_project, &seam.b, 24);
+            let screen_a = path_a.iter().copied().map(to_screen).collect::<Vec<_>>();
+            let screen_b = path_b.iter().copied().map(to_screen).collect::<Vec<_>>();
+            let hovering_selected_seam = selected && response.hovered()
+                && hovered_pointer.map(|pointer| {
+                    distance_to_screen_path(pointer, &screen_a).min(distance_to_screen_path(pointer, &screen_b)) <= 9.0
+                }).unwrap_or(false);
             let color = if mismatch > 0.02 {
                 egui::Color32::from_rgb(255, 92, 92)
-            } else if self.selected_seam_id == Some(seam.id) {
-                egui::Color32::from_rgb(255, 205, 82)
+            } else if selected || hovering_selected_seam {
+                egui::Color32::from_rgb(255, 220, 110)
             } else {
                 egui::Color32::from_rgb(64, 221, 206)
             };
-            for edge in [&seam.a, &seam.b] {
-                let path = edge_path_points(&self.pattern_project, edge, 12);
+            for path in [&screen_a, &screen_b] {
                 for pair in path.windows(2) {
                     painter.line_segment(
-                        [to_screen(pair[0]), to_screen(pair[1])],
-                        egui::Stroke::new(if self.selected_seam_id == Some(seam.id) { 4.0 } else { 2.6 }, color),
+                        [pair[0], pair[1]],
+                        egui::Stroke::new(if selected || hovering_selected_seam { 4.0 } else { 2.6 }, color),
                     );
                 }
             }
-            if self.selected_seam_id == Some(seam.id) {
-                let center_a = edge_path_points(&self.pattern_project, &seam.a, 4);
-                let center_b = edge_path_points(&self.pattern_project, &seam.b, 4);
-                if let (Some(a), Some(b)) = (center_a.get(center_a.len()/2), center_b.get(center_b.len()/2)) {
+            if hovering_selected_seam {
+                draw_path_direction_arrow(&painter, &screen_a, color);
+                draw_path_direction_arrow(&painter, &screen_b, color);
+                for (progress_a, progress_b) in paired_notch_markers(&self.pattern_project, &seam.a, &seam.b) {
+                    if let (Some(a), Some(b)) = (
+                        point_on_path_at_progress(&path_a, progress_a),
+                        point_on_path_at_progress(&path_b, progress_b),
+                    ) {
+                        painter.line_segment(
+                            [to_screen(a), to_screen(b)],
+                            egui::Stroke::new(1.1, egui::Color32::from_rgba_unmultiplied(255, 225, 130, 180)),
+                        );
+                    }
+                }
+            }
+            if selected {
+                if let (Some(a), Some(b)) = (path_a.get(path_a.len()/2), path_b.get(path_b.len()/2)) {
                     painter.text(to_screen(*a), egui::Align2::CENTER_BOTTOM,
                         format!("C{} · {:.1} cm", seam.id, mismatch * 100.0),
                         egui::FontId::proportional(10.0), color);
@@ -2914,11 +2958,7 @@ fn edge_curve<'a>(project: &'a PatternProject, edge: &EdgeRef) -> Option<&'a Cur
 
 /// Mede a extensão real do intervalo de segmentos, inclusive para intervalos Bézier.
 fn edge_length_meters(project: &PatternProject, edge: &EdgeRef) -> f64 {
-    let Some(curve) = edge_curve(project, edge) else { return 0.0; };
-    let start = edge.segment_start as usize;
-    let end = (edge.segment_end as usize).min(curve.segments.len());
-    if start >= end { return 0.0; }
-    (start..end).map(|index| curve_segment_arc_length(curve, index, 1.0)).sum()
+    project.edge_length_meters(edge).unwrap_or(0.0)
 }
 
 /// Posição de cada pique como progresso de arco normalizado na borda de costura.
@@ -2978,6 +3018,54 @@ fn edge_path_points(project: &PatternProject, edge: &EdgeRef, steps: usize) -> V
     }
     if edge.reversed { points.reverse(); }
     points
+}
+
+fn point_on_path_at_progress(points: &[PatternPoint2], progress: f32) -> Option<PatternPoint2> {
+    if points.len() < 2 { return points.first().copied(); }
+    let lengths = points.windows(2).map(|pair| pair[0].distance(pair[1])).collect::<Vec<_>>();
+    let total: f64 = lengths.iter().sum();
+    if total <= 1.0e-9 { return points.first().copied(); }
+    let mut target = total * progress.clamp(0.0, 1.0) as f64;
+    for (index, length) in lengths.iter().copied().enumerate() {
+        if target <= length || index + 1 == lengths.len() {
+            let t = if length > 1.0e-9 { (target / length).clamp(0.0, 1.0) } else { 0.0 };
+            return Some(PatternPoint2::new(
+                points[index].x + (points[index + 1].x - points[index].x) * t,
+                points[index].y + (points[index + 1].y - points[index].y) * t,
+            ));
+        }
+        target -= length;
+    }
+    points.last().copied()
+}
+
+fn distance_to_screen_path(point: egui::Pos2, points: &[egui::Pos2]) -> f32 {
+    let mut best = f32::INFINITY;
+    for pair in points.windows(2) {
+        let delta = pair[1] - pair[0];
+        let length_sq = delta.length_sq();
+        let t = if length_sq > 1.0e-6 {
+            ((point - pair[0]).dot(delta) / length_sq).clamp(0.0, 1.0)
+        } else { 0.0 };
+        best = best.min(point.distance(pair[0] + delta * t));
+    }
+    best
+}
+
+fn draw_path_direction_arrow(
+    painter: &egui::Painter,
+    points: &[egui::Pos2],
+    color: egui::Color32,
+) {
+    if points.len() < 3 { return; }
+    let index = points.len() / 2;
+    let tip = points[index];
+    let direction = (points[index] - points[index - 1]).normalized();
+    if direction.length_sq() <= 1.0e-6 { return; }
+    let normal = egui::vec2(-direction.y, direction.x);
+    let base = tip - direction * 9.0;
+    painter.line_segment([tip, base + normal * 4.0], egui::Stroke::new(1.8, color));
+    painter.line_segment([tip, base - normal * 4.0], egui::Stroke::new(1.8, color));
 }
 
 fn translate_curve(curve: &mut Curve2D, dx: f64, dy: f64) {
