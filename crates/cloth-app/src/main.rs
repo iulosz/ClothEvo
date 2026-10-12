@@ -284,6 +284,7 @@ impl ClothEvoApp {
         self.seam_pairs = self.sim.seam_pairs();
         self.diverged = false;
         self.accumulator = 0.0;
+        self.last_step_ms = 0.0;
         self.upload_scene();
     }
 
@@ -390,6 +391,7 @@ impl ClothEvoApp {
                 self.playing = false;
                 self.accumulator = 0.0;
                 self.sim.step(FIXED_DT);
+                self.last_step_ms = self.sim.stats.step_ms;
                 self.seam_pairs = self.sim.seam_pairs();
                 if !self.sim.is_finite() {
                     self.playing = false;
@@ -401,6 +403,7 @@ impl ClothEvoApp {
                 self.playing = false;
                 self.diverged = false;
                 self.accumulator = 0.0;
+                self.last_step_ms = 0.0;
             }
         });
         if self.diverged {
