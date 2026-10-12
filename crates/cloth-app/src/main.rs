@@ -1088,6 +1088,122 @@ impl ClothEvoApp {
         }
     }
 
+    fn set_symmetry_axis_to_min_x(&mut self) {
+        let Some(piece) = self.pattern_project.pieces.get(self.selected_piece) else {
+            self.pattern_message = "Crie ou selecione um molde primeiro.".into();
+            return;
+        };
+        let points = sample_curve(&piece.outline, 24);
+        if let Some(min_x) = points.iter().map(|p| p.x).reduce(f64::min) {
+            self.pattern_symmetry_axis_x = min_x;
+            self.pattern_message = format!("Eixo de simetria definido em X = {min_x:.3} m.");
+        }
+    }
+
+    fn create_mirrored_pair(&mut self) {
+        if !self.pattern_symmetry_axis_x.is_finite() {
+            self.pattern_message = "O eixo de simetria precisa ser um valor finito.".into();
+            return;
+        }
+        let Some(source) = self.pattern_project.pieces.get(self.selected_piece).cloned() else {
+            self.pattern_message = "Crie ou selecione um molde primeiro.".into();
+            return;
+        };
+        if self.pattern_project.symmetry_links.iter().any(|link| {
+            link.piece_a_id == source.id || link.piece_b_id == source.id
+        }) {
+            self.pattern_message = "O molde selecionado já possui um par vinculado.".into();
+            return;
+        }
+
+        let before = self.editor_snapshot();
+        let new_id = self.pattern_project.pieces.iter().map(|piece| piece.id)
+            .max().unwrap_or(0) + 1;
+        let mirrored_name = format!("{} (espelho)", source.name);
+        let mirrored = match mirror_pattern_piece(
+            &source, new_id, mirrored_name, self.pattern_symmetry_axis_x,
+        ) {
+            Ok(piece) => piece,
+            Err(error) => { self.pattern_message = error; return; }
+        };
+
+        let mut project = self.pattern_project.clone();
+        project.pieces.push(mirrored);
+        project.symmetry_links.push(SymmetryLink {
+            piece_a_id: source.id,
+            piece_b_id: new_id,
+            axis_x: self.pattern_symmetry_axis_x,
+        });
+
+        // Duplicate constraints only when both ends have a known symmetric counterpart.
+        let original_seams = project.seams.clone();
+        let mut next_seam_id = project.seams.iter().map(|seam| seam.id).max().unwrap_or(0) + 1;
+        for seam in original_seams {
+            let Some(a_mate) = symmetry_counterpart_id(&project, seam.a.piece_id) else { continue; };
+            let Some(b_mate) = symmetry_counterpart_id(&project, seam.b.piece_id) else { continue; };
+            if a_mate == seam.a.piece_id && b_mate == seam.b.piece_id { continue; }
+            let mut mirrored_seam = seam.clone();
+            mirrored_seam.id = next_seam_id;
+            mirrored_seam.name = format!("{} (espelho)", seam.name);
+            mirrored_seam.a.piece_id = a_mate;
+            mirrored_seam.b.piece_id = b_mate;
+            project.seams.push(mirrored_seam);
+            next_seam_id += 1;
+        }
+
+        if let Err(error) = project.validate() {
+            self.pattern_message = format!("Não foi possível criar o par espelhado: {error}");
+            return;
+        }
+        self.pattern_project = project;
+        self.selected_piece = self.pattern_project.pieces.len() - 1;
+        self.selected_target = Some(PatternEditTarget::Piece { piece: self.selected_piece });
+        self.pattern_fit_pending = true;
+        self.pattern_message = format!(
+            "Par espelhado criado para '{}'; edições de geometria serão sincronizadas nos dois sentidos.",
+            source.name
+        );
+        self.remember_pattern_change(before);
+    }
+
+    fn unlink_selected_symmetry(&mut self) {
+        let Some(piece) = self.pattern_project.pieces.get(self.selected_piece) else { return; };
+        let id = piece.id;
+        let before = self.editor_snapshot();
+        let old_len = self.pattern_project.symmetry_links.len();
+        self.pattern_project.symmetry_links.retain(|link| {
+            link.piece_a_id != id && link.piece_b_id != id
+        });
+        if self.pattern_project.symmetry_links.len() == old_len {
+            self.pattern_message = "O molde selecionado não possui vínculo de simetria.".into();
+            return;
+        }
+        self.pattern_message = "Par desvinculado. Os dois moldes permanecem na cena como peças independentes.".into();
+        self.remember_pattern_change(before);
+    }
+
+    fn sync_symmetric_mate(&mut self, piece_id: u64) {
+        let Some(link) = self.pattern_project.symmetry_links.iter()
+            .find(|link| link.piece_a_id == piece_id || link.piece_b_id == piece_id)
+            .cloned() else { return; };
+        let mate_id = if link.piece_a_id == piece_id { link.piece_b_id } else { link.piece_a_id };
+        let Some(source) = self.pattern_project.pieces.iter().find(|piece| piece.id == piece_id).cloned() else {
+            return;
+        };
+        let Some(target_name) = self.pattern_project.pieces.iter()
+            .find(|piece| piece.id == mate_id).map(|piece| piece.name.clone()) else {
+            return;
+        };
+        match mirror_pattern_piece(&source, mate_id, target_name, link.axis_x) {
+            Ok(mirrored) => {
+                if let Some(target) = self.pattern_project.pieces.iter_mut().find(|piece| piece.id == mate_id) {
+                    *target = mirrored;
+                }
+            }
+            Err(error) => self.pattern_message = format!("Falha ao sincronizar a simetria: {error}"),
+        }
+    }
+
     fn create_rectangle_primitive(&mut self) {
         let (x, y) = self.primitive_origin();
         match rectangle(
