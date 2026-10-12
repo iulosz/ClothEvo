@@ -1907,6 +1907,244 @@ fn translate_curve(curve: &mut Curve2D, dx: f64, dy: f64) {
     }
 }
 
+fn dense_curve_samples(curve: &Curve2D, steps: usize) -> Vec<PatternPoint2> {
+    let steps = steps.max(1);
+    let mut points = vec![curve.start];
+    let mut start = curve.start;
+    for segment in &curve.segments {
+        for step in 1..=steps {
+            let t = step as f64 / steps as f64;
+            let point = match segment {
+                CurveSegment::Line { to } => PatternPoint2::new(
+                    start.x + (to.x - start.x) * t,
+                    start.y + (to.y - start.y) * t,
+                ),
+                CurveSegment::CubicBezier { control1, control2, to } => {
+                    let mt = 1.0 - t;
+                    let a = mt * mt * mt;
+                    let b = 3.0 * mt * mt * t;
+                    let c = 3.0 * mt * t * t;
+                    let d = t * t * t;
+                    PatternPoint2::new(
+                        a * start.x + b * control1.x + c * control2.x + d * to.x,
+                        a * start.y + b * control1.y + c * control2.y + d * to.y,
+                    )
+                }
+            };
+            points.push(point);
+        }
+        start = segment.endpoint();
+    }
+    points
+}
+
+fn classify_detail_point(
+    point: PatternPoint2,
+    polygon_a: &[PatternPoint2],
+    polygon_b: &[PatternPoint2],
+) -> Result<usize, String> {
+    match (
+        point_in_polygon(point, polygon_a),
+        point_in_polygon(point, polygon_b),
+    ) {
+        (true, false) => Ok(0),
+        (false, true) => Ok(1),
+        (true, true) => Err("um detalhe toca a linha de corte; separe-o antes de cortar".into()),
+        (false, false) => Err("um detalhe está fora das duas novas peças".into()),
+    }
+}
+
+fn classify_points_side(
+    points: &[PatternPoint2],
+    polygon_a: &[PatternPoint2],
+    polygon_b: &[PatternPoint2],
+) -> Result<usize, String> {
+    let mut chosen = None;
+    for point in points {
+        let side = classify_detail_point(*point, polygon_a, polygon_b)?;
+        if chosen.is_some_and(|previous| previous != side) {
+            return Err("o corte atravessa um detalhe interno; divida ou reposicione esse detalhe antes de cortar".into());
+        }
+        chosen = Some(side);
+    }
+    chosen.ok_or_else(|| "não foi possível determinar a peça que contém o detalhe".to_string())
+}
+
+fn classify_curve_side(
+    curve: &Curve2D,
+    polygon_a: &[PatternPoint2],
+    polygon_b: &[PatternPoint2],
+) -> Result<usize, String> {
+    classify_points_side(&dense_curve_samples(curve, 24), polygon_a, polygon_b)
+}
+
+fn assign_curve_to_side(
+    curve: Curve2D,
+    side: usize,
+    first: &mut Vec<Curve2D>,
+    second: &mut Vec<Curve2D>,
+) {
+    if side == 0 { first.push(curve); } else { second.push(curve); }
+}
+
+fn split_piece_metadata(
+    source: &PatternPiece,
+    first: &mut PatternPiece,
+    second: &mut PatternPiece,
+    cut: &CutAndSewResult,
+    polygon_a: &[PatternPoint2],
+    polygon_b: &[PatternPoint2],
+) -> Result<Option<usize>, String> {
+    first.internal_lines.clear();
+    second.internal_lines.clear();
+    first.fold_lines.clear();
+    second.fold_lines.clear();
+    first.pleats.clear();
+    second.pleats.clear();
+    first.darts.clear();
+    second.darts.clear();
+    first.notches.clear();
+    second.notches.clear();
+    first.holes.clear();
+    second.holes.clear();
+    first.annotations.clear();
+    second.annotations.clear();
+    first.grain_line = None;
+    second.grain_line = None;
+    first.sewing_line = None;
+    second.sewing_line = None;
+
+    for line in &source.internal_lines {
+        let side = classify_curve_side(line, polygon_a, polygon_b)
+            .map_err(|error| format!("linha interna: {error}"))?;
+        assign_curve_to_side(line.clone(), side, &mut first.internal_lines, &mut second.internal_lines);
+    }
+    for fold in &source.fold_lines {
+        let side = classify_curve_side(&fold.curve, polygon_a, polygon_b)
+            .map_err(|error| format!("linha de dobra: {error}"))?;
+        if side == 0 { first.fold_lines.push(fold.clone()); }
+        else { second.fold_lines.push(fold.clone()); }
+    }
+    for pleat in &source.pleats {
+        let side = classify_curve_side(&pleat.axis, polygon_a, polygon_b)
+            .map_err(|error| format!("prega: {error}"))?;
+        if side == 0 { first.pleats.push(pleat.clone()); }
+        else { second.pleats.push(pleat.clone()); }
+    }
+
+    if let Some(grain) = &source.grain_line {
+        let line = Curve2D::polyline(&[grain.start, grain.end], false)
+            .map_err(|_| "linha de fio inválida".to_string())?;
+        let side = classify_curve_side(&line, polygon_a, polygon_b)
+            .map_err(|error| format!("linha de fio: {error}"))?;
+        if side == 0 { first.grain_line = Some(grain.clone()); }
+        else { second.grain_line = Some(grain.clone()); }
+    }
+
+    let sewing_side = if let Some(line) = &source.sewing_line {
+        let side = classify_curve_side(line, polygon_a, polygon_b)
+            .map_err(|error| format!("linha de costura: {error}"))?;
+        if side == 0 { first.sewing_line = Some(line.clone()); }
+        else { second.sewing_line = Some(line.clone()); }
+        Some(side)
+    } else { None };
+
+    for dart in &source.darts {
+        let leg_a = Curve2D::polyline(&[dart.apex, dart.leg_a], false)
+            .map_err(|_| "perna A da pence inválida".to_string())?;
+        let leg_b = Curve2D::polyline(&[dart.apex, dart.leg_b], false)
+            .map_err(|_| "perna B da pence inválida".to_string())?;
+        let side_a = classify_curve_side(&leg_a, polygon_a, polygon_b)
+            .map_err(|error| format!("pence: {error}"))?;
+        let side_b = classify_curve_side(&leg_b, polygon_a, polygon_b)
+            .map_err(|error| format!("pence: {error}"))?;
+        if side_a != side_b {
+            return Err("o corte atravessa uma pence; feche ou recrie a pence antes de cortar".into());
+        }
+        if side_a == 0 { first.darts.push(dart.clone()); }
+        else { second.darts.push(dart.clone()); }
+    }
+
+    for notch in &source.notches {
+        let source_index = notch.segment_index as usize;
+        let fragments = cut.source_segment_fragments.get(source_index)
+            .ok_or_else(|| "um entalhe referencia um segmento inexistente".to_string())?;
+        let matches = fragments.iter().filter(|fragment| {
+            notch.t >= fragment.t_start - 1.0e-8 && notch.t <= fragment.t_end + 1.0e-8
+        }).collect::<Vec<&SourceSegmentFragment>>();
+        if matches.len() != 1 {
+            return Err("um entalhe está exatamente sobre a linha de corte; mova-o antes de cortar".into());
+        }
+        let fragment = matches[0];
+        let span = fragment.t_end - fragment.t_start;
+        let mut moved = notch.clone();
+        moved.segment_index = fragment.new_segment_index as u32;
+        moved.t = if span.abs() <= 1.0e-12 { 0.0 }
+            else { ((notch.t - fragment.t_start) / span).clamp(0.0, 1.0) };
+        if fragment.piece_index == 0 { first.notches.push(moved); }
+        else { second.notches.push(moved); }
+    }
+
+    for hole in &source.holes {
+        let side = classify_detail_point(hole.center, polygon_a, polygon_b)
+            .map_err(|error| format!("furo: {error}"))?;
+        if side == 0 { first.holes.push(hole.clone()); }
+        else { second.holes.push(hole.clone()); }
+    }
+    for annotation in &source.annotations {
+        let side = classify_detail_point(annotation.position, polygon_a, polygon_b)
+            .map_err(|error| format!("anotação: {error}"))?;
+        if side == 0 { first.annotations.push(annotation.clone()); }
+        else { second.annotations.push(annotation.clone()); }
+    }
+
+    Ok(sewing_side)
+}
+
+fn remap_edge_after_cut(
+    edge: &mut EdgeRef,
+    mapping: &[Vec<SourceSegmentFragment>],
+    first_id: u64,
+    second_id: u64,
+) -> Result<(), String> {
+    let start = edge.segment_start as usize;
+    let end = edge.segment_end as usize;
+    if start >= end || end > mapping.len() {
+        return Err("uma costura existente referencia um intervalo inválido".into());
+    }
+    let mut side = None;
+    let mut first_new_index: Option<usize> = None;
+    for source_index in start..end {
+        let fragments = &mapping[source_index];
+        if fragments.len() != 1 {
+            return Err(format!(
+                "a costura existente usa o segmento {} que foi dividido pelo corte; remova ou refaça essa costura primeiro.",
+                source_index + 1
+            ));
+        }
+        let fragment = &fragments[0];
+        if fragment.t_start.abs() > 1.0e-8 || (fragment.t_end - 1.0).abs() > 1.0e-8 {
+            return Err(format!("a costura existente usa o segmento {} parcialmente cortado.", source_index + 1));
+        }
+        if side.is_some_and(|previous| previous != fragment.piece_index) {
+            return Err("a costura existente atravessaria as duas novas peças; reconfigure essa costura antes do corte".into());
+        }
+        side = Some(fragment.piece_index);
+        if let Some(first_index) = first_new_index {
+            if fragment.new_segment_index != first_index + source_index - start {
+                return Err("o intervalo da costura deixaria de ser contínuo depois do corte; refaça essa costura após dividir".into());
+            }
+        } else {
+            first_new_index = Some(fragment.new_segment_index);
+        }
+    }
+    let side = side.ok_or_else(|| "intervalo de costura vazio".to_string())?;
+    edge.piece_id = if side == 0 { first_id } else { second_id };
+    edge.segment_start = first_new_index.unwrap() as u32;
+    edge.segment_end = edge.segment_start + (end - start) as u32;
+    Ok(())
+}
+
 fn translate_piece(piece: &mut PatternPiece, dx: f64, dy: f64) {
     translate_curve(&mut piece.outline, dx, dy);
     if let Some(curve) = &mut piece.sewing_line { translate_curve(curve, dx, dy); }
