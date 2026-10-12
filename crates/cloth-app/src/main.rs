@@ -775,6 +775,260 @@ impl ClothEvoApp {
         self.apply_placement_translation(piece_id, delta);
     }
 
+    /// Centro y bases del gizmo a partir de la transformación real del panel.
+    fn placement_gizmo_axes(&self, piece_id: u64) -> Option<(Vec3, [Vec3; 3], [Vec3; 3])> {
+        let range = self.placement_ranges.iter().find(|range| range.piece_id == piece_id)?;
+        let positions = self.sim.pos.get(range.first..range.end)?;
+        if positions.is_empty() { return None; }
+        let center = positions.iter().fold(Vec3::ZERO, |sum, position| sum + *position)
+            / positions.len() as f32;
+        let piece = self.pattern_project.pieces.iter().find(|piece| piece.id == piece_id)?;
+        let [x, y, z] = piece.assembly.rotation_degrees.map(|degrees| (degrees as f32).to_radians());
+        let qx = Quat::from_rotation_x(x);
+        let qy = Quat::from_rotation_y(y);
+        let rotation = range.base_rotation * Quat::from_euler(EulerRot::XYZ, x, y, z);
+        let object_axes = [
+            (rotation * Vec3::X).normalize_or_zero(),
+            (rotation * Vec3::Y).normalize_or_zero(),
+            (rotation * Vec3::Z).normalize_or_zero(),
+        ];
+        // Eixos incrementais XYZ: cada aro coincide com o componente Euler que será alterado.
+        let rotation_axes = [
+            (range.base_rotation * Vec3::X).normalize_or_zero(),
+            (range.base_rotation * (qx * Vec3::Y)).normalize_or_zero(),
+            (range.base_rotation * (qx * qy * Vec3::Z)).normalize_or_zero(),
+        ];
+        Some((center, object_axes, rotation_axes))
+    }
+
+    fn hit_test_placement_gizmo(
+        &self,
+        pointer: egui::Pos2,
+        rect: egui::Rect,
+        view_proj: glam::Mat4,
+    ) -> Option<PlacementGizmoDrag> {
+        let piece_id = self.selected_placement_piece?;
+        let (center_world, object_axes, rotation_axes) = self.placement_gizmo_axes(piece_id)?;
+        let screen_center = project_world_to_screen(center_world, view_proj, rect)?.0;
+        let mode = self.gizmo_mode;
+
+        if matches!(mode, GizmoMode::Rotate | GizmoMode::Transform) {
+            let radius = if mode == GizmoMode::Transform {
+                GIZMO_ROTATE_RADIUS * 0.84
+            } else {
+                GIZMO_ROTATE_RADIUS
+            };
+            let mut best: Option<(f32, usize)> = None;
+            for (axis_index, axis) in rotation_axes.iter().enumerate() {
+                let ring = projected_rotation_ring(center_world, *axis, radius, view_proj, rect);
+                let distance = ring.windows(2)
+                    .map(|pair| point_segment_distance(pointer, pair[0], pair[1]).0)
+                    .fold(f32::INFINITY, f32::min);
+                if distance <= 8.0 && best.map_or(true, |(d, _)| distance < d) {
+                    best = Some((distance, axis_index));
+                }
+            }
+            if let Some((_, axis)) = best {
+                return Some(PlacementGizmoDrag {
+                    piece_id,
+                    axis,
+                    action: GizmoAction::Rotate,
+                    axis_world: rotation_axes[axis],
+                    screen_axis: egui::Vec2::ZERO,
+                    screen_center,
+                    pixels_per_meter: 1.0,
+                    last_pointer: pointer,
+                });
+            }
+        }
+
+        if matches!(mode, GizmoMode::Scale | GizmoMode::Transform) {
+            for (axis_index, axis) in object_axes.iter().enumerate() {
+                let length = if mode == GizmoMode::Transform { GIZMO_SCALE_LENGTH } else { GIZMO_SCALE_LENGTH };
+                let Some((endpoint, _)) = project_world_to_screen(
+                    center_world + *axis * length, view_proj, rect,
+                ) else { continue; };
+                let screen_delta = endpoint - screen_center;
+                let screen_length = screen_delta.length();
+                if screen_length <= 1.0 { continue; }
+                let screen_axis = screen_delta / screen_length;
+                let (distance, t) = point_segment_distance(pointer, screen_center, endpoint);
+                let on_handle = pointer.distance(endpoint) <= 12.0;
+                let in_scale_region = mode != GizmoMode::Transform || t >= 0.54;
+                if on_handle || (distance <= 7.5 && in_scale_region) {
+                    return Some(PlacementGizmoDrag {
+                        piece_id,
+                        axis: axis_index,
+                        action: GizmoAction::Scale,
+                        axis_world: *axis,
+                        screen_axis,
+                        screen_center,
+                        pixels_per_meter: screen_length / length,
+                        last_pointer: pointer,
+                    });
+                }
+            }
+        }
+
+        if matches!(mode, GizmoMode::Move | GizmoMode::Transform) {
+            let length = if mode == GizmoMode::Transform { GIZMO_MOVE_LENGTH } else { 0.58 };
+            let mut best: Option<(f32, PlacementGizmoDrag)> = None;
+            for (axis_index, axis) in object_axes.iter().enumerate() {
+                let Some((endpoint, _)) = project_world_to_screen(
+                    center_world + *axis * length, view_proj, rect,
+                ) else { continue; };
+                let screen_delta = endpoint - screen_center;
+                let screen_length = screen_delta.length();
+                if screen_length <= 1.0 { continue; }
+                let (distance, t) = point_segment_distance(pointer, screen_center, endpoint);
+                if distance <= 8.5 && t >= 0.13 {
+                    let drag = PlacementGizmoDrag {
+                        piece_id,
+                        axis: axis_index,
+                        action: GizmoAction::Move,
+                        axis_world: *axis,
+                        screen_axis: screen_delta / screen_length,
+                        screen_center,
+                        pixels_per_meter: screen_length / length,
+                        last_pointer: pointer,
+                    };
+                    if best.as_ref().map_or(true, |(d, _)| distance < *d) {
+                        best = Some((distance, drag));
+                    }
+                }
+            }
+            if let Some((_, drag)) = best { return Some(drag); }
+        }
+        None
+    }
+
+    fn apply_placement_rotation_delta(
+        &mut self,
+        piece_id: u64,
+        axis: usize,
+        axis_world: Vec3,
+        degrees: f32,
+    ) {
+        if axis >= 3 || !degrees.is_finite() || !axis_world.is_finite()
+            || axis_world.length_squared() <= 1.0e-10
+        {
+            return;
+        }
+        let Some(range) = self.placement_ranges.iter().find(|range| range.piece_id == piece_id).copied()
+        else { return; };
+        let Some((center, _, _)) = self.placement_gizmo_axes(piece_id) else { return; };
+        let rotation = Quat::from_axis_angle(axis_world.normalize(), degrees.to_radians());
+        if !self.sim.rotate_particles(range.first, range.end, center, rotation) {
+            return;
+        }
+        if let Some(piece) = self.pattern_project.pieces.iter_mut().find(|piece| piece.id == piece_id) {
+            piece.assembly.rotation_degrees[axis] =
+                (piece.assembly.rotation_degrees[axis] + degrees as f64).rem_euclid(360.0);
+        }
+    }
+
+    fn apply_placement_scale_factor(&mut self, piece_id: u64, axis: usize, factor: f32) {
+        if axis >= 3 || !factor.is_finite() || factor <= 0.0 { return; }
+        let Some(range) = self.placement_ranges.iter().find(|range| range.piece_id == piece_id).copied()
+        else { return; };
+        let Some((center, object_axes, _)) = self.placement_gizmo_axes(piece_id) else { return; };
+        let scaled_axes: &[usize] = if axis == 2 { &[0, 1] } else { &[axis] };
+        for &scale_axis in scaled_axes {
+            let old_scale = self.pattern_project.pieces.iter()
+                .find(|piece| piece.id == piece_id)
+                .map(|piece| piece.assembly.scale[scale_axis] as f32)
+                .unwrap_or(1.0)
+                .clamp(0.1, 10.0);
+            let new_scale = (old_scale * factor).clamp(0.1, 10.0);
+            let applied_factor = new_scale / old_scale;
+            if (applied_factor - 1.0).abs() <= 1.0e-6 { continue; }
+            if self.sim.scale_particles_axis(
+                range.first, range.end, center, object_axes[scale_axis], applied_factor,
+            ) {
+                if let Some(piece) = self.pattern_project.pieces.iter_mut()
+                    .find(|piece| piece.id == piece_id)
+                {
+                    piece.assembly.scale[scale_axis] = new_scale as f64;
+                }
+            }
+        }
+    }
+
+    fn draw_placement_gizmo(
+        &self,
+        painter: &egui::Painter,
+        rect: egui::Rect,
+        view_proj: glam::Mat4,
+    ) {
+        if self.workspace != WorkspaceMode::Placement || !self.using_pattern_sim { return; }
+        let Some(piece_id) = self.selected_placement_piece else { return; };
+        let Some((center_world, object_axes, rotation_axes)) = self.placement_gizmo_axes(piece_id)
+        else { return; };
+        let Some((center, _)) = project_world_to_screen(center_world, view_proj, rect) else { return; };
+        let mode = self.gizmo_mode;
+        let show_move = matches!(mode, GizmoMode::Move | GizmoMode::Transform);
+        let show_rotate = matches!(mode, GizmoMode::Rotate | GizmoMode::Transform);
+        let show_scale = matches!(mode, GizmoMode::Scale | GizmoMode::Transform);
+
+        if show_rotate {
+            let radius = if mode == GizmoMode::Transform {
+                GIZMO_ROTATE_RADIUS * 0.84
+            } else {
+                GIZMO_ROTATE_RADIUS
+            };
+            for (axis_index, axis) in rotation_axes.iter().enumerate() {
+                let ring = projected_rotation_ring(center_world, *axis, radius, view_proj, rect);
+                for pair in ring.windows(2) {
+                    painter.line_segment(
+                        [pair[0], pair[1]],
+                        egui::Stroke::new(2.4, gizmo_axis_color(axis_index)),
+                    );
+                }
+            }
+        }
+
+        if show_move || show_scale {
+            for (axis_index, axis) in object_axes.iter().enumerate() {
+                let color = gizmo_axis_color(axis_index);
+                let move_length = if mode == GizmoMode::Transform { GIZMO_MOVE_LENGTH } else { 0.58 };
+                let scale_length = GIZMO_SCALE_LENGTH;
+                let draw_length = if show_scale { scale_length } else { move_length };
+                let Some((end, _)) = project_world_to_screen(
+                    center_world + *axis * draw_length, view_proj, rect,
+                ) else { continue; };
+                if show_move && show_scale {
+                    if let Some((move_end, _)) = project_world_to_screen(
+                        center_world + *axis * move_length, view_proj, rect,
+                    ) {
+                        painter.line_segment([center, end], egui::Stroke::new(1.7, color.gamma_multiply(0.62)));
+                        painter.line_segment([center, move_end], egui::Stroke::new(3.2, color));
+                        draw_gizmo_arrow_head(painter, move_end, move_end - center, color);
+                    }
+                    let scale_rect = egui::Rect::from_center_size(end, egui::vec2(10.0, 10.0));
+                    painter.rect_filled(scale_rect, 1.5, color);
+                    painter.rect_stroke(scale_rect, 1.5, egui::Stroke::new(1.0, egui::Color32::WHITE), egui::StrokeKind::Inside);
+                } else if show_scale {
+                    painter.line_segment([center, end], egui::Stroke::new(2.5, color));
+                    let scale_rect = egui::Rect::from_center_size(end, egui::vec2(11.0, 11.0));
+                    painter.rect_filled(scale_rect, 1.5, color);
+                    painter.rect_stroke(scale_rect, 1.5, egui::Stroke::new(1.0, egui::Color32::WHITE), egui::StrokeKind::Inside);
+                } else {
+                    painter.line_segment([center, end], egui::Stroke::new(3.2, color));
+                    draw_gizmo_arrow_head(painter, end, end - center, color);
+                    painter.text(
+                        end + (end - center).normalized() * 8.0,
+                        egui::Align2::CENTER_CENTER,
+                        ["X", "Y", "Z"][axis_index],
+                        egui::FontId::proportional(12.0),
+                        color,
+                    );
+                }
+            }
+        }
+        painter.circle_filled(center, 4.5, egui::Color32::WHITE);
+        painter.circle_stroke(center, 6.5, egui::Stroke::new(1.5, egui::Color32::from_gray(30)));
+    }
+
     fn rotate_selected_placement(&mut self, axis: usize, degrees: f64) {
         let Some(id) = self.selected_placement_piece else { return; };
         let before = self.editor_snapshot();
@@ -2996,6 +3250,7 @@ impl ClothEvoApp {
             handle: cloth_sim::PanelHandle,
             ranges: Vec<(usize, usize)>,
             boundary_count: usize,
+            base_rotation: Quat,
         }
         let mut infos: Vec<PieceBuildInfo> = Vec::new();
         let piece_count = prepared.len();
@@ -3012,8 +3267,15 @@ impl ClothEvoApp {
             let center_x = (mesh_min_x + mesh_max_x) * 0.5;
             let center_y = (mesh_min_y + mesh_max_y) * 0.5;
 
+            let panel_scale = assembly.scale.map(|value| value as f32);
+            if panel_scale.iter().any(|value| !value.is_finite() || *value <= 0.0 || *value > 100.0) {
+                return Err(format!("Escala inválida no molde '{}'.", name));
+            }
             let uv = mesh.vertices.iter()
-                .map(|p| Vec2::new((p.x - center_x) as f32, (p.y - center_y) as f32))
+                .map(|p| Vec2::new(
+                    ((p.x - center_x) as f32) * panel_scale[0],
+                    ((p.y - center_y) as f32) * panel_scale[1],
+                ))
                 .collect();
             let panel_mesh = PanelMesh { uv, triangles: mesh.triangles };
             // Distribui o layout 2D pela semicircunferência frontal do colisor corporal:
@@ -3037,7 +3299,8 @@ impl ClothEvoApp {
                 assembly.rotation_degrees[1].to_radians() as f32,
                 assembly.rotation_degrees[2].to_radians() as f32,
             );
-            let rotation = Quat::from_rotation_y(angle) * local_rotation;
+            let base_rotation = Quat::from_rotation_y(angle);
+            let rotation = base_rotation * local_rotation;
             let material = PanelMaterial {
                 density_kg_m2: fabric.density_kg_m2 as f32,
                 stretch_warp_n_m: fabric.stretch_warp_n_m as f32,
@@ -3077,6 +3340,7 @@ impl ClothEvoApp {
                 handle,
                 ranges,
                 boundary_count: mesh.boundary_vertex_count,
+                base_rotation,
             });
         }
 
@@ -3109,6 +3373,7 @@ impl ClothEvoApp {
             first: info.handle.first as usize,
             end: (info.handle.first + info.handle.count) as usize,
             boundary_count: info.boundary_count,
+            base_rotation: info.base_rotation,
         }).collect();
         self.sim = builder.build(self.sim.params.clone());
         self.seam_pairs = self.sim.seam_pairs();
