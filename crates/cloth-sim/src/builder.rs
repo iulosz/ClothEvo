@@ -148,10 +148,40 @@ impl ClothBuilder {
         ease_meters: f32,
         notch_markers: &[(f32, f32)],
     ) {
+        self.sew_internal(edge_a, edge_b, ease_meters, notch_markers, false);
+    }
+
+    /// Variante para contornos reamostrados por uma lista comum de frações de comprimento
+    /// de arco. Quando os lados possuem a mesma quantidade de nós, o vínculo é índice a índice:
+    /// não se usa vizinho mais próximo, evitando muitos-para-um e pares cruzados.
+    pub fn sew_synchronized_with_markers(
+        &mut self,
+        edge_a: &[u32],
+        edge_b: &[u32],
+        ease_meters: f32,
+        notch_markers: &[(f32, f32)],
+    ) {
+        self.sew_internal(edge_a, edge_b, ease_meters, notch_markers, true);
+    }
+
+    fn sew_internal(
+        &mut self,
+        edge_a: &[u32],
+        edge_b: &[u32],
+        ease_meters: f32,
+        notch_markers: &[(f32, f32)],
+        synchronized: bool,
+    ) {
         if edge_a.len() < 2 || edge_b.len() < 2 || !ease_meters.is_finite() {
             return;
         }
-        let mut pairs = pair_by_arc_length(edge_a, edge_b, &self.uv);
+        let mut pairs = if synchronized && edge_a.len() == edge_b.len() {
+            edge_a.iter().copied().zip(edge_b.iter().copied()).collect()
+        } else {
+            // Fallback compatível com callers externos que não passaram pelo sincronizador
+            // do Pattern Studio.
+            pair_by_arc_length(edge_a, edge_b, &self.uv)
+        };
         let ta = edge_arc_params(edge_a, &self.uv);
         let tb = edge_arc_params(edge_b, &self.uv);
         for &(marker_a, marker_b) in notch_markers {
