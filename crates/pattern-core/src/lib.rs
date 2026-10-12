@@ -903,8 +903,10 @@ fn notches_for_segment(piece: &PatternPiece, segment: usize) -> Vec<f64> {
 fn edge_was_sewn(project: &PatternProject, piece_id: PieceId, curve: BoundaryCurve, segment: u32) -> bool {
     project.seams.iter().any(|seam| seam.sides_a.iter().chain(seam.sides_b.iter()).any(|edge| {
         if edge.piece_id != piece_id || edge.curve != curve { return false; }
-        let scalar = segment as f64 + 0.5;
-        edge.start_position() <= scalar && scalar < edge.end_position()
+        let segment_start = segment as f64;
+        let segment_end = segment_start + 1.0;
+        segment_start < edge.end_position() - 1.0e-9
+            && edge.start_position() < segment_end - 1.0e-9
     }))
 }
 
