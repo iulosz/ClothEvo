@@ -5,7 +5,7 @@ use glam::{Vec2, Vec3};
 use crate::collider::Collider;
 use crate::coloring::{greedy_coloring, group_by_color};
 use crate::mesh::{PanelMesh, Placement};
-use crate::params::{ConstraintKind, SimParams};
+use crate::params::{ConstraintKind, PanelMaterial, SimParams};
 use crate::solver::{BendConstraint, DistanceConstraint, Simulation};
 
 /// Referência a um painel já adicionado: converte índices locais do painel em globais.
@@ -37,6 +37,8 @@ pub struct ClothBuilder {
     pinned: Vec<u32>,
     seams: Vec<(u32, u32)>,
     colliders: Vec<Collider>,
+    /// Uma entrada por painel adicionado. None preserva os parâmetros globais para cenas antigas.
+    panel_materials: Vec<Option<PanelMaterial>>,
 }
 
 impl ClothBuilder {
@@ -49,16 +51,49 @@ impl ClothBuilder {
         self.add_panel_with_grain(mesh, placement, Vec2::Y)
     }
 
-    /// Como [`add_panel`](Self::add_panel), mas com direção do fio arbitrária (em coordenadas 2D do painel).
+    /// Adiciona um painel com direção do fio personalizada, mantendo os parâmetros globais.
     pub fn add_panel_with_grain(
         &mut self,
         mesh: &PanelMesh,
         placement: Placement,
         grain: Vec2,
     ) -> PanelHandle {
+        self.add_panel_inner(mesh, placement, grain, None)
+    }
+
+    /// Adiciona um painel cujas propriedades físicas são definidas pelo molde 2D.
+    pub fn add_panel_with_material(
+        &mut self,
+        mesh: &PanelMesh,
+        placement: Placement,
+        material: PanelMaterial,
+    ) -> Result<PanelHandle, &'static str> {
+        self.add_panel_with_grain_and_material(mesh, placement, Vec2::Y, material)
+    }
+
+    /// Variante com linha de fio e propriedades físicas específicas do molde.
+    pub fn add_panel_with_grain_and_material(
+        &mut self,
+        mesh: &PanelMesh,
+        placement: Placement,
+        grain: Vec2,
+        material: PanelMaterial,
+    ) -> Result<PanelHandle, &'static str> {
+        let material = material.validate()?;
+        Ok(self.add_panel_inner(mesh, placement, grain, Some(material)))
+    }
+
+    fn add_panel_inner(
+        &mut self,
+        mesh: &PanelMesh,
+        placement: Placement,
+        grain: Vec2,
+        material: Option<PanelMaterial>,
+    ) -> PanelHandle {
         let first = self.pos.len() as u32;
         let panel_id = self.grains.len() as u32;
         self.grains.push(grain.try_normalize().unwrap_or(Vec2::Y));
+        self.panel_materials.push(material);
 
         for &uv in &mesh.uv {
             self.pos.push(placement.map(uv));
@@ -110,6 +145,8 @@ impl ClothBuilder {
 
     pub fn build(self, params: SimParams) -> Simulation {
         let n = self.pos.len();
+        let global_stiffness = params.stiffness_table();
+        let global_bend = params.bend.max(1.0e-9);
 
         // Área de repouso (2D) por partícula e por aresta.
         let tri_area = |t: &[u32; 3]| -> f32 {
@@ -168,20 +205,31 @@ impl ClothBuilder {
                 ConstraintKind::Shear
             };
             // k_aresta = Y · A_adjacente / l²  →  α = (l² / A) / Y
+            let geometric_scale = (rest * rest / e.area).max(1e-6);
+            let material_scale = self.panel_materials[self.panel_of[i as usize] as usize]
+                .map(|material| {
+                    global_stiffness[kind as usize] / material.stiffness(kind).max(1.0e-3)
+                })
+                .unwrap_or(1.0);
             distance.push(DistanceConstraint {
                 a: i,
                 b: j,
                 rest,
-                scale: (rest * rest / e.area).max(1e-6),
+                // XPBD: scale/global_k is equivalent to geometric_scale/panel_k.
+                scale: geometric_scale * material_scale,
                 kind,
             });
 
             if let [Some(p3), Some(p4)] = e.opposite {
                 // k_flexão = 3 B l² / (A1 + A2)  →  α = (A / (3 l²)) / B
+                let geometric_scale = (e.area / (3.0 * rest * rest)).max(1e-6);
+                let material_scale = self.panel_materials[self.panel_of[i as usize] as usize]
+                    .map(|material| global_bend / material.bend_nm.max(1.0e-9))
+                    .unwrap_or(1.0);
                 bending.push(BendConstraint {
                     p: [i, j, p3, p4],
                     rest_angle: 0.0, // painéis são planos no repouso
-                    scale: (e.area / (3.0 * rest * rest)).max(1e-6),
+                    scale: geometric_scale * material_scale,
                 });
             }
         }
@@ -211,12 +259,26 @@ impl ClothBuilder {
         for &p in &self.pinned {
             pinned[p as usize] = true;
         }
+        // Scale factors preserve each panel's material mass/thickness while global controls
+        // remain useful as a master multiplier for the whole simulation.
+        let mut mass_scale = vec![1.0f32; n];
+        let mut thickness_scale = vec![1.0f32; n];
+        let global_density = params.density.max(1.0e-4);
+        let global_thickness = params.thickness.max(1.0e-4);
+        for i in 0..n {
+            if let Some(material) = self.panel_materials[self.panel_of[i] as usize] {
+                mass_scale[i] = (material.density_kg_m2 / global_density).max(1.0e-4);
+                thickness_scale[i] = (material.thickness_meters / global_thickness).max(1.0e-4);
+            }
+        }
 
         Simulation::from_parts(
             self.pos,
             self.triangles,
             area,
             pinned,
+            mass_scale,
+            thickness_scale,
             distance,
             dist_ranges,
             bending,
