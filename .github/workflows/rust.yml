@@ -23,3 +23,19 @@ jobs:
         run: cargo test --workspace
       - name: Check application
         run: cargo check -p cloth-app
+
+  build-windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build ClothEvo release executable
+        run: cargo build --release -p cloth-app
+      - name: Upload Windows test build
+        uses: actions/upload-artifact@v4
+        with:
+          name: clothevo-windows-x64
+          path: target/release/clothevo.exe
+          if-no-files-found: error
+          retention-days: 14
