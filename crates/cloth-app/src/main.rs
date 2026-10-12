@@ -1588,6 +1588,7 @@ impl ClothEvoApp {
                 self.create_grainline_from_draft();
             }
         });
+        ui.weak("Linha interna simples é visual. Dobras Vale/Montanha e pregas geram restrições físicas quando encontram arestas internas da malha.");
         ui.label(format!("Pontos no rascunho: {}", self.draft_points.len()));
         if let Some(target) = self.selected_target {
             ui.label(format!("Selecionado: {}", match target {
@@ -2482,7 +2483,7 @@ impl ClothEvoApp {
         self.sync_symmetric_mate(piece_id);
         self.draft_points.clear();
         self.pattern_tool = PatternTool::Select;
-        self.pattern_message = "Linha interna adicionada ao molde.".into();
+        self.pattern_message = "Linha interna adicionada como detalhe visual; ela não altera a física. Use Criar dobra ou Criar prega para gerar vincos físicos.".into();
         self.remember_pattern_change(before);
     }
 
