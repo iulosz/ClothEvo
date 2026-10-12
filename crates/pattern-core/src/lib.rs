@@ -1381,4 +1381,105 @@ mod tests {
         assert!(project.validate().unwrap_err().contains("graduação"));
     }
 
+
+    #[test]
+    fn auto_sewing_suggests_facing_edges_for_rectangles_side_by_side() {
+        let mut project = PatternProject::new("Retângulos lado a lado");
+        project.pieces.push(PatternPiece::from_polygon(1, "Esquerda", &[
+            Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
+            Point2::new(1.0, 1.0), Point2::new(0.0, 1.0),
+        ]).unwrap());
+        project.pieces.push(PatternPiece::from_polygon(2, "Direita", &[
+            Point2::new(1.0, 0.0), Point2::new(2.0, 0.0),
+            Point2::new(2.0, 1.0), Point2::new(1.0, 1.0),
+        ]).unwrap());
+        let suggestions = suggest_seams(&project, &SeamSuggestionParams {
+            minimum_score: 0.0,
+            ..SeamSuggestionParams::default()
+        });
+        assert!(suggestions.iter().any(|suggestion|
+            suggestion.a.piece_id == 1 && suggestion.a.start.segment == 1
+                && suggestion.b.piece_id == 2 && suggestion.b.start.segment == 3
+        ));
+    }
+
+    #[test]
+    fn auto_sewing_detects_misaligned_notch_positions() {
+        let mut aligned = PatternProject::new("Piques alinhados");
+        aligned.pieces.push(PatternPiece::from_polygon(1, "A", &[
+            Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
+            Point2::new(1.0, 1.0), Point2::new(0.0, 1.0),
+        ]).unwrap());
+        aligned.pieces.push(PatternPiece::from_polygon(2, "B", &[
+            Point2::new(1.0, 0.0), Point2::new(2.0, 0.0),
+            Point2::new(2.0, 1.0), Point2::new(1.0, 1.0),
+        ]).unwrap());
+        for piece in &mut aligned.pieces {
+            let segment_index = if piece.id == 1 { 1 } else { 3 };
+            piece.notches.push(Notch {
+                id: 1, segment_index, t: 0.5,
+                depth_meters: 0.008, width_meters: 0.012,
+            });
+        }
+        let matching_notches = notches_for_segment(&aligned.pieces[0], 1);
+        assert_eq!(matching_notches.len(), 1);
+        let aligned_suggestions = suggest_seams(&aligned, &SeamSuggestionParams {
+            minimum_score: 0.0,
+            ..SeamSuggestionParams::default()
+        });
+        let aligned_score = aligned_suggestions.iter().find(|suggestion|
+            suggestion.a.piece_id == 1 && suggestion.a.start.segment == 1
+                && suggestion.b.piece_id == 2 && suggestion.b.start.segment == 3
+        ).map(|suggestion| suggestion.score).expect("facing edges should be suggested when notches align");
+
+        let mut misaligned = aligned.clone();
+        misaligned.pieces[0].notches[0].t = 0.2;
+        misaligned.pieces[1].notches[0].t = 0.8;
+        let left = notches_for_segment(&misaligned.pieces[0], 1);
+        let right = notches_for_segment(&misaligned.pieces[1], 3);
+        assert!((left[0] - right[0]).abs() > 0.5);
+
+        let suggestions = suggest_seams(&misaligned, &SeamSuggestionParams {
+            minimum_score: 0.0,
+            ..SeamSuggestionParams::default()
+        });
+        let misaligned_score = suggestions.iter().find(|suggestion|
+            suggestion.a.piece_id == 1 && suggestion.a.start.segment == 1
+                && suggestion.b.piece_id == 2 && suggestion.b.start.segment == 3
+        ).map(|suggestion| suggestion.score).expect("facing edges remain a candidate with misaligned notches");
+        assert!(misaligned_score < aligned_score);
+    }
+
+    #[test]
+    fn auto_sewing_never_suggests_edges_that_are_already_sewn() {
+        let mut project = PatternProject::new("Bordas já costuradas");
+        project.pieces.push(PatternPiece::from_polygon(1, "Esquerda", &[
+            Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
+            Point2::new(1.0, 1.0), Point2::new(0.0, 1.0),
+        ]).unwrap());
+        project.pieces.push(PatternPiece::from_polygon(2, "Direita", &[
+            Point2::new(1.0, 0.0), Point2::new(2.0, 0.0),
+            Point2::new(2.0, 1.0), Point2::new(1.0, 1.0),
+        ]).unwrap());
+        project.seams.push(SeamDefinition {
+            id: 1,
+            name: "Existente".into(),
+            sides_a: vec![EdgeRef::single_segment(1, 1).into()],
+            sides_b: vec![EdgeRef { piece_id: 2, curve: BoundaryCurve::Outline,
+                segment_start: 3, segment_end: 4, reversed: true }.into()],
+            ease_meters: 0.0,
+        });
+        let suggestions = suggest_seams(&project, &SeamSuggestionParams {
+            minimum_score: 0.0,
+            ..SeamSuggestionParams::default()
+        });
+        assert!(suggestions.iter().all(|suggestion|
+            !((suggestion.a.piece_id == 1 && suggestion.a.start.segment == 1)
+                || (suggestion.b.piece_id == 1 && suggestion.b.start.segment == 1)
+                || (suggestion.a.piece_id == 2 && suggestion.a.start.segment == 3)
+                || (suggestion.b.piece_id == 2 && suggestion.b.start.segment == 3))
+        ));
+    }
+
+
 }
