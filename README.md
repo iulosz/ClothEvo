@@ -17,7 +17,7 @@ próximas fases.
 
 ```bash
 cargo run --release -p cloth-app      # abre o ClothEvo (use --release: o solver é pesado)
-cargo test --workspace                # 22 testes
+cargo test --workspace                # testes unitários do workspace
 cargo run --release -p cloth-sim --example bench   # benchmark do solver sem janela
 cargo run --release -p cloth-sim --example diag -- 1 24 20 1 10   # diagnóstico de estabilidade
 ```
@@ -258,3 +258,12 @@ A operação continua transacional: referências de costura existentes, pences o
 A validação do projeto verifica valores finitos não só no contorno, mas também em linhas de costura e internas, dobras, eixos de pregas, linha de fio, pences, furos, anotações e coeficientes de graduação. A escala de montagem precisa ser finita e positiva. Como salvar e carregar passam por PatternProject::validate, dados inválidos são rejeitados antes de serem persistidos ou usados nas próximas etapas.
 
 Os testes incluem regressões para geometria não finita, escalas inválidas, coeficientes de graduação e fragmentação de linhas cruzadas pelo Cut & Sew. P3 pode continuar com avisos de qualidade geométrica (por exemplo, autointerseções, contornos degenerados e margens de costura sem solução) sem transformar esses avisos em rejeições automáticas antes de haver regras geométricas robustas para esses casos.
+
+
+### Limites de segurança da simulação e da malha
+
+A auto-colisão limita a 96 candidatos examinados por partícula em cada substep, evitando crescimento quadrático de memória quando muitos vértices colapsam numa célula. Esse limite protege o aplicativo, mas em congestionamentos extremos também reduz os pares examinados; use-o como proteção de estabilidade, não como garantia de colisão exaustiva.
+
+A preparação da malha recusa contornos com mais de 4.096 vértices, grades acima de 2 milhões de candidatos, custo estimado acima de 25 milhões de verificações ponto-contorno ou malhas acima de 500 mil vértices. Quando um limite é ultrapassado, aumente o espaçamento entre partículas ou simplifique o contorno.
+
+Transformações 3D importadas são limitadas a translações entre -100 m e 100 m, rotações até ±360.000 graus e escala entre (0, 100]. Valores fora desses limites são rejeitados antes de serem convertidos para o solver em f32.

@@ -5,6 +5,12 @@ use pattern_geom::{point_in_polygon, signed_area, validate_simple_polygon, Geome
 use spade::{ConstrainedDelaunayTriangulation, Point2 as SpadePoint, Triangulation};
 use std::fmt;
 
+/// Limites defensivos para impedir que uma configuração extrema bloqueie a interface.
+const MAX_BOUNDARY_VERTICES: usize = 4_096;
+const MAX_GRID_CANDIDATES: usize = 2_000_000;
+const MAX_GRID_EDGE_TESTS: usize = 25_000_000;
+const MAX_MESH_VERTICES: usize = 500_000;
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PatternMesh {
     pub vertices: Vec<Point2>,
@@ -19,6 +25,7 @@ pub enum MeshError {
     InvalidSpacing,
     Triangulation(String),
     EmptyResult,
+    ResourceLimit,
 }
 
 impl fmt::Display for MeshError {
@@ -28,6 +35,7 @@ impl fmt::Display for MeshError {
             Self::InvalidSpacing => write!(f, "O espaçamento da malha deve ser positivo e finito."),
             Self::Triangulation(e) => write!(f, "Falha na triangulação: {e}"),
             Self::EmptyResult => write!(f, "A triangulação não produziu triângulos dentro do contorno."),
+            Self::ResourceLimit => write!(f, "A malha excede o orçamento seguro de geometria; aumente o espaçamento entre partículas ou simplifique o contorno."),
         }
     }
 }
@@ -46,6 +54,12 @@ pub fn triangulate_outline(outline: &[Point2], target_spacing: f64) -> Result<Pa
     if boundary.len() > 3 && boundary[0].distance(*boundary.last().unwrap()) <= 1.0e-9 {
         boundary.pop();
     }
+    if boundary.len() > MAX_BOUNDARY_VERTICES {
+        return Err(MeshError::ResourceLimit);
+    }
+    if boundary.iter().any(|point| !point.x.is_finite() || !point.y.is_finite()) {
+        return Err(MeshError::Geometry(GeometryError::InvalidParameter));
+    }
     validate_simple_polygon(&boundary)?;
 
     let min_x = boundary.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
@@ -53,11 +67,29 @@ pub fn triangulate_outline(outline: &[Point2], target_spacing: f64) -> Result<Pa
     let max_x = boundary.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
     let max_y = boundary.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
 
+    // Estima o custo antes de percorrer a grade. Ponto-in-polígono e distância à
+    // borda percorrem a geometria; limitar só o número de vértices finais chegaria tarde.
+    let row_spacing = target_spacing * 0.866_025_403_784_438_6; // sqrt(3) / 2
+    let columns_f = ((max_x - min_x) / target_spacing).ceil().max(0.0);
+    let rows_f = ((max_y - min_y) / row_spacing).ceil().max(0.0);
+    if !columns_f.is_finite() || !rows_f.is_finite()
+        || columns_f > MAX_GRID_CANDIDATES as f64
+        || rows_f > MAX_GRID_CANDIDATES as f64
+    {
+        return Err(MeshError::ResourceLimit);
+    }
+    let candidate_count = (columns_f as usize).saturating_mul(rows_f as usize);
+    if candidate_count > MAX_GRID_CANDIDATES
+        || candidate_count.checked_mul(boundary.len())
+            .is_none_or(|work| work > MAX_GRID_EDGE_TESTS)
+    {
+        return Err(MeshError::ResourceLimit);
+    }
+
     let mut points = boundary.clone();
     // Uma malha triangular alternada evita a anisotropia da grade quadrada: os pontos
     // das linhas adjacentes ficam deslocados em meia célula e as arestas tendem a ser
     // mais uniformes, reduzindo triângulos longos e concentração de tensão no tecido.
-    let row_spacing = target_spacing * 0.866_025_403_784_438_6; // sqrt(3) / 2
     let mut row = 0usize;
     let mut y = min_y + target_spacing * 0.5;
     while y < max_y {
@@ -70,6 +102,9 @@ pub fn triangulate_outline(outline: &[Point2], target_spacing: f64) -> Result<Pa
             if point_in_polygon(candidate, &boundary)
                 && distance_to_boundary(candidate, &boundary) >= target_spacing * 0.2
             {
+                if points.len() >= MAX_MESH_VERTICES {
+                    return Err(MeshError::ResourceLimit);
+                }
                 points.push(candidate);
             }
             x += target_spacing;
@@ -227,4 +262,21 @@ mod tests {
     fn invalid_spacing_is_rejected() {
         assert_eq!(triangulate_outline(&rectangle(), 0.0), Err(MeshError::InvalidSpacing));
     }
+    #[test]
+    fn tiny_spacing_is_rejected_before_building_an_unbounded_grid() {
+        assert!(matches!(triangulate_outline(&rectangle(), 1.0e-9), Err(MeshError::ResourceLimit)));
+    }
+
+    #[test]
+    fn non_finite_boundary_coordinates_are_rejected() {
+        let invalid = [
+            Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
+            Point2::new(f64::NAN, 1.0), Point2::new(0.0, 1.0),
+        ];
+        assert!(matches!(
+            triangulate_outline(&invalid, 0.1),
+            Err(MeshError::Geometry(GeometryError::InvalidParameter))
+        ));
+    }
+
 }

@@ -504,13 +504,20 @@ impl PatternProject {
             {
                 return Err(format!("O atrito do tecido '{}' precisa estar entre 0 e 5.", piece.name));
             }
-            if piece.assembly.translation_meters.iter().chain(piece.assembly.rotation_degrees.iter())
-                .any(|value| !value.is_finite())
+            if piece.assembly.translation_meters.iter()
+                .any(|value| !value.is_finite() || value.abs() > 100.0)
             {
-                return Err(format!("A transformação 3D do molde '{}' contém valores não finitos.", piece.name));
+                return Err(format!("A translação do molde '{}' precisa ser finita e permanecer entre -100 m e 100 m.", piece.name));
             }
-            if piece.assembly.scale.iter().any(|value| !value.is_finite() || *value <= 0.0) {
-                return Err(format!("A escala 3D do molde '{}' precisa ter valores finitos e positivos.", piece.name));
+            if piece.assembly.rotation_degrees.iter()
+                .any(|value| !value.is_finite() || value.abs() > 360_000.0)
+            {
+                return Err(format!("A rotação 3D do molde '{}' excede o limite seguro de ±360.000°.", piece.name));
+            }
+            if piece.assembly.scale.iter()
+                .any(|value| !value.is_finite() || *value <= 0.0 || *value > 100.0)
+            {
+                return Err(format!("A escala 3D do molde '{}' precisa ser finita, positiva e no máximo 100.", piece.name));
             }
             let anchor_count = piece.outline.segments.len();
             let mut pinned = HashSet::new();
@@ -803,6 +810,23 @@ mod tests {
             intake_meters: 0.1,
         });
         assert!(project.validate().unwrap_err().contains("pence"));
+    }
+
+    #[test]
+    fn validation_rejects_out_of_range_transforms_before_f32_conversion() {
+        let mut project = PatternProject::new("Limites 3D");
+        project.pieces.push(PatternPiece::from_polygon(1, "Frente", &[
+            Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
+            Point2::new(1.0, 1.0), Point2::new(0.0, 1.0),
+        ]).unwrap());
+        project.pieces[0].assembly.translation_meters[0] = 1.0e100;
+        assert!(project.validate().unwrap_err().contains("translação"));
+        project.pieces[0].assembly.translation_meters = [0.0; 3];
+        project.pieces[0].assembly.rotation_degrees[1] = 1.0e100;
+        assert!(project.validate().unwrap_err().contains("rotação"));
+        project.pieces[0].assembly.rotation_degrees = [0.0; 3];
+        project.pieces[0].assembly.scale[2] = 101.0;
+        assert!(project.validate().unwrap_err().contains("escala"));
     }
 
     #[test]

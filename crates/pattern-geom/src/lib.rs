@@ -447,6 +447,9 @@ fn segments_intersect(a: Point2, b: Point2, c: Point2, d: Point2) -> bool {
 /// Valida uma borda fechada sem autointerseções. A entrada não precisa repetir o ponto inicial.
 pub fn validate_simple_polygon(polygon: &[Point2]) -> Result<(), GeometryError> {
     if polygon.len() < 3 { return Err(GeometryError::TooFewPoints); }
+    if polygon.iter().any(|point| !point.x.is_finite() || !point.y.is_finite()) {
+        return Err(GeometryError::InvalidParameter);
+    }
     for i in 0..polygon.len() {
         if polygon[i].distance(polygon[(i + 1) % polygon.len()]) <= EPS {
             return Err(GeometryError::DegenerateEdge);
@@ -729,6 +732,15 @@ mod tests {
         ];
         let offset = offset_polygon(&rect, 0.1).unwrap();
         assert!((signed_area(&offset).abs() - 2.64).abs() < 1e-6);
+    }
+
+    #[test]
+    fn simple_polygon_rejects_non_finite_coordinates() {
+        let polygon = [
+            Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
+            Point2::new(f64::NAN, 1.0), Point2::new(0.0, 1.0),
+        ];
+        assert_eq!(validate_simple_polygon(&polygon), Err(GeometryError::InvalidParameter));
     }
 
     #[test]

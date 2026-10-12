@@ -5,17 +5,29 @@ use std::ops::Range;
 ///
 /// Usa uma máscara `u128` por partícula (até 128 cores; malhas triangulares precisam de ~10).
 pub fn greedy_coloring<const N: usize>(items: &[[u32; N]], particle_count: usize) -> Vec<u16> {
-    let mut used = vec![0u128; particle_count];
+    // Bitsets dinâmicos mantêm o caminho rápido em malhas normais e evitam panic
+    // quando uma entrada degenerada exige mais de 128 cores.
+    let mut used = vec![vec![0u64; 1]; particle_count];
     let mut colors = Vec::with_capacity(items.len());
     for item in items {
-        let mut mask = 0u128;
-        for &p in item {
-            mask |= used[p as usize];
+        let mut color = 0usize;
+        loop {
+            let word = color / 64;
+            let bit = 1u64 << (color % 64);
+            let available = item.iter().all(|&particle| {
+                used[particle as usize].get(word).is_none_or(|mask| mask & bit == 0)
+            });
+            if available { break; }
+            color += 1;
+            assert!(color <= u16::MAX as usize, "excedido o limite representável de cores de restrição");
         }
-        let color = (!mask).trailing_zeros();
-        assert!(color < 128, "grafo de restrições precisa de mais de 128 cores");
-        for &p in item {
-            used[p as usize] |= 1u128 << color;
+        let word = color / 64;
+        let bit = 1u64 << (color % 64);
+        for &particle in item {
+            if used[particle as usize].len() <= word {
+                used[particle as usize].resize(word + 1, 0);
+            }
+            used[particle as usize][word] |= bit;
         }
         colors.push(color as u16);
     }
@@ -60,6 +72,15 @@ mod tests {
         let colors = greedy_coloring(&items, 4);
         assert_ne!(colors[0], colors[1]);
         assert_ne!(colors[1], colors[2]);
+    }
+
+    #[test]
+    fn coloring_supports_more_than_128_conflicting_items_without_panicking() {
+        let items = vec![[0u32]; 130];
+        let colors = greedy_coloring(&items, 1);
+        assert_eq!(colors.len(), 130);
+        assert_eq!(colors.iter().copied().collect::<std::collections::HashSet<_>>().len(), 130);
+        assert_eq!(colors.iter().copied().max(), Some(129));
     }
 
     #[test]
