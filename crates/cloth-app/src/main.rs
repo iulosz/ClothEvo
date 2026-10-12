@@ -399,13 +399,16 @@ impl ClothEvoApp {
                 self.playing = false;
                 self.accumulator = 0.0;
                 self.sim.step(FIXED_DT);
+                self.last_step_ms = self.sim.stats.step_ms;
                 if !self.sim.is_finite() {
                     self.sim.reset();
+                    self.last_step_ms = 0.0;
                     self.diverged = true;
                 }
             }
             if ui.button("↺ Reiniciar").clicked() {
                 self.sim.reset();
+                self.last_step_ms = 0.0;
                 self.playing = false;
                 self.diverged = false;
                 self.accumulator = 0.0;
@@ -489,6 +492,10 @@ impl ClothEvoApp {
         }
         if !self.seam_pairs.is_empty() {
             ui.label(format!("abertura máx. das costuras: {:.1} mm", self.seam_gap_max() * 1000.0));
+            let seam_load = sim.seam_tension_estimate_max_n();
+            let load_color = if seam_load > 100.0 { egui::Color32::from_rgb(255, 92, 92) } else { egui::Color32::LIGHT_GREEN };
+            ui.colored_label(load_color, format!("carga XPBD estimada máx. da costura: {:.2} N", seam_load));
+            ui.weak("Estimativa do multiplicador XPBD; indicador comparativo, não força experimental calibrada.");
         }
         let critical_seams = self.sim.seam_warning_pairs(0.015).len();
         if critical_seams > 0 {
