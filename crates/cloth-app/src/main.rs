@@ -3442,46 +3442,103 @@ impl ClothEvoApp {
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         let placement_mode = self.workspace == WorkspaceMode::Placement && self.using_pattern_sim;
+        let aspect = rect.width() / rect.height().max(1.0);
 
-        // Na prévia de posicionamento, clique/arraste uma superfície para mover somente esse molde.
-        // Arrastar fora de qualquer painel continua orbitando a câmera; botões direito/meio fazem pan.
-        let drag = response.drag_delta();
+        // Na prévia: primeiro tenta capturar um manipulador; só depois considera o painel.
+        // Isso evita que um clique no eixo seja interpretado como arraste livre do tecido.
+        let pointer_delta = ui.input(|i| i.pointer.delta());
         if placement_mode {
             if response.drag_started_by(egui::PointerButton::Primary) {
                 if let Some(pointer) = response.interact_pointer_pos() {
-                    self.placement_drag_piece = self.hit_test_placement_piece(pointer, rect);
-                    if let Some(id) = self.placement_drag_piece {
-                        self.selected_placement_piece = Some(id);
+                    let view_proj = self.camera.view_proj(aspect);
+                    if let Some(gizmo) = self.hit_test_placement_gizmo(pointer, rect, view_proj) {
+                        self.selected_placement_piece = Some(gizmo.piece_id);
+                        self.placement_drag_piece = Some(gizmo.piece_id);
+                        self.placement_gizmo_drag = Some(gizmo);
                         self.placement_drag_before = Some(self.editor_snapshot());
+                    } else if let Some(id) = self.hit_test_placement_piece(pointer, rect) {
+                        self.selected_placement_piece = Some(id);
+                        if matches!(self.gizmo_mode, GizmoMode::Move | GizmoMode::Transform) {
+                            self.placement_drag_piece = Some(id);
+                            self.placement_drag_before = Some(self.editor_snapshot());
+                        } else {
+                            // Em Girar/Escalar, arrastar o tecido seleciona; a transformação
+                            // só inicia quando um aro ou manipulador do gizmo é capturado.
+                            self.placement_drag_piece = None;
+                        }
                     }
                 }
             }
             if response.dragged_by(egui::PointerButton::Primary) {
-                if let Some(id) = self.placement_drag_piece {
-                    let delta = ui.input(|i| i.pointer.delta());
-                    self.translate_placement_by_screen_delta(id, delta.x, delta.y, rect.height());
+                if let Some(mut gizmo) = self.placement_gizmo_drag {
+                    let pointer = response.interact_pointer_pos()
+                        .unwrap_or(gizmo.last_pointer + pointer_delta);
+                    match gizmo.action {
+                        GizmoAction::Move => {
+                            let amount = pointer_delta.dot(gizmo.screen_axis)
+                                / gizmo.pixels_per_meter.max(1.0e-3);
+                            self.apply_placement_translation(
+                                gizmo.piece_id, gizmo.axis_world * amount,
+                            );
+                        }
+                        GizmoAction::Rotate => {
+                            let from = gizmo.last_pointer - gizmo.screen_center;
+                            let to = pointer - gizmo.screen_center;
+                            if from.length() > 3.0 && to.length() > 3.0 {
+                                let cross = from.x * to.y - from.y * to.x;
+                                let degrees = cross.atan2(from.dot(to)).to_degrees();
+                                self.apply_placement_rotation_delta(
+                                    gizmo.piece_id, gizmo.axis, gizmo.axis_world, degrees,
+                                );
+                            }
+                        }
+                        GizmoAction::Scale => {
+                            let exponent = pointer_delta.dot(gizmo.screen_axis) / 130.0;
+                            let factor = exponent.clamp(-0.35, 0.35).exp();
+                            self.apply_placement_scale_factor(
+                                gizmo.piece_id, gizmo.axis, factor,
+                            );
+                        }
+                    }
+                    gizmo.last_pointer = pointer;
+                    self.placement_gizmo_drag = Some(gizmo);
+                } else if let Some(id) = self.placement_drag_piece {
+                    self.translate_placement_by_screen_delta(
+                        id, pointer_delta.x, pointer_delta.y, rect.height(),
+                    );
                 } else {
-                    self.camera.orbit(drag.x, drag.y);
+                    self.camera.orbit(pointer_delta.x, pointer_delta.y);
                 }
             }
             if response.clicked() {
                 if let Some(pointer) = response.interact_pointer_pos() {
-                    self.selected_placement_piece = self.hit_test_placement_piece(pointer, rect);
+                    let view_proj = self.camera.view_proj(aspect);
+                    if self.hit_test_placement_gizmo(pointer, rect, view_proj).is_none() {
+                        self.selected_placement_piece = self.hit_test_placement_piece(pointer, rect);
+                    }
                 }
             }
             if response.drag_stopped_by(egui::PointerButton::Primary) {
+                let stopped_action = self.placement_gizmo_drag.take().map(|drag| drag.action);
+                // Escalar altera comprimentos de repouso e áreas. Reconstrói uma única vez
+                // ao soltar o mouse, e não a cada quadro do arraste.
+                if stopped_action == Some(GizmoAction::Scale) {
+                    if let Err(error) = self.start_pattern_simulation() {
+                        self.pattern_message = error;
+                    }
+                }
                 if let Some(before) = self.placement_drag_before.take() {
                     self.remember_pattern_change(before);
                 }
                 self.placement_drag_piece = None;
             }
         } else if response.dragged_by(egui::PointerButton::Primary) {
-            self.camera.orbit(drag.x, drag.y);
+            self.camera.orbit(pointer_delta.x, pointer_delta.y);
         }
         if response.dragged_by(egui::PointerButton::Secondary)
             || response.dragged_by(egui::PointerButton::Middle)
         {
-            self.camera.pan(drag.x, drag.y, rect.height());
+            self.camera.pan(pointer_delta.x, pointer_delta.y, rect.height());
         }
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
@@ -3490,17 +3547,13 @@ impl ClothEvoApp {
             }
         }
 
-        // Dados do frame
+        // Dados do frame.
         self.sim.compute_vertex_normals(&mut self.normals);
-        let cloth_vertices: Vec<Vertex> = self
-            .sim
-            .pos
-            .iter()
+        let cloth_vertices: Vec<Vertex> = self.sim.pos.iter()
             .zip(&self.normals)
             .map(|(p, n)| Vertex { pos: p.to_array(), normal: n.to_array() })
             .collect();
 
-        let aspect = rect.width() / rect.height().max(1.0);
         let view_proj = self.camera.view_proj(aspect);
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
@@ -3513,8 +3566,8 @@ impl ClothEvoApp {
             },
         ));
 
-        // Contorno luminoso do painel selecionado, projetado sobre a viewport.
         if placement_mode {
+            // Contorno do molde selecionado.
             if let Some(range) = self.selected_placement_piece
                 .and_then(|id| self.placement_ranges.iter().find(|range| range.piece_id == id))
             {
@@ -3533,6 +3586,7 @@ impl ClothEvoApp {
                     }
                 }
             }
+            self.draw_placement_gizmo(ui.painter(), rect, view_proj);
         }
     }
 
