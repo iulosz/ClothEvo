@@ -4730,6 +4730,64 @@ mod pattern_editor_tests {
     }
 
     #[test]
+    fn splitting_segment_remaps_notches_on_both_sides_and_following_segments() {
+        let mut project = square_project();
+        project.pieces[0].notches = vec![
+            Notch { id: 1, segment_index: 1, t: 0.25, depth_meters: 0.008, width_meters: 0.012 },
+            Notch { id: 2, segment_index: 1, t: 0.75, depth_meters: 0.008, width_meters: 0.012 },
+            Notch { id: 3, segment_index: 3, t: 0.60, depth_meters: 0.008, width_meters: 0.012 },
+        ];
+
+        split_project_segment(&mut project, 1, 1, 0.5).unwrap();
+
+        let notches = &project.pieces[0].notches;
+        assert_eq!((notches[0].segment_index, notches[0].t), (1, 0.5));
+        assert_eq!((notches[1].segment_index, notches[1].t), (2, 0.5));
+        assert_eq!((notches[2].segment_index, notches[2].t), (4, 0.60));
+        project.validate().unwrap();
+    }
+
+    #[test]
+    fn deleting_anchor_remaps_notches_on_merged_and_shifted_segments() {
+        let mut project = square_project();
+        project.pieces[0].notches = vec![
+            Notch { id: 1, segment_index: 0, t: 0.5, depth_meters: 0.008, width_meters: 0.012 },
+            Notch { id: 2, segment_index: 1, t: 0.5, depth_meters: 0.008, width_meters: 0.012 },
+            Notch { id: 3, segment_index: 3, t: 0.5, depth_meters: 0.008, width_meters: 0.012 },
+        ];
+
+        delete_project_anchor(&mut project, 1, 1).unwrap();
+
+        let notches = &project.pieces[0].notches;
+        assert_eq!(notches[0].segment_index, 0);
+        assert!((notches[0].t - 0.25).abs() < 1.0e-9);
+        assert_eq!(notches[1].segment_index, 0);
+        assert!((notches[1].t - 0.75).abs() < 1.0e-9);
+        assert_eq!((notches[2].segment_index, notches[2].t), (2, 0.5));
+        project.validate().unwrap();
+    }
+
+    #[test]
+    fn deleting_first_anchor_remaps_last_and_first_segment_notches_into_closure() {
+        let mut project = square_project();
+        project.pieces[0].notches = vec![
+            Notch { id: 1, segment_index: 3, t: 0.5, depth_meters: 0.008, width_meters: 0.012 },
+            Notch { id: 2, segment_index: 0, t: 0.5, depth_meters: 0.008, width_meters: 0.012 },
+            Notch { id: 3, segment_index: 1, t: 0.5, depth_meters: 0.008, width_meters: 0.012 },
+        ];
+
+        delete_project_anchor(&mut project, 1, 0).unwrap();
+
+        let notches = &project.pieces[0].notches;
+        assert_eq!(notches[0].segment_index, 2);
+        assert!((notches[0].t - 0.25).abs() < 1.0e-9);
+        assert_eq!(notches[1].segment_index, 2);
+        assert!((notches[1].t - 0.75).abs() < 1.0e-9);
+        assert_eq!((notches[2].segment_index, notches[2].t), (0, 0.5));
+        project.validate().unwrap();
+    }
+
+    #[test]
     fn mirrored_pair_keeps_topology_in_sync_after_anchor_insertion() {
         let mut project = square_project();
         let source = project.pieces[0].clone();
