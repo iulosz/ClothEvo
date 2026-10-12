@@ -187,8 +187,8 @@ impl EdgePath {
 pub struct SeamDefinition {
     pub id: SeamId,
     pub name: String,
-    pub a: EdgePath,
-    pub b: EdgePath,
+    pub sides_a: Vec<EdgePath>,
+    pub sides_b: Vec<EdgePath>,
     pub ease_meters: f64,
 }
 
@@ -205,8 +205,14 @@ impl<'de> Deserialize<'de> for SeamDefinition {
         struct RawSeam {
             id: SeamId,
             name: String,
-            a: LegacyOrPath,
-            b: LegacyOrPath,
+            #[serde(default)]
+            a: Option<LegacyOrPath>,
+            #[serde(default)]
+            b: Option<LegacyOrPath>,
+            #[serde(default)]
+            sides_a: Option<Vec<LegacyOrPath>>,
+            #[serde(default)]
+            sides_b: Option<Vec<LegacyOrPath>>,
             ease_meters: f64,
         }
         let raw = RawSeam::deserialize(deserializer)?;
@@ -214,11 +220,17 @@ impl<'de> Deserialize<'de> for SeamDefinition {
             LegacyOrPath::Path(path) => path,
             LegacyOrPath::Legacy(edge) => edge.into(),
         };
+        let migrate_side = |paths: Option<Vec<LegacyOrPath>>, legacy: Option<LegacyOrPath>| {
+            paths.filter(|paths| !paths.is_empty())
+                .map(|paths| paths.into_iter().map(convert).collect())
+                .or_else(|| legacy.map(|edge| vec![convert(edge)]))
+                .unwrap_or_default()
+        };
         Ok(Self {
             id: raw.id,
             name: raw.name,
-            a: convert(raw.a),
-            b: convert(raw.b),
+            sides_a: migrate_side(raw.sides_a, raw.a),
+            sides_b: migrate_side(raw.sides_b, raw.b),
             ease_meters: raw.ease_meters,
         })
     }
@@ -508,7 +520,7 @@ impl PatternProject {
                         .then_some(notch.t)
                 }));
                 for seam in &self.seams {
-                    for path in [&seam.a, &seam.b] {
+                    for path in seam.sides_a.iter().chain(seam.sides_b.iter()) {
                         if path.piece_id == piece.id && path.curve == edge.curve {
                             for param in [path.start, path.end] {
                                 if param.segment as usize == index && param.t > t0 && param.t < t1 {
@@ -535,9 +547,10 @@ impl PatternProject {
     pub fn validation_warnings(&self) -> Vec<String> {
         let mut warnings = Vec::new();
         for seam in &self.seams {
-            let (Some(a), Some(b)) = (self.edge_length_meters(&seam.a), self.edge_length_meters(&seam.b)) else {
-                continue;
-            };
+            let length = |paths: &[EdgePath]| paths.iter()
+                .filter_map(|edge| self.edge_length_meters(edge)).sum::<f64>();
+            let a = length(&seam.sides_a);
+            let b = length(&seam.sides_b);
             let shortest = a.min(b);
             let longest = a.max(b);
             if shortest > 1.0e-9 && longest / shortest > 3.0 {
@@ -545,6 +558,20 @@ impl PatternProject {
                     "A costura '{}' tem razão de comprimentos A/B de {:.2}:1; confira os segmentos selecionados.",
                     seam.name, longest / shortest
                 ));
+            }
+            for (label, paths) in [("A", &seam.sides_a), ("B", &seam.sides_b)] {
+                for pair in paths.windows(2) {
+                    let left_end = if pair[0].reversed { pair[0].start_position() } else { pair[0].end_position() };
+                    let right_start = if pair[1].reversed { pair[1].end_position() } else { pair[1].start_position() };
+                    if pair[0].piece_id == pair[1].piece_id && pair[0].curve == pair[1].curve
+                        && (left_end - right_start).abs() > 1.0e-6
+                    {
+                        warnings.push(format!(
+                            "A costura '{}' tem uma lacuna entre bordas consecutivas do lado {}.",
+                            seam.name, label
+                        ));
+                    }
+                }
             }
         }
         warnings
@@ -665,7 +692,7 @@ impl PatternProject {
         }
 
         let mut seam_ids = HashSet::new();
-        let mut occupied_paths: Vec<(PieceId, BoundaryCurve, f64, f64, SeamId)> = Vec::new();
+        let mut occupied_paths: Vec<(PieceId, BoundaryCurve, f64, f64, SeamId, bool)> = Vec::new();
         for seam in &self.seams {
             if !seam_ids.insert(seam.id) {
                 return Err(format!("ID de costura duplicado: {}.", seam.id));
@@ -673,49 +700,46 @@ impl PatternProject {
             if !seam.ease_meters.is_finite() {
                 return Err(format!("Folga inválida na costura '{}'.", seam.name));
             }
-            let edges = [&seam.a, &seam.b];
-            for edge in edges {
-                let piece = self.pieces.iter().find(|p| p.id == edge.piece_id)
-                    .ok_or_else(|| format!("A costura '{}' referencia uma peça inexistente.", seam.name))?;
-                let curve = match edge.curve {
-                    BoundaryCurve::Outline => Some(&piece.outline),
-                    BoundaryCurve::SewingLine => piece.sewing_line.as_ref(),
-                }.ok_or_else(|| format!("A costura '{}' referencia uma linha de costura inexistente.", seam.name))?;
-                if !edge.start.t.is_finite() || !edge.end.t.is_finite()
-                    || !(0.0..=1.0).contains(&edge.start.t) || !(0.0..=1.0).contains(&edge.end.t)
-                    || edge.start.segment as usize >= curve.segments.len()
-                    || edge.end.segment as usize >= curve.segments.len()
-                    || edge.start_position() >= edge.end_position()
-                {
-                    return Err(format!("Intervalo de borda inválido na costura '{}'.", seam.name));
-                }
+            if seam.sides_a.is_empty() || seam.sides_b.is_empty() {
+                return Err(format!("A costura '{}' precisa ter pelo menos uma borda em cada lado.", seam.name));
             }
-
-            let a = edges[0];
-            let b = edges[1];
-            if a.piece_id == b.piece_id && a.curve == b.curve
-                && a.start_position() < b.end_position()
-                && b.start_position() < a.end_position()
-            {
-                return Err(format!(
-                    "A e B da costura '{}' apontam para segmentos sobrepostos da mesma peça.",
-                    seam.name
-                ));
-            }
-
-            for edge in edges {
-                let start = edge.start_position();
-                let end = edge.end_position();
-                if let Some((_, _, _, _, previous)) = occupied_paths.iter().find(|(piece_id, curve, lo, hi, _)| {
-                    *piece_id == edge.piece_id && *curve == edge.curve
-                        && start < *hi - 1.0e-9 && *lo < end - 1.0e-9
-                }) {
-                    return Err(format!(
-                        "A borda da peça {} já está vinculada à costura {}; remova a sobreposição antes de continuar.",
-                        edge.piece_id, previous
-                    ));
+            for (is_a, paths) in [(true, &seam.sides_a), (false, &seam.sides_b)] {
+                for edge in paths {
+                    let piece = self.pieces.iter().find(|p| p.id == edge.piece_id)
+                        .ok_or_else(|| format!("A costura '{}' referencia uma peça inexistente.", seam.name))?;
+                    let curve = match edge.curve {
+                        BoundaryCurve::Outline => Some(&piece.outline),
+                        BoundaryCurve::SewingLine => piece.sewing_line.as_ref(),
+                    }.ok_or_else(|| format!("A costura '{}' referencia uma linha de costura inexistente.", seam.name))?;
+                    if !edge.start.t.is_finite() || !edge.end.t.is_finite()
+                        || !(0.0..=1.0).contains(&edge.start.t) || !(0.0..=1.0).contains(&edge.end.t)
+                        || edge.start.segment as usize >= curve.segments.len()
+                        || edge.end.segment as usize >= curve.segments.len()
+                        || edge.start_position() >= edge.end_position()
+                    {
+                        return Err(format!("Intervalo de borda inválido na costura '{}'.", seam.name));
+                    }
+                    let start = edge.start_position();
+                    let end = edge.end_position();
+                    if let Some((_, _, _, _, previous_seam, previous_side_a)) = occupied_paths.iter().find(|(piece_id, curve, lo, hi, _, _)| {
+                        *piece_id == edge.piece_id && *curve == edge.curve
+                            && start < *hi - 1.0e-9 && *lo < end - 1.0e-9
+                    }) {
+                        if *previous_seam == seam.id {
+                            let relation = if *previous_side_a == is_a {
+                                "A mesma borda está repetida/ sobreposta dentro de um dos lados"
+                            } else {
+                                "Os lados A e B da mesma costura usam bordas sobrepostas"
+                            };
+                            return Err(format!("{relation} da costura '{}'.", seam.name));
+                        }
+                        return Err(format!(
+                            "A borda da peça {} já está vinculada à costura {}; remova a sobreposição antes de continuar.",
+                            edge.piece_id, previous_seam
+                        ));
+                    }
+                    occupied_paths.push((edge.piece_id, edge.curve, start, end, seam.id, is_a));
                 }
-                occupied_paths.push((edge.piece_id, edge.curve, start, end, seam.id));
             }
         }
         Ok(())
