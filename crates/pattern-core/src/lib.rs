@@ -375,7 +375,7 @@ impl PatternProject {
             {
                 return Err(format!("A transformação 3D do molde '{}' contém valores não finitos.", piece.name));
             }
-            let anchor_count = piece.outline.segments.len().saturating_sub(1);
+            let anchor_count = piece.outline.segments.len();
             let mut pinned = HashSet::new();
             for anchor in &piece.assembly.pinned_anchors {
                 if *anchor as usize >= anchor_count {
