@@ -3802,34 +3802,48 @@ fn delete_project_anchor(
 }
 
 fn sampled_edge_indices(
-    edge: &EdgeRef,
+    edge: &EdgePath,
     ranges: &[(usize, usize)],
+    forced_vertices: &[(u32, f64, usize)],
     boundary_count: usize,
-  ) -> Result<Vec<u32>, String> {
-    if boundary_count < 2 || edge.segment_start >= edge.segment_end {
+) -> Result<Vec<u32>, String> {
+    if boundary_count < 2 || edge.start_position() >= edge.end_position() {
         return Err("Intervalo de costura sem vértices suficientes.".into());
     }
-    if edge.segment_end as usize > ranges.len() {
+    if edge.end.segment as usize >= ranges.len() {
         return Err("Intervalo de costura fora da curva amostrada.".into());
     }
-    let mut indices: Vec<u32> = Vec::new();
-    for segment_index in edge.segment_start as usize..edge.segment_end as usize {
-        let (start, end) = ranges[segment_index];
-        if indices.last().copied() != Some(start as u32) {
-            indices.push(start as u32);
+
+    let vertex_for_param = |param: CurveParam| -> Option<usize> {
+        if param.t.abs() <= 1.0e-9 {
+            return ranges.get(param.segment as usize).map(|range| range.0);
         }
-        if end >= start {
-            for index in (start + 1)..=end {
-                let wrapped = (index % boundary_count) as u32;
-                if indices.last().copied() != Some(wrapped) { indices.push(wrapped); }
-            }
+        if (param.t - 1.0).abs() <= 1.0e-9 {
+            return ranges.get(param.segment as usize).map(|range| range.1 % boundary_count);
+        }
+        forced_vertices.iter().find_map(|(segment, t, index)| {
+            (*segment == param.segment && (*t - param.t).abs() <= 1.0e-9).then_some(*index)
+        })
+    };
+    let start_index = vertex_for_param(edge.start)
+        .ok_or_else(|| "O início da costura livre não está presente como vértice forçado na malha.".to_string())?;
+    let end_index = vertex_for_param(edge.end)
+        .ok_or_else(|| "O fim da costura livre não está presente como vértice forçado na malha.".to_string())?;
+
+    let append = |indices: &mut Vec<u32>, index: usize| {
+        let wrapped = (index % boundary_count) as u32;
+        if indices.last().copied() != Some(wrapped) { indices.push(wrapped); }
+    };
+    let mut indices: Vec<u32> = Vec::new();
+    for segment_index in edge.start.segment as usize..=edge.end.segment as usize {
+        let (range_start, range_end) = ranges[segment_index];
+        let begin = if segment_index == edge.start.segment as usize { start_index } else { range_start };
+        let finish = if segment_index == edge.end.segment as usize { end_index } else { range_end % boundary_count };
+        if begin <= finish {
+            for index in begin..=finish { append(&mut indices, index); }
         } else {
-            for index in (start + 1)..boundary_count {
-                let wrapped = index as u32;
-                if indices.last().copied() != Some(wrapped) { indices.push(wrapped); }
-            }
-            let wrapped = (end % boundary_count) as u32;
-            if indices.last().copied() != Some(wrapped) { indices.push(wrapped); }
+            for index in begin..boundary_count { append(&mut indices, index); }
+            for index in 0..=finish { append(&mut indices, index); }
         }
     }
     if edge.reversed { indices.reverse(); }
