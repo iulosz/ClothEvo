@@ -857,6 +857,18 @@ impl ClothEvoApp {
         ui.add(egui::Slider::new(&mut p.iterations, 1..=12).text("iterações por substep"));
         ui.add(egui::Slider::new(&mut p.max_particle_speed, 2.0..=60.0)
             .text("limite de velocidade (m/s)"));
+        ui.horizontal(|ui| {
+            if ui.button("Equilibrado").clicked() {
+                p.substeps = 20;
+                p.iterations = 2;
+                p.max_particle_speed = 20.0;
+            }
+            if ui.button("Mais estável").clicked() {
+                p.substeps = 40;
+                p.iterations = 4;
+                p.max_particle_speed = 12.0;
+            }
+        });
         ui.checkbox(&mut p.self_collision, "Auto-colisão (mais custo)");
         ui.weak("A auto-colisão usa hash espacial vértice-vértice; vértices vizinhos e costuras são excluídos.");
         ui.checkbox(&mut p.parallel, "paralelo (rayon)");
@@ -885,14 +897,31 @@ impl ClothEvoApp {
         ui.label(format!("energia cinética: {:.4} J", sim.kinetic_energy()));
         ui.label(format!("velocidade máx.: {:.2} m/s · deslocamento do substep: {:.1} mm",
             sim.max_particle_speed(), sim.max_particle_displacement() * 1000.0));
-        let unstable = sim.unstable_particle_count(10.0);
+        let speed_limit = self.sim.params.max_particle_speed.clamp(1.0, 100.0);
+        let unstable = sim.unstable_particle_count(speed_limit);
+        if sim.stability_corrections() > 0 {
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 180, 80),
+                format!("Correções de estabilidade no último passo: {}", sim.stability_corrections()),
+            );
+        }
         if unstable > 0 {
             ui.colored_label(
                 egui::Color32::from_rgb(255, 92, 92),
-                format!("Partículas instáveis: {} acima de 10 m/s ou com dados inválidos", unstable),
+                format!("Partículas instáveis: {} acima de {:.1} m/s ou com dados inválidos", unstable, speed_limit),
             );
         } else {
-            ui.colored_label(egui::Color32::LIGHT_GREEN, "Partículas: estáveis (limiar de 10 m/s)");
+            ui.colored_label(
+                egui::Color32::LIGHT_GREEN,
+                format!("Partículas dentro do limite de estabilidade ({:.1} m/s)", speed_limit),
+            );
+        }
+        if self.sim.params.self_collision {
+            ui.label(format!(
+                "auto-colisão: {} contatos · penetração máxima {:.2} mm",
+                sim.self_collision_contacts(),
+                sim.self_collision_max_penetration() * 1000.0
+            ));
         }
         if !self.seam_pairs.is_empty() {
             ui.label(format!("abertura máx. das costuras: {:.1} mm", self.seam_gap_max() * 1000.0));
