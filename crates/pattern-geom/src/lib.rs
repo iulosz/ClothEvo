@@ -627,6 +627,100 @@ mod tests {
         assert!(curve_length(&curve, 16) > 1.0);
     }
 
+    fn edge_points(sampled: &SampledCurve, segment_index: usize) -> Vec<Point2> {
+        let (start, end) = sampled.segment_vertex_ranges[segment_index];
+        if end >= start {
+            (start..=end).map(|index| sampled.points[index]).collect()
+        } else {
+            (start..sampled.points.len()).chain(0..=end)
+                .map(|index| sampled.points[index]).collect()
+        }
+    }
+
+    fn normalized_arc(points: &[Point2]) -> Vec<f64> {
+        let mut cumulative = vec![0.0];
+        for pair in points.windows(2) {
+            cumulative.push(cumulative.last().copied().unwrap() + pair[0].distance(pair[1]));
+        }
+        let total = cumulative.last().copied().unwrap_or(0.0).max(EPS);
+        cumulative.iter().map(|length| length / total).collect()
+    }
+
+    #[test]
+    fn spacing_aware_sampling_subdivides_long_linear_boundaries() {
+        let mut piece = PatternPiece::from_polygon(1, "Retângulo", &[
+            Point2::new(0.0, 0.0),
+            Point2::new(2.0, 0.0),
+            Point2::new(2.0, 1.0),
+            Point2::new(0.0, 1.0),
+        ]).unwrap();
+        piece.fabric.particle_distance_meters = 0.25;
+        let sampled = sample_pattern_outlines_with_seam_sync(&[piece], &[]).unwrap();
+        let outline = &sampled[&1];
+        assert_eq!(outline.segment_vertex_ranges.len(), 4);
+        assert!(outline.points.len() >= 24);
+        for index in 0..outline.points.len() {
+            let next = outline.points[(index + 1) % outline.points.len()];
+            assert!(outline.points[index].distance(next) <= 0.250_001);
+        }
+    }
+
+    #[test]
+    fn asymmetric_seam_edges_get_identical_normalized_node_distribution() {
+        let mut longer = PatternPiece::from_polygon(1, "Borda longa", &[
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(1.0, 2.0),
+            Point2::new(0.0, 2.0),
+        ]).unwrap();
+        let mut shorter = PatternPiece::from_polygon(2, "Borda curta", &[
+            Point2::new(2.0, 0.0),
+            Point2::new(3.0, 0.0),
+            Point2::new(3.0, 1.0),
+            Point2::new(2.0, 1.0),
+        ]).unwrap();
+        longer.fabric.particle_distance_meters = 0.5;
+        shorter.fabric.particle_distance_meters = 0.4;
+        let edge_a = pattern_core::EdgeRef::single_segment(1, 1);
+        let mut edge_b = pattern_core::EdgeRef::single_segment(2, 3);
+        // A borda esquerda do segundo molde tem orientação oposta à borda direita do primeiro.
+        edge_b.reversed = true;
+        let seam = SeamDefinition {
+            id: 7,
+            name: "Lateral".into(),
+            a: edge_a,
+            b: edge_b,
+            ease_meters: 0.0,
+        };
+        let sampled = sample_pattern_outlines_with_seam_sync(&[longer, shorter], &[seam]).unwrap();
+        let a = edge_points(&sampled[&1], 1);
+        let mut b = edge_points(&sampled[&2], 3);
+        b.reverse();
+        assert_eq!(a.len(), b.len(), "ambos os lados da costura devem ter nós correspondentes");
+        let arc_a = normalized_arc(&a);
+        let arc_b = normalized_arc(&b);
+        assert_eq!(arc_a.len(), arc_b.len());
+        for (a, b) in arc_a.iter().zip(&arc_b) {
+            assert!((a - b).abs() < 1.0e-6, "frações de arco divergentes: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn synchronized_sampling_keeps_original_segment_ranges_and_reversed_closure() {
+        let piece = PatternPiece::from_polygon(5, "Costura de fechamento", &[
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(1.0, 1.0),
+            Point2::new(0.0, 1.0),
+        ]).unwrap();
+        let sampled = sample_pattern_outlines_with_seam_sync(&[piece], &[]).unwrap();
+        let outline = &sampled[&5];
+        assert_eq!(outline.segment_vertex_ranges.len(), 4);
+        let closing = outline.segment_vertex_ranges[3];
+        assert_eq!(closing.1, 0);
+        assert!(edge_points(outline, 3).len() >= 2);
+    }
+
     #[test]
     fn polygon_offset_expands_rectangle() {
         let rect = [
