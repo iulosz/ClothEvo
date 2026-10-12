@@ -5,8 +5,9 @@ use std::fmt;
 
 pub mod editor_ops;
 pub use editor_ops::{
-    extract_segment_range, insert_anchor, mirror_curve_x, project_point_to_curve,
-    rectangle, regular_polygon, resample_curve, translate_curve, CurveProjection,
+    cut_closed_outline, extract_segment_range, insert_anchor, mirror_curve_x,
+    project_point_to_curve, rectangle, regular_polygon, resample_curve, translate_curve,
+    CutAndSewResult, CurveProjection, SourceSegmentFragment,
 };
 
 const EPS: f64 = 1.0e-9;
@@ -225,6 +226,42 @@ pub fn offset_polygon(polygon: &[Point2], distance: f64) -> Result<Vec<Point2>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cut_closed_outline_creates_two_valid_pieces_and_cut_edge_ranges() {
+        let outline = rectangle(Point2::new(0.0, 0.0), Point2::new(2.0, 1.0)).unwrap();
+        let cut = Curve2D::polyline(&[
+            Point2::new(1.0, 0.0), Point2::new(1.0, 1.0)
+        ], false).unwrap();
+        let result = cut_closed_outline(&outline, &cut, 0.02).unwrap();
+        assert!(result.first.closed && result.second.closed);
+        assert_eq!(result.first_cut_segment_range.1 - result.first_cut_segment_range.0, 1);
+        assert_eq!(result.second_cut_segment_range.1 - result.second_cut_segment_range.0, 1);
+        let first_area = signed_area(&sample_curve(&result.first, 16)).abs();
+        let second_area = signed_area(&sample_curve(&result.second, 16)).abs();
+        assert!((first_area - 1.0).abs() < 1e-6);
+        assert!((second_area - 1.0).abs() < 1e-6);
+        assert!(result.source_segment_fragments[0].len() == 2);
+        assert!(result.source_segment_fragments[2].len() == 2);
+    }
+
+    #[test]
+    fn cut_closed_outline_rejects_endpoints_far_from_boundary() {
+        let outline = rectangle(Point2::new(0.0, 0.0), Point2::new(2.0, 1.0)).unwrap();
+        let cut = Curve2D::polyline(&[
+            Point2::new(0.5, 0.4), Point2::new(1.5, 0.4)
+        ], false).unwrap();
+        assert!(cut_closed_outline(&outline, &cut, 0.01).is_err());
+    }
+
+    #[test]
+    fn cut_closed_outline_rejects_path_that_leaves_the_pattern() {
+        let outline = rectangle(Point2::new(0.0, 0.0), Point2::new(2.0, 1.0)).unwrap();
+        let cut = Curve2D::polyline(&[
+            Point2::new(0.0, 0.0), Point2::new(1.0, 1.2), Point2::new(2.0, 0.0)
+        ], false).unwrap();
+        assert!(cut_closed_outline(&outline, &cut, 0.02).is_err());
+    }
 
     #[test]
     fn pattern_primitives_create_closed_vector_outlines() {
