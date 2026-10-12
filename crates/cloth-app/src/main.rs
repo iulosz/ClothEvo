@@ -768,9 +768,10 @@ impl ClothEvoApp {
         }
 
         ui.separator();
-        ui.strong("Malha 2D");
-        ui.add(egui::Slider::new(&mut self.pattern_spacing, 0.025..=0.20).text("espaçamento (m)"));
+        ui.strong("Pré-visualização da malha 2D");
+        ui.add(egui::Slider::new(&mut self.pattern_spacing, 0.025..=0.20).text("espaçamento visual (m)"));
         ui.checkbox(&mut self.pattern_show_mesh, "Mostrar triangulação");
+        ui.weak("A resolução da simulação 3D é definida separadamente em Física e montagem 3D por molde.");
         ui.label("Os projetos são armazenados em JSON no formato nativo .clothevo.");
 
         ui.separator();
@@ -1997,13 +1998,20 @@ impl ClothEvoApp {
                         piece: piece_index,
                         index: anchor_index,
                     });
-                    painter.circle_filled(
-                        screen,
-                        if selected { 6.0 } else { 4.0 },
-                        if selected { egui::Color32::WHITE } else { egui::Color32::from_rgb(255, 190, 75) },
-                    );
-                    if selected {
-                        painter.circle_stroke(screen, 9.0, egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 190, 75)));
+                    let pinned = piece.assembly.pinned_anchors.contains(&(anchor_index as u32));
+                    let color = if pinned {
+                        egui::Color32::from_rgb(255, 80, 95)
+                    } else if selected {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_rgb(255, 190, 75)
+                    };
+                    painter.circle_filled(screen, if selected || pinned { 6.0 } else { 4.0 }, color);
+                    if selected || pinned {
+                        painter.circle_stroke(
+                            screen, 9.0,
+                            egui::Stroke::new(1.5, if pinned { color } else { egui::Color32::from_rgb(255, 190, 75) }),
+                        );
                     }
                 }
             }
