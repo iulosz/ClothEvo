@@ -4966,8 +4966,9 @@ mod pattern_editor_tests {
             stiffness: 0.35,
             angle_radians: std::f64::consts::FRAC_PI_6,
         });
+        let sampled = sample_pattern_outlines_with_seam_sync(&[piece.clone()], &[]).unwrap();
         let mesh = triangulate_outline(
-            &sample_curve_with_ranges(&piece.outline, 1).points,
+            &sampled[&21].points,
             piece.fabric.particle_distance_meters,
         ).unwrap();
         let folds = physical_fold_edges(&mesh.vertices, &mesh.triangles, &piece);
@@ -4995,8 +4996,9 @@ mod pattern_editor_tests {
             depth_meters: 0.20,
             angle_radians: 0.50,
         });
+        let sampled = sample_pattern_outlines_with_seam_sync(&[piece.clone()], &[]).unwrap();
         let mesh = triangulate_outline(
-            &sample_curve_with_ranges(&piece.outline, 1).points,
+            &sampled[&22].points,
             piece.fabric.particle_distance_meters,
         ).unwrap();
         let folds = physical_fold_edges(&mesh.vertices, &mesh.triangles, &piece);
