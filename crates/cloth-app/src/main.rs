@@ -93,6 +93,13 @@ struct PatternEditorSnapshot {
     selected_target: Option<PatternEditTarget>,
 }
 
+#[derive(Clone, Debug)]
+struct PieceSampleMapping {
+    ranges: Vec<(usize, usize)>,
+    /// (segment, t, índice de vértice na borda amostrada).
+    forced_vertices: Vec<(u32, f64, usize)>,
+}
+
 impl PatternEditTarget {
     fn piece(self) -> usize {
         match self {
@@ -2688,6 +2695,29 @@ impl ClothEvoApp {
             return Err("O projeto não contém peças.".into());
         }
 
+        // Força todos os piques e extremos de costura para dentro da amostragem de contorno
+        // antes da triangulação. As extremidades não são aproximadas ao vértice vizinho.
+        let mut forced_by_piece: std::collections::HashMap<u64, Vec<(u32, f64)>> =
+            std::collections::HashMap::new();
+        for piece in &self.pattern_project.pieces {
+            forced_by_piece.entry(piece.id).or_default()
+                .extend(piece.notches.iter().map(|notch| (notch.segment_index, notch.t)));
+        }
+        for seam in &self.pattern_project.seams {
+            for edge in [&seam.a, &seam.b] {
+                if edge.curve != BoundaryCurve::Outline { continue; }
+                let points = forced_by_piece.entry(edge.piece_id).or_default();
+                points.push((edge.start.segment, edge.start.t));
+                points.push((edge.end.segment, edge.end.t));
+            }
+        }
+        for params in forced_by_piece.values_mut() {
+            params.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| {
+                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+            }));
+            params.dedup_by(|a, b| a.0 == b.0 && (a.1 - b.1).abs() <= 1.0e-9);
+        }
+
         // Cada molde usa a sua própria distância entre partículas. As coordenadas da malha
         // são recentradas por peça, para que a transformação 3D gire em torno do centro do painel.
         let mut prepared = Vec::with_capacity(self.pattern_project.pieces.len());
@@ -2696,20 +2726,28 @@ impl ClothEvoApp {
             if !particle_distance.is_finite() || particle_distance <= 0.0 {
                 return Err(format!("Distância entre partículas inválida em '{}'.", piece.name));
             }
-            let sampled = sample_curve_with_ranges(&piece.outline, 8);
+            let params = forced_by_piece.get(&piece.id).cloned().unwrap_or_default();
+            let (sampled, forced_indices) = sample_curve_with_forced_params(&piece.outline, 8, &params)
+                .map_err(|e| format!("Não foi possível amostrar as costuras/piques de '{}': {e}", piece.name))?;
             validate_simple_polygon(&sampled.points)
                 .map_err(|e| format!("Contorno inválido em '{}': {e}", piece.name))?;
-            let mesh = triangulate_outline(&sampled.points, particle_distance)
-                .map_err(|e| format!("Não foi possível triangular '{}': {e}", piece.name))?;
+            let mesh = triangulate_outline_with_forced_vertices(
+                &sampled.points, particle_distance, &forced_indices,
+            ).map_err(|e| format!("Não foi possível triangular '{}': {e}", piece.name))?;
             if mesh.boundary_vertex_count != sampled.points.len() {
                 return Err(format!("Mapeamento de contorno inválido na peça '{}'.", piece.name));
             }
+            let mapping = PieceSampleMapping {
+                ranges: sampled.segment_vertex_ranges,
+                forced_vertices: params.iter().copied().zip(forced_indices.iter().copied())
+                    .map(|((segment, t), index)| (segment, t, index)).collect(),
+            };
             let grain = piece.grain_line.as_ref().map(|line| {
                 Vec2::new((line.end.x - line.start.x) as f32, (line.end.y - line.start.y) as f32)
             }).unwrap_or(Vec2::Y);
             prepared.push((
                 piece.id,
-                sampled.segment_vertex_ranges,
+                mapping,
                 mesh,
                 piece.fabric.clone(),
                 piece.assembly.clone(),
@@ -2744,7 +2782,7 @@ impl ClothEvoApp {
         struct PieceBuildInfo {
             id: u64,
             handle: cloth_sim::PanelHandle,
-            ranges: Vec<(usize, usize)>,
+            sample: PieceSampleMapping,
             boundary_count: usize,
         }
         let mut infos: Vec<PieceBuildInfo> = Vec::new();
@@ -2752,7 +2790,7 @@ impl ClothEvoApp {
         let x_span = (max_x - min_x).max(1.0e-6);
         let origin_y = (0.9 - min_y) as f32;
 
-        for (piece_index, (id, ranges, mesh, fabric, assembly, grain, name)) in
+        for (piece_index, (id, sample, mesh, fabric, assembly, grain, name)) in
             prepared.into_iter().enumerate()
         {
             let mesh_min_x = mesh.vertices.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
@@ -2808,7 +2846,7 @@ impl ClothEvoApp {
             // segmento anterior. Os índices são os mesmos que o editor exibe ao selecionar nós.
             for anchor in &assembly.pinned_anchors {
                 let anchor_index = *anchor as usize;
-                if anchor_index >= ranges.len() {
+                if anchor_index >= sample.ranges.len() {
                     return Err(format!(
                         "O vértice fixado {} não existe no contorno de '{}'.",
                         anchor_index + 1, name
@@ -2817,7 +2855,7 @@ impl ClothEvoApp {
                 let local_index = if anchor_index == 0 {
                     0
                 } else {
-                    ranges[anchor_index - 1].1 % mesh.boundary_vertex_count
+                    sample.ranges[anchor_index - 1].1 % mesh.boundary_vertex_count
                 };
                 builder.pin(handle.global(local_index as u32));
             }
@@ -2825,7 +2863,7 @@ impl ClothEvoApp {
             infos.push(PieceBuildInfo {
                 id,
                 handle,
-                ranges,
+                sample,
                 boundary_count: mesh.boundary_vertex_count,
             });
         }
@@ -2841,8 +2879,12 @@ impl ClothEvoApp {
                 .ok_or_else(|| format!("Peça A ausente na costura '{}'.", seam.name))?;
             let info_b = infos.iter().find(|info| info.id == seam.b.piece_id)
                 .ok_or_else(|| format!("Peça B ausente na costura '{}'.", seam.name))?;
-            let locals_a = sampled_edge_indices(&seam.a, &info_a.ranges, info_a.boundary_count)?;
-            let locals_b = sampled_edge_indices(&seam.b, &info_b.ranges, info_b.boundary_count)?;
+            let locals_a = sampled_edge_indices(
+                &seam.a, &info_a.sample.ranges, &info_a.sample.forced_vertices, info_a.boundary_count,
+            )?;
+            let locals_b = sampled_edge_indices(
+                &seam.b, &info_b.sample.ranges, &info_b.sample.forced_vertices, info_b.boundary_count,
+            )?;
             let globals_a = info_a.handle.globals(&locals_a);
             let globals_b = info_b.handle.globals(&locals_b);
             let notch_markers = paired_notch_markers(&self.pattern_project, &seam.a, &seam.b);
