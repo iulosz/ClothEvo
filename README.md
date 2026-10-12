@@ -220,7 +220,7 @@ Os comandos **Pausar**, **Passo único** e **Reiniciar** são independentes: o p
 
 ## Posicionamento 3D pré-simulação
 
-O Pattern Studio inclui a silhueta de referência **T-POSE** enviada para o projeto, traçada como contorno vetorial e exibida como overlay no canvas 2D pela opção **Guia anatômico T-Pose**. A silhueta mantém a proporção da imagem e altura de referência de 1,72 m; é um gabarito visual de proporção, não um avatar de fabricação.
+O Pattern Studio usa o arquivo PNG raster da referência **T-POSE** em `assets/t_pose_reference.png`, exibido diretamente como textura no canvas 2D pela opção **Guia anatômico T-Pose**. O contorno não é vetorizado nem reconstruído. A imagem conserva sua proporção de pixels (585 × 632) e é exibida com altura de referência de 1,72 m e largura derivada dessa proporção; é um gabarito visual, não um avatar de fabricação.
 
 Use **Posicionar moldes na cena 3D** para gerar uma prévia dos painéis em torno do manequim sem iniciar automaticamente a física. Selecione um painel e escolha no painel lateral o modo **Mover**, **Girar**, **Escalar** ou **Transformar**:
 
