@@ -185,7 +185,7 @@ Cada molde possui um painel **Física e montagem 3D por molde** no Pattern Studi
 - **Âncoras:** selecione um vértice do contorno e use **Fixar vértice ... na simulação** para criar um ponto preso; o vértice fica marcado em vermelho. A fixação é armazenada no projeto e mantida ao iniciar a simulação.
 - **Costuras:** o comando **Montar e simular na viewport 3D** triangula cada molde com seu próprio espaçamento, aplica as transformações e materiais, configura as âncoras e converte as referências de aresta em restrições de costura XPBD.
 
-O construtor do solver aceita `PanelMaterial` por painel. As diferenças de densidade alteram a massa por partícula; as rigidezes anisotrópicas e de flexão alteram a compliance das respectivas restrições; a espessura altera o afastamento de colisão por partícula. Os controles globais continuam funcionando como multiplicadores gerais relativos à configuração com a qual a simulação foi montada. A folga diferencial (*ease*) entre costuras é preservada nos dados, mas ainda não modifica o comprimento de repouso da costura física.
+O construtor do solver aceita `PanelMaterial` por painel. As diferenças de densidade alteram a massa por partícula; as rigidezes anisotrópicas e de flexão alteram a compliance das respectivas restrições; a espessura altera o afastamento de colisão por partícula. Os controles globais continuam funcionando como multiplicadores gerais relativos à configuração com a qual a simulação foi montada. A folga diferencial (*ease*) ajusta o comprimento de repouso das arestas selecionadas para acomodar a diferença-alvo entre as bordas.
 
 
 
@@ -205,3 +205,14 @@ No Pattern Studio, selecione uma costura existente para editar os moldes, interv
 O solver faz pareamento das duas bordas pelo comprimento de arco normalizado e cobre os vértices de ambos os lados mesmo quando a malha tem densidades diferentes. Piques (notches) podem ser adicionados, editados e removidos; os piques de ambas as bordas são pareados por progresso de arco e recebem vínculos explícitos no solver. O canvas 2D mostra piques e costuras, com vermelho para diferenças medidas que não coincidem com a meta. Na viewport 3D, vínculos cuja abertura supera 15 mm são realçados em vermelho; essa abertura é um indicador de diagnóstico, não uma estimativa de força em newtons.
 
 Ações disponíveis: criar costura, selecionar e alterar uma costura existente, inverter a direção de A ou B, selecionar intervalos com vários segmentos e descosturar. A simulação atual ainda costura apenas bordas do contorno; linhas de costura internas exigem um mapeamento de malha próprio em uma etapa futura.
+
+
+## Estabilidade da simulação
+
+Na viewport de simulação, ajuste **substeps por quadro** e **iterações por substep**: aumentar substeps costuma estabilizar movimentos rápidos; aumentar iterações melhora a convergência das restrições, com custo adicional. O limite de velocidade por partícula atua como salvaguarda contra deslocamentos extremos. Se forem encontrados valores não finitos, a simulação pausa e retorna ao estado inicial da cena para impedir que geometria inválida continue sendo propagada.
+
+**Auto-colisão** usa uma hash grid espacial para testar pares de vértices não adjacentes; arestas de malha, vértices do mesmo triângulo e pares ligados por costura são excluídos para reduzir jitter. Está desligada por padrão devido ao custo extra em malhas densas. É uma aproximação vértice-vértice: ainda não resolve todas as interseções triângulo-triângulo nem as colisões entre aresta e face.
+
+O atrito da seção **Física e montagem 3D por molde** é configurável por tecido e afeta o contato com colisores e outras partes do pano. Os controles globais de atrito e espessura continuam atuando como multiplicadores. As métricas mostram velocidade máxima, deslocamento do último substep, partículas acima do limiar de velocidade e aberturas críticas nas costuras.
+
+Os comandos **Pausar**, **Passo único** e **Reiniciar** são independentes: o passo único pausa antes de avançar exatamente um passo fixo; reiniciar restaura o estado de colocação e mantém a simulação pausada.

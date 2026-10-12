@@ -318,10 +318,13 @@ impl ClothEvoApp {
         while self.accumulator >= FIXED_DT {
             self.sim.step(FIXED_DT);
             self.accumulator -= FIXED_DT;
-        }
-        if !self.sim.is_finite() {
-            self.playing = false;
-            self.diverged = true;
+            if !self.sim.is_finite() {
+                self.playing = false;
+                self.diverged = true;
+                self.accumulator = 0.0;
+                self.sim.reset();
+                return;
+            }
         }
     }
 
@@ -383,20 +386,39 @@ impl ClothEvoApp {
         ui.horizontal(|ui| {
             let label = if self.playing { "⏸ Pausar" } else { "▶ Continuar" };
             if ui.button(label).clicked() {
-                self.playing = !self.playing;
-                self.diverged = false;
+                if self.diverged {
+                    self.sim.reset();
+                    self.accumulator = 0.0;
+                    self.diverged = false;
+                    self.playing = true;
+                } else {
+                    self.playing = !self.playing;
+                }
             }
-            if ui.button("⏭ Passo").clicked() {
+            if ui.button("⏭ Passo único").clicked() {
+                self.playing = false;
+                self.accumulator = 0.0;
                 self.sim.step(FIXED_DT);
+                self.last_step_ms = self.sim.stats.step_ms;
+                if !self.sim.is_finite() {
+                    self.sim.reset();
+                    self.last_step_ms = 0.0;
+                    self.diverged = true;
+                }
             }
             if ui.button("↺ Reiniciar").clicked() {
                 self.sim.reset();
+                self.last_step_ms = 0.0;
+                self.playing = false;
                 self.diverged = false;
                 self.accumulator = 0.0;
             }
         });
         if self.diverged {
-            ui.colored_label(egui::Color32::LIGHT_RED, "A simulação divergiu (NaN). Reinicie e aumente os substeps.");
+            ui.colored_label(
+                egui::Color32::LIGHT_RED,
+                "Instabilidade numérica detectada: simulação pausada e restaurada ao estado inicial. Aumente substeps/iterações ou reduza rigidez.",
+            );
         }
 
         // ----- Tecido
@@ -426,9 +448,13 @@ impl ClothEvoApp {
 
         // ----- Solver
         ui.separator();
-        ui.strong("Solver");
-        ui.add(egui::Slider::new(&mut p.substeps, 1..=60).text("substeps"));
-        ui.add(egui::Slider::new(&mut p.iterations, 1..=8).text("iterações"));
+        ui.strong("Solver e estabilidade");
+        ui.add(egui::Slider::new(&mut p.substeps, 1..=80).text("substeps por quadro"));
+        ui.add(egui::Slider::new(&mut p.iterations, 1..=12).text("iterações por substep"));
+        ui.add(egui::Slider::new(&mut p.max_particle_speed, 2.0..=60.0)
+            .text("limite de velocidade (m/s)"));
+        ui.checkbox(&mut p.self_collision, "Auto-colisão (mais custo)");
+        ui.weak("A auto-colisão usa hash espacial vértice-vértice; vértices vizinhos e costuras são excluídos.");
         ui.checkbox(&mut p.parallel, "paralelo (rayon)");
 
         // ----- Visualização
@@ -453,8 +479,23 @@ impl ClothEvoApp {
         ui.colored_label(color, format!("passo: {ms:.2} ms (orçamento {budget:.1} ms a 60 Hz)"));
         ui.label(format!("deformação máx.: {:.1} %", sim.max_strain() * 100.0));
         ui.label(format!("energia cinética: {:.4} J", sim.kinetic_energy()));
+        ui.label(format!("velocidade máx.: {:.2} m/s · deslocamento do substep: {:.1} mm",
+            sim.max_particle_speed(), sim.max_particle_displacement() * 1000.0));
+        let unstable = sim.unstable_particle_count(10.0);
+        if unstable > 0 {
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 92, 92),
+                format!("Partículas instáveis: {} acima de 10 m/s ou com dados inválidos", unstable),
+            );
+        } else {
+            ui.colored_label(egui::Color32::LIGHT_GREEN, "Partículas: estáveis (limiar de 10 m/s)");
+        }
         if !self.seam_pairs.is_empty() {
             ui.label(format!("abertura máx. das costuras: {:.1} mm", self.seam_gap_max() * 1000.0));
+            let seam_load = sim.seam_tension_estimate_max_n();
+            let load_color = if seam_load > 100.0 { egui::Color32::from_rgb(255, 92, 92) } else { egui::Color32::LIGHT_GREEN };
+            ui.colored_label(load_color, format!("carga XPBD estimada máx. da costura: {:.2} N", seam_load));
+            ui.weak("Estimativa do multiplicador XPBD; indicador comparativo, não força experimental calibrada.");
         }
         let critical_seams = self.sim.seam_warning_pairs(0.015).len();
         if critical_seams > 0 {
@@ -866,6 +907,9 @@ impl ClothEvoApp {
                     changed |= ui.add(egui::Slider::new(
                         &mut piece.fabric.thickness_meters, 0.0001..=0.01,
                     ).text("Espessura (m)")).changed();
+                    changed |= ui.add(egui::Slider::new(
+                        &mut piece.fabric.friction_coefficient, 0.0..=1.5,
+                    ).text("Atrito deste tecido")).changed();
                     changed |= ui.add(egui::Slider::new(
                         &mut piece.fabric.particle_distance_meters, 0.01..=0.20,
                     ).text("Distância entre partículas (m)")).changed();
@@ -2653,6 +2697,7 @@ impl ClothEvoApp {
                 shear_n_m: fabric.shear_n_m as f32,
                 bend_nm: fabric.bend_nm as f32,
                 thickness_meters: fabric.thickness_meters as f32,
+                friction_coefficient: fabric.friction_coefficient as f32,
             };
             let handle = builder.add_panel_with_grain_and_material(
                 &panel_mesh,
@@ -3572,17 +3617,23 @@ impl eframe::App for ClothEvoApp {
             if undo { self.undo_pattern_edit(); }
             if redo { self.redo_pattern_edit(); }
         }
-        // Em captura, simula em passos fixos independentemente do tempo real.
+        // Avança depois de processar os controles deste frame. Assim, "Passo único" pausa
+        // antes do solver rodar e nunca recebe um passo automático adicional no mesmo frame.
         let dt = if self.capture.is_some() { FIXED_DT } else { ui.input(|i| i.stable_dt) };
+        let was_simulation_workspace = self.workspace == WorkspaceMode::Simulation;
+        let diverged_before = self.diverged;
         let steps_before = self.sim.stats.steps;
-        if self.workspace == WorkspaceMode::Simulation { self.advance(dt); }
-        if self.sim.stats.steps != steps_before {
-            self.last_step_ms = self.sim.stats.step_ms;
-        }
 
         egui::Panel::left("controls").default_size(310.0).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui));
         });
+        if was_simulation_workspace {
+            self.advance(dt);
+        }
+        if self.sim.stats.steps != steps_before {
+            self.last_step_ms = self.sim.stats.step_ms;
+        }
+
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             if self.workspace == WorkspaceMode::Pattern {
                 self.pattern_viewport(ui);
@@ -3592,6 +3643,10 @@ impl eframe::App for ClothEvoApp {
         });
 
         self.handle_capture(ui);
+        if self.diverged && !diverged_before {
+            // O diagnóstico foi definido após renderizar o painel de controles deste frame.
+            ui.ctx().request_repaint();
+        }
         if (self.playing && self.workspace == WorkspaceMode::Simulation) || self.capture.is_some() {
             ui.ctx().request_repaint();
         }

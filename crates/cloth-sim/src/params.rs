@@ -44,6 +44,11 @@ pub struct SimParams {
     pub thickness: f32,
     /// Coeficiente de atrito de Coulomb com os colisores.
     pub friction: f32,
+    /// Habilita auto-colisão aproximada partícula-partícula via hash espacial.
+    /// Desligada por padrão para preservar desempenho em malhas densas.
+    pub self_collision: bool,
+    /// Limite de segurança de velocidade por partícula (m/s), aplicado após a projeção.
+    pub max_particle_speed: f32,
     /// Resolver restrições em paralelo (rayon).
     pub parallel: bool,
 }
@@ -66,6 +71,8 @@ impl Default for SimParams {
             seam_pull_speed: 0.5,
             thickness: 0.005,
             friction: 0.4,
+            self_collision: false,
+            max_particle_speed: 25.0,
             parallel: true,
         };
         FabricPreset::Cotton.apply(&mut p);
@@ -135,6 +142,8 @@ pub struct PanelMaterial {
     pub shear_n_m: f32,
     pub bend_nm: f32,
     pub thickness_meters: f32,
+    /// Atrito por tecido; o controle global de atrito atua como multiplicador.
+    pub friction_coefficient: f32,
 }
 
 impl Default for PanelMaterial {
@@ -146,6 +155,7 @@ impl Default for PanelMaterial {
             shear_n_m: 300.0,
             bend_nm: 5.0e-5,
             thickness_meters: 0.005,
+            friction_coefficient: 0.4,
         }
     }
 }
@@ -163,6 +173,9 @@ impl PanelMaterial {
         if values.iter().any(|value| !value.is_finite() || *value <= 0.0) {
             return Err("As propriedades físicas do painel precisam ser finitas e positivas.");
         }
+        if !self.friction_coefficient.is_finite() || !(0.0..=5.0).contains(&self.friction_coefficient) {
+            return Err("O atrito do painel precisa estar entre 0 e 5.");
+        }
         Ok(self)
     }
 
@@ -176,3 +189,17 @@ impl PanelMaterial {
     }
 }
 
+
+
+#[cfg(test)]
+mod panel_material_validation_tests {
+    use super::*;
+
+    #[test]
+    fn panel_material_allows_zero_friction_and_rejects_negative_friction() {
+        let no_friction = PanelMaterial { friction_coefficient: 0.0, ..PanelMaterial::default() };
+        assert!(no_friction.validate().is_ok());
+        let negative = PanelMaterial { friction_coefficient: -0.1, ..PanelMaterial::default() };
+        assert!(negative.validate().is_err());
+    }
+}

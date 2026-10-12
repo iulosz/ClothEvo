@@ -158,6 +158,8 @@ pub struct Pleat {
 }
 
 /// Propriedades físicas específicas do molde, em unidades SI.
+fn default_fabric_friction() -> f64 { 0.4 }
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FabricProperties {
     pub density_kg_m2: f64,
@@ -166,6 +168,9 @@ pub struct FabricProperties {
     pub shear_n_m: f64,
     pub bend_nm: f64,
     pub thickness_meters: f64,
+    /// Atrito do tecido em contato com avatar e outras partes do próprio tecido.
+    #[serde(default = "default_fabric_friction")]
+    pub friction_coefficient: f64,
     pub particle_distance_meters: f64,
 }
 
@@ -178,6 +183,7 @@ impl Default for FabricProperties {
             shear_n_m: 1_200.0,
             bend_nm: 0.0001,
             thickness_meters: 0.001,
+            friction_coefficient: default_fabric_friction(),
             particle_distance_meters: 0.04,
         }
     }
@@ -410,6 +416,11 @@ impl PatternProject {
             if fabric_values.iter().any(|value| !value.is_finite() || *value <= 0.0) {
                 return Err(format!("As propriedades físicas do molde '{}' precisam ser finitas e positivas.", piece.name));
             }
+            if !piece.fabric.friction_coefficient.is_finite()
+                || !(0.0..=5.0).contains(&piece.fabric.friction_coefficient)
+            {
+                return Err(format!("O atrito do tecido '{}' precisa estar entre 0 e 5.", piece.name));
+            }
             if piece.assembly.translation_meters.iter().chain(piece.assembly.rotation_degrees.iter())
                 .any(|value| !value.is_finite())
             {
@@ -565,6 +576,8 @@ mod tests {
             "darts":[],"notches":[],"holes":[],"annotations":[]}],"seams":[]}"#;
         let project = PatternProject::from_json(json).unwrap();
         assert_eq!(project.pieces[0].assembly, AssemblyTransform::default());
+        // Novos parâmetros físicos de versões posteriores assumem seus defaults em projetos legados.
+        assert_eq!(project.pieces[0].fabric.friction_coefficient, 0.4);
     }
 
     #[test]
@@ -576,6 +589,19 @@ mod tests {
         let project = PatternProject::from_json(json).unwrap();
         assert!(project.symmetry_links.is_empty());
         assert_eq!(project.avatar, AvatarDimensions::default());
+    }
+
+    #[test]
+    fn zero_fabric_friction_is_valid_but_negative_friction_is_rejected() {
+        let mut project = PatternProject::new("Atrito");
+        project.pieces.push(PatternPiece::from_polygon(1, "A", &[
+            Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
+            Point2::new(1.0, 1.0), Point2::new(0.0, 1.0),
+        ]).unwrap());
+        project.pieces[0].fabric.friction_coefficient = 0.0;
+        assert!(project.validate().is_ok());
+        project.pieces[0].fabric.friction_coefficient = -0.01;
+        assert!(project.validate().is_err());
     }
 
     #[test]
