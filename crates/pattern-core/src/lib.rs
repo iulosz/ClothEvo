@@ -563,9 +563,22 @@ impl PatternProject {
                 for pair in paths.windows(2) {
                     let left_end = if pair[0].reversed { pair[0].start_position() } else { pair[0].end_position() };
                     let right_start = if pair[1].reversed { pair[1].end_position() } else { pair[1].start_position() };
-                    if pair[0].piece_id == pair[1].piece_id && pair[0].curve == pair[1].curve
-                        && (left_end - right_start).abs() > 1.0e-6
-                    {
+                    let has_gap = if pair[0].piece_id == pair[1].piece_id && pair[0].curve == pair[1].curve {
+                        (left_end - right_start).abs() > 1.0e-6
+                    } else {
+                        let end_param = if pair[0].reversed { pair[0].start } else { pair[0].end };
+                        let start_param = if pair[1].reversed { pair[1].end } else { pair[1].start };
+                        match (
+                            edge_param_world(self, &pair[0], end_param),
+                            edge_param_world(self, &pair[1], start_param),
+                        ) {
+                            (Some(a), Some(b)) => {
+                                ((a[0]-b[0]).powi(2) + (a[1]-b[1]).powi(2) + (a[2]-b[2]).powi(2)).sqrt() > 0.01
+                            }
+                            _ => true,
+                        }
+                    };
+                    if has_gap {
                         warnings.push(format!(
                             "A costura '{}' tem uma lacuna entre bordas consecutivas do lado {}.",
                             seam.name, label
@@ -834,6 +847,25 @@ fn rotate_euler_xyz(point: [f64; 3], degrees: [f64; 3]) -> [f64; 3] {
     let y2 = y1;
     let z2 = -sy * x1 + cy * z1;
     [cz * x2 - sz * y2, sz * x2 + cz * y2, z2]
+}
+
+fn edge_param_world(
+    project: &PatternProject,
+    edge: &EdgePath,
+    param: CurveParam,
+) -> Option<[f64; 3]> {
+    let piece = project.pieces.iter().find(|piece| piece.id == edge.piece_id)?;
+    let curve = match edge.curve {
+        BoundaryCurve::Outline => Some(&piece.outline),
+        BoundaryCurve::SewingLine => piece.sewing_line.as_ref(),
+    }?;
+    let point = curve_point_at(curve, param.segment as usize, param.t)?;
+    let rotated = rotate_euler_xyz([point.x, point.y, 0.0], piece.assembly.rotation_degrees);
+    Some([
+        rotated[0] + piece.assembly.translation_meters[0],
+        rotated[1] + piece.assembly.translation_meters[1],
+        rotated[2] + piece.assembly.translation_meters[2],
+    ])
 }
 
 fn edge_midpoint_3d(piece: &PatternPiece, segment: usize) -> Option<[f64; 3]> {
