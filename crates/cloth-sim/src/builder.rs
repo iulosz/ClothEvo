@@ -307,15 +307,21 @@ impl ClothBuilder {
         // Aplica a folga/franzido como diferença-alvo de comprimento A − B.
         // As restrições de borda são escaladas proporcionalmente; as costuras continuam
         // fazendo a correspondência por comprimento de arco entre vértices de ambas as malhas.
-        let mut adjusted_boundary_edges = HashSet::new();
+        // Cada costura contribui com um fator para cada segmento de contorno. Fatores que
+        // incidem na mesma aresta são combinados geometricamente e aplicados uma única vez,
+        // sem depender de qual costura aparece primeiro na lista.
+        let mut ease_votes: HashMap<(u32, u32), Vec<f32>> = HashMap::new();
         for seam in &self.seams {
-            adjust_seam_ease(
-                &mut distance,
-                &edge_constraint_indices,
-                &self.uv,
-                seam,
-                &mut adjusted_boundary_edges,
-            );
+            for (key, factor) in seam_ease_adjustment_factors(seam, &self.uv) {
+                ease_votes.entry(key).or_default().push(factor);
+            }
+        }
+        for (key, votes) in ease_votes {
+            let Some(&index) = edge_constraint_indices.get(&key) else { continue; };
+            if votes.is_empty() { continue; }
+            let mean_log = votes.iter().map(|factor| factor.ln()).sum::<f32>() / votes.len() as f32;
+            let factor = mean_log.exp();
+            distance[index].rest = (distance[index].rest * factor).max(1.0e-6);
         }
 
         for seam in &self.seams {
@@ -471,6 +477,40 @@ fn chain_length(edge: &[u32], uv: &[Vec2]) -> f32 {
     polyline_length_meters(&points) as f32
 }
 
+fn seam_paths_length(paths: &[Vec<u32>], fallback: &[u32], uv: &[Vec2]) -> f32 {
+    if paths.is_empty() { chain_length(fallback, uv) }
+    else { paths.iter().map(|path| chain_length(path, uv)).sum() }
+}
+
+fn seam_ease_adjustment_factors(seam: &SeamSpec, uv: &[Vec2]) -> Vec<((u32, u32), f32)> {
+    let len_a = seam_paths_length(&seam.edge_a_paths, &seam.edge_a, uv);
+    let len_b = seam_paths_length(&seam.edge_b_paths, &seam.edge_b, uv);
+    if len_a <= 1.0e-8 || len_b <= 1.0e-8 { return Vec::new(); }
+    let ease = seam.ease_meters;
+    let (target_a, target_b) = if len_a - len_b > ease {
+        ((len_b + ease).max(1.0e-6), len_b)
+    } else {
+        (len_a, (len_a - ease).max(1.0e-6))
+    };
+    let factors = [
+        (if seam.edge_a_paths.is_empty() { vec![seam.edge_a.clone()] } else { seam.edge_a_paths.clone() },
+            (target_a / len_a).clamp(0.05, 20.0)),
+        (if seam.edge_b_paths.is_empty() { vec![seam.edge_b.clone()] } else { seam.edge_b_paths.clone() },
+            (target_b / len_b).clamp(0.05, 20.0)),
+    ];
+    let mut out = Vec::new();
+    for (paths, factor) in factors {
+        if (factor - 1.0).abs() < 1.0e-5 { continue; }
+        for edge in paths {
+            for pair in edge.windows(2) {
+                let key = if pair[0] < pair[1] { (pair[0], pair[1]) } else { (pair[1], pair[0]) };
+                out.push((key, factor));
+            }
+        }
+    }
+    out
+}
+
 /// Ajusta os comprimentos de repouso da borda excedente para obter a diferença assinada desejada.
 fn adjust_seam_ease(
     distance: &mut [DistanceConstraint],
@@ -479,31 +519,10 @@ fn adjust_seam_ease(
     seam: &SeamSpec,
     adjusted: &mut HashSet<(u32, u32)>,
 ) {
-    let len_a = chain_length(&seam.edge_a, uv);
-    let len_b = chain_length(&seam.edge_b, uv);
-    if len_a <= 1e-8 || len_b <= 1e-8 {
-        return;
-    }
-
-    let ease = seam.ease_meters;
-    // O lado que excede a diferença-alvo é sempre reduzido, independentemente do sinal
-    // da folga. Isso evita alongar a borda errada quando a geometria inicial contradiz o alvo.
-    let (target_a, target_b) = if len_a - len_b > ease {
-        ((len_b + ease).max(1.0e-6), len_b)
-    } else {
-        (len_a, (len_a - ease).max(1.0e-6))
-    };
-    let scale_a = (target_a / len_a).clamp(0.05, 20.0);
-    let scale_b = (target_b / len_b).clamp(0.05, 20.0);
-
-    for (edge, factor) in [(&seam.edge_a, scale_a), (&seam.edge_b, scale_b)] {
-        if (factor - 1.0).abs() < 1e-5 { continue; }
-        for pair in edge.windows(2) {
-            let key = if pair[0] < pair[1] { (pair[0], pair[1]) } else { (pair[1], pair[0]) };
-            if !adjusted.insert(key) { continue; }
-            if let Some(&index) = edge_constraint_indices.get(&key) {
-                distance[index].rest = (distance[index].rest * factor).max(1e-6);
-            }
+    for (key, factor) in seam_ease_adjustment_factors(seam, uv) {
+        if !adjusted.insert(key) { continue; }
+        if let Some(&index) = edge_constraint_indices.get(&key) {
+            distance[index].rest = (distance[index].rest * factor).max(1.0e-6);
         }
     }
 }
