@@ -3511,6 +3511,58 @@ fn paired_notch_markers(
         .collect()
 }
 
+fn edge_chain_length_meters(project: &PatternProject, paths: &[EdgePath]) -> f64 {
+    paths.iter().map(|edge| edge_length_meters(project, edge)).sum()
+}
+
+fn edge_chain_notch_positions(project: &PatternProject, paths: &[EdgePath]) -> Vec<f32> {
+    let total = edge_chain_length_meters(project, paths);
+    if total <= 1.0e-9 { return Vec::new(); }
+    let mut prefix = 0.0;
+    let mut out = Vec::new();
+    for edge in paths {
+        let length = edge_length_meters(project, edge);
+        if length > 1.0e-9 {
+            out.extend(edge_notch_positions(project, edge).into_iter()
+                .map(|local| ((prefix + local as f64 * length) / total).clamp(0.0, 1.0) as f32));
+            prefix += length;
+        }
+    }
+    out.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
+fn paired_chain_notch_markers(
+    project: &PatternProject,
+    paths_a: &[EdgePath],
+    paths_b: &[EdgePath],
+) -> Vec<(f32, f32)> {
+    edge_chain_notch_positions(project, paths_a).into_iter()
+        .zip(edge_chain_notch_positions(project, paths_b))
+        .collect()
+}
+
+fn point_on_edge_chain_at_progress(
+    project: &PatternProject,
+    paths: &[EdgePath],
+    progress: f32,
+) -> Option<PatternPoint2> {
+    let total = edge_chain_length_meters(project, paths);
+    if total <= 1.0e-9 { return None; }
+    let mut target = total * progress.clamp(0.0, 1.0) as f64;
+    for edge in paths {
+        let length = edge_length_meters(project, edge);
+        if length <= 1.0e-9 { continue; }
+        if target <= length {
+            let local = (target / length).clamp(0.0, 1.0) as f32;
+            let points = edge_path_points(project, edge, 32);
+            return point_on_path_at_progress(&points, local);
+        }
+        target -= length;
+    }
+    paths.last().and_then(|edge| edge_path_points(project, edge, 32).last().copied())
+}
+
 /// Amostra apenas o intervalo de segmentos referenciado pela costura, para o overlay do canvas.
 fn edge_path_points(project: &PatternProject, edge: &EdgePath, steps: usize) -> Vec<PatternPoint2> {
     let Some(curve) = edge_curve(project, edge) else { return Vec::new(); };
