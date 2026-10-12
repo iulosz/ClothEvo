@@ -180,6 +180,24 @@ impl Simulation {
         self.stats = Stats::default();
     }
 
+    /// Translada um intervalo de partículas, incluindo o estado de repouso usado por Reiniciar.
+    ///
+    /// É usado pelo modo de posicionamento pré-simulação: mover um painel na viewport deve
+    /// sobreviver ao reset e preservar as velocidades em zero antes de iniciar a física.
+    pub fn translate_particles(&mut self, start: usize, end: usize, delta: Vec3) -> bool {
+        if start >= end || end > self.pos.len() || !delta.is_finite() {
+            return false;
+        }
+        for i in start..end {
+            self.pos[i] += delta;
+            self.prev[i] += delta;
+            self.rest_pos[i] += delta;
+            self.vel[i] = Vec3::ZERO;
+        }
+        self.last_substep_dt = 0.0;
+        true
+    }
+
     fn refresh_masses(&mut self) {
         let global_density = self.params.density.max(1e-4);
         for i in 0..self.pos.len() {
@@ -1118,5 +1136,51 @@ mod stability_tests {
         sim.step(1.0 / 60.0);
         assert!(sim.max_particle_speed() <= 2.01);
         assert_eq!(sim.unstable_particle_count(10.0), 0);
+    }
+}
+
+#[cfg(test)]
+mod placement_transform_tests {
+    use super::*;
+
+    fn tiny_simulation() -> Simulation {
+        Simulation::from_parts(
+            vec![Vec3::ZERO, Vec3::X, Vec3::Y],
+            Vec::new(),
+            vec![1.0; 3],
+            vec![false; 3],
+            vec![1.0; 3],
+            vec![1.0; 3],
+            vec![1.0; 3],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            SimParams::default(),
+        )
+    }
+
+    #[test]
+    fn translating_panel_range_persists_after_reset() {
+        let mut sim = tiny_simulation();
+        let delta = Vec3::new(0.25, 0.5, -0.75);
+        assert!(sim.translate_particles(1, 3, delta));
+        assert_eq!(sim.pos[0], Vec3::ZERO);
+        assert_eq!(sim.pos[1], Vec3::X + delta);
+        assert_eq!(sim.prev[2], Vec3::Y + delta);
+        sim.reset();
+        assert_eq!(sim.pos[1], Vec3::X + delta);
+        assert_eq!(sim.pos[2], Vec3::Y + delta);
+        assert_eq!(sim.vel[1], Vec3::ZERO);
+    }
+
+    #[test]
+    fn translating_panel_range_rejects_invalid_bounds_or_delta() {
+        let mut sim = tiny_simulation();
+        assert!(!sim.translate_particles(2, 2, Vec3::X));
+        assert!(!sim.translate_particles(0, 4, Vec3::X));
+        assert!(!sim.translate_particles(0, 1, Vec3::splat(f32::NAN)));
+        assert_eq!(sim.pos[0], Vec3::ZERO);
     }
 }
