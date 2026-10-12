@@ -1780,6 +1780,8 @@ fn translate_piece(piece: &mut PatternPiece, dx: f64, dy: f64) {
     translate_curve(&mut piece.outline, dx, dy);
     if let Some(curve) = &mut piece.sewing_line { translate_curve(curve, dx, dy); }
     for curve in &mut piece.internal_lines { translate_curve(curve, dx, dy); }
+    for fold in &mut piece.fold_lines { translate_curve(&mut fold.curve, dx, dy); }
+    for pleat in &mut piece.pleats { translate_curve(&mut pleat.axis, dx, dy); }
     if let Some(grain) = &mut piece.grain_line {
         grain.start.x += dx; grain.start.y += dy;
         grain.end.x += dx; grain.end.y += dy;
