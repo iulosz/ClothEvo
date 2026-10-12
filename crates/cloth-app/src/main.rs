@@ -2146,6 +2146,101 @@ impl ClothEvoApp {
         ))
     }
 
+    fn hit_test_seam_handle<F: Fn(PatternPoint2) -> egui::Pos2>(
+        &self,
+        pointer: egui::Pos2,
+        to_screen: &F,
+    ) -> Option<(bool, bool)> {
+        if !self.seam_free_mode { return None; }
+        let (edge_a, edge_b) = self.seam_edges_from_controls().ok()?;
+        for (is_a, edge) in [(true, edge_a), (false, edge_b)] {
+            let curve = edge_curve(&self.pattern_project, &edge)?;
+            let start = curve_segment_point(curve, edge.start.segment as usize, edge.start.t)?;
+            let end = curve_segment_point(curve, edge.end.segment as usize, edge.end.t)?;
+            if pointer.distance(to_screen(start)) <= 13.0 { return Some((is_a, true)); }
+            if pointer.distance(to_screen(end)) <= 13.0 { return Some((is_a, false)); }
+        }
+        None
+    }
+
+    fn update_seam_handle_from_pointer(&mut self, is_a: bool, is_start: bool, world: PatternPoint2) {
+        let piece_index = if is_a { self.seam_a_piece } else { self.seam_b_piece };
+        let Some(piece) = self.pattern_project.pieces.get(piece_index) else { return; };
+        let curve = &piece.outline;
+        let Some((mut param, _)) = closest_curve_param(curve, world) else { return; };
+        param = snap_curve_param_to_features(
+            curve, &piece.notches, param, world,
+            self.seam_snap_tolerance_px as f64 / self.pattern_zoom.max(1.0) as f64,
+        );
+        let (start_t, end_t, start_segment, end_exclusive) = if is_a {
+            (self.seam_a_start_t, self.seam_a_end_t,
+             self.seam_a_segment, self.seam_a_segment_end)
+        } else {
+            (self.seam_b_start_t, self.seam_b_end_t,
+             self.seam_b_segment, self.seam_b_segment_end)
+        };
+        let current_start = CurveParam { segment: start_segment as u32, t: start_t };
+        let current_end = CurveParam {
+            segment: end_exclusive.saturating_sub(1) as u32, t: end_t,
+        };
+        let segment_count = curve.segment_count();
+        let new_param = if is_start {
+            let maximum = current_end.segment as f64 + current_end.t - 1.0e-4;
+            param = param_at_curve_position(param.segment as f64 + param.t, segment_count, maximum);
+            if param.segment as f64 + param.t >= current_end.segment as f64 + current_end.t {
+                return;
+            }
+            param
+        } else {
+            let minimum = current_start.segment as f64 + current_start.t + 1.0e-4;
+            param = param_at_curve_position(param.segment as f64 + param.t, segment_count, f64::INFINITY);
+            if param.segment as f64 + param.t <= minimum {
+                param = param_at_curve_position(minimum, segment_count, f64::INFINITY);
+            }
+            param
+        };
+
+        if is_a {
+            if is_start {
+                self.seam_a_segment = new_param.segment as usize;
+                self.seam_a_start_t = new_param.t;
+            } else {
+                self.seam_a_segment_end = new_param.segment as usize + 1;
+                self.seam_a_end_t = new_param.t;
+            }
+            self.seam_a_segment_end = self.seam_a_segment_end.clamp(self.seam_a_segment + 1, segment_count);
+        } else {
+            if is_start {
+                self.seam_b_segment = new_param.segment as usize;
+                self.seam_b_start_t = new_param.t;
+            } else {
+                self.seam_b_segment_end = new_param.segment as usize + 1;
+                self.seam_b_end_t = new_param.t;
+            }
+            self.seam_b_segment_end = self.seam_b_segment_end.clamp(self.seam_b_segment + 1, segment_count);
+        }
+    }
+
+    fn commit_seam_handle_drag(&mut self) {
+        let Some(before) = self.seam_drag_before.take() else { return; };
+        let Some(id) = self.selected_seam_id else { return; };
+        let (edge_a, edge_b) = match self.seam_edges_from_controls() {
+            Ok(edges) => edges,
+            Err(error) => { self.pattern_message = error; return; }
+        };
+        let mut staged = self.pattern_project.clone();
+        let Some(seam) = staged.seams.iter_mut().find(|seam| seam.id == id) else { return; };
+        seam.a = edge_a;
+        seam.b = edge_b;
+        if let Err(error) = staged.validate() {
+            self.pattern_message = format!("A extremidade não foi aplicada: {error}");
+            return;
+        }
+        self.pattern_project = staged;
+        self.remember_pattern_change(before);
+        self.pattern_message = format!("Extremidades da costura '{id}' atualizadas.");
+    }
+
     fn add_seam_from_controls(&mut self) {
         let (edge_a, edge_b) = match self.seam_edges_from_controls() {
             Ok(edges) => edges,
