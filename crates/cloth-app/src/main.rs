@@ -1292,8 +1292,8 @@ impl ClothEvoApp {
                 );
             }
 
-            let notches_a = edge_notch_positions(&self.pattern_project, &edge_a);
-            let notches_b = edge_notch_positions(&self.pattern_project, &edge_b);
+            let notches_a = edge_chain_notch_positions(&self.pattern_project, &display_a);
+            let notches_b = edge_chain_notch_positions(&self.pattern_project, &display_b);
             if notches_a.is_empty() && notches_b.is_empty() {
                 ui.weak("Piques pareados: nenhum pique nas bordas selecionadas.");
             } else if notches_a.len() != notches_b.len() {
