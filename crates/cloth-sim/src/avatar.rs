@@ -90,8 +90,8 @@ pub fn build_avatar_colliders(config: &AvatarConfig) -> Result<Vec<Collider>, St
         let ankle = Vec3::new(x * 1.04, h * 0.075, 0.0);
         out.push(capsule(hip, knee, 0.074 * scale));
         out.push(capsule(knee, ankle, 0.047 * scale));
-        out.push(ellipsoid(Vec3::new(x * 1.04, h * 0.026, 0.066 * scale),
-            Vec3::new(0.054 * scale, 0.021 * scale, 0.12 * scale)));
+        out.push(ellipsoid(Vec3::new(x * 1.04, 0.022 * scale, 0.066 * scale),
+            Vec3::new(0.054 * scale, 0.022 * scale, 0.12 * scale)));
     }
     Ok(out)
 }
@@ -106,6 +106,9 @@ mod tests {
         assert_eq!(colliders.len(), 18);
         assert!(colliders.iter().all(|c| c.sdf(Vec3::new(0.0, 0.9, 0.0)).is_finite()));
         assert!(colliders.iter().any(|c| c.sdf(Vec3::new(0.0, 1.55, 0.0)) < 0.0));
+        // Topo da cabeça e sola do pé coincidem com as medidas nominais e o chão.
+        assert!(colliders[5].sdf(Vec3::new(0.0, AvatarConfig::default().height_m, 0.0)).abs() < 1e-5);
+        assert!(colliders[17].sdf(Vec3::new(AvatarConfig::default().hip_width_m * 0.245 * 1.04, 0.0, 0.066)).abs() < 0.01);
         assert!(colliders.iter().any(|c| c.sdf(Vec3::new(0.0, 0.9, 0.0)) < 0.0));
         assert!(colliders.iter().any(|c| c.sdf(Vec3::new(0.09, 0.9, 0.0)) > 0.0));
     }
