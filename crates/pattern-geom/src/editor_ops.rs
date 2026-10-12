@@ -405,7 +405,15 @@ fn validate_cut_path(outline: &Curve2D, path: &Curve2D) -> Result<(), GeometryEr
     }
 
     let polygon = sample_curve(outline, 24);
-    let sampled = sample_curve(path, 24);
+    // Lines are not subdivided by sample_curve, so sample every segment explicitly here.
+    let mut sampled = vec![path.start];
+    let mut current = path.start;
+    for segment in &path.segments {
+        for step in 1..=24 {
+            sampled.push(eval_segment(current, segment, step as f64 / 24.0));
+        }
+        current = segment.endpoint();
+    }
     if sampled.len() < 2 { return Err(GeometryError::InvalidParameter); }
     for (index, point) in sampled.iter().enumerate() {
         if index == 0 || index + 1 == sampled.len() { continue; }
