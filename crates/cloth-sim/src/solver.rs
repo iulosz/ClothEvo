@@ -198,6 +198,57 @@ impl Simulation {
         true
     }
 
+    /// Gira um intervalo de partículas em torno de um centro, incluindo o estado de repouso.
+    /// Assim a transformação interativa continua correta depois de Reiniciar.
+    pub fn rotate_particles(&mut self, start: usize, end: usize, center: Vec3, rotation: glam::Quat) -> bool {
+        if start >= end || end > self.pos.len() || !center.is_finite()
+            || !rotation.is_finite() || rotation.length_squared() <= 1.0e-12
+        {
+            return false;
+        }
+        let rotation = rotation.normalize();
+        for i in start..end {
+            self.pos[i] = center + rotation * (self.pos[i] - center);
+            self.prev[i] = center + rotation * (self.prev[i] - center);
+            self.rest_pos[i] = center + rotation * (self.rest_pos[i] - center);
+            self.vel[i] = rotation * self.vel[i];
+        }
+        self.last_substep_dt = 0.0;
+        true
+    }
+
+    /// Escala um painel ao longo de um eixo normalizado em torno do centro indicado.
+    /// É usado apenas durante o posicionamento; a prévia é reconstruída ao soltar o gizmo
+    /// para atualizar áreas, massas e comprimentos de repouso com a nova dimensão.
+    pub fn scale_particles_axis(
+        &mut self,
+        start: usize,
+        end: usize,
+        center: Vec3,
+        axis: Vec3,
+        factor: f32,
+    ) -> bool {
+        if start >= end || end > self.pos.len() || !center.is_finite() || !axis.is_finite()
+            || axis.length_squared() <= 1.0e-12 || !factor.is_finite()
+            || !(0.01..=100.0).contains(&factor)
+        {
+            return false;
+        }
+        let axis = axis.normalize();
+        let scale_point = |point: Vec3| {
+            let offset = point - center;
+            center + offset + axis * (offset.dot(axis) * (factor - 1.0))
+        };
+        for i in start..end {
+            self.pos[i] = scale_point(self.pos[i]);
+            self.prev[i] = scale_point(self.prev[i]);
+            self.rest_pos[i] = scale_point(self.rest_pos[i]);
+            self.vel[i] += axis * (self.vel[i].dot(axis) * (factor - 1.0));
+        }
+        self.last_substep_dt = 0.0;
+        true
+    }
+
     fn refresh_masses(&mut self) {
         let global_density = self.params.density.max(1e-4);
         for i in 0..self.pos.len() {
