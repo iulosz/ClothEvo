@@ -33,8 +33,8 @@ const PATTERN_SIM_BODY_RADIUS: f32 = 0.14;
 const PATTERN_SIM_PERTURBATION: f32 = 0.001;
 const PATTERN_SIM_LAYER_SPACING: f32 = 0.003;
 
-/// Mantém os moldes do lado externo do colisor corporal, inclusive após o ruído inicial.
-fn pattern_sim_layer_z(piece_index: usize, thickness: f32) -> f32 {
+/// Raio de montagem por painel, incluindo espessura, ruído inicial e folga entre camadas.
+fn pattern_sim_shell_radius(piece_index: usize, thickness: f32) -> f32 {
     PATTERN_SIM_BODY_RADIUS + thickness + PATTERN_SIM_PERTURBATION
         + piece_index as f32 * PATTERN_SIM_LAYER_SPACING
 }
@@ -2205,7 +2205,7 @@ impl ClothEvoApp {
             // moldes mais à esquerda/direita começam tangentes às laterais, e costuras os unem.
             let angle = (((center_x - min_x) / x_span).clamp(0.0, 1.0)
                 * std::f64::consts::PI - std::f64::consts::FRAC_PI_2) as f32;
-            let shell_radius = pattern_sim_layer_z(piece_index, fabric.thickness_meters as f32);
+            let shell_radius = pattern_sim_shell_radiuspiece_index, fabric.thickness_meters as f32);
             let auto_origin = Vec3::new(
                 angle.sin() * shell_radius,
                 origin_y + center_y as f32,
@@ -3059,15 +3059,15 @@ mod pattern_editor_tests {
     }
 
     #[test]
-    fn pattern_sim_layers_start_outside_the_body_collision_shell() {
+    fn pattern_sim_shell_layers_start_outside_the_body_collision_shell() {
         let thickness = 0.005;
         for index in 0..12 {
-            let layer_z = pattern_sim_layer_z(index, thickness);
+            let layer_z = pattern_sim_shell_radiusindex, thickness);
             // perturb() pode deslocar Z para ambos os lados em até sua amplitude.
-            let lowest_z = layer_z - PATTERN_SIM_PERTURBATION;
+            let lowest_radius = shell_radius - PATTERN_SIM_PERTURBATION;
             assert!(
-                lowest_z >= PATTERN_SIM_BODY_RADIUS + thickness - 1e-6,
-                "a camada {index} começa dentro do colisor: z mínimo {lowest_z}"
+                lowest_radius >= PATTERN_SIM_BODY_RADIUS + thickness - 1e-6,
+                "a camada {index} começa dentro do colisor: raio mínimo {lowest_radius}"
             );
         }
     }
