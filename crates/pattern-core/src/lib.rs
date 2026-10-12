@@ -360,6 +360,24 @@ pub struct PatternProject {
     pub symmetry_links: Vec<SymmetryLink>,
 }
 
+fn point_has_non_finite(point: &Point2) -> bool {
+    !point.x.is_finite() || !point.y.is_finite()
+}
+
+fn curve_has_non_finite(curve: &Curve2D) -> bool {
+    if point_has_non_finite(&curve.start) {
+        return true;
+    }
+    curve.segments.iter().any(|segment| match segment {
+        CurveSegment::Line { to } => point_has_non_finite(to),
+        CurveSegment::CubicBezier { control1, control2, to } => {
+            point_has_non_finite(control1)
+                || point_has_non_finite(control2)
+                || point_has_non_finite(to)
+        }
+    })
+}
+
 impl PatternProject {
     pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
@@ -407,16 +425,50 @@ impl PatternProject {
             if !piece.outline.closed || piece.outline.segments.len() < 3 {
                 return Err(format!("O contorno da peça '{}' precisa ser fechado e ter ao menos 3 segmentos.", piece.name));
             }
-            if piece.outline.segments.iter().any(|s| {
-                let points = match s {
-                    CurveSegment::Line { to } => vec![*to],
-                    CurveSegment::CubicBezier { control1, control2, to } => vec![*control1, *control2, *to],
-                };
-                points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite())
-            }) || !piece.outline.start.x.is_finite() || !piece.outline.start.y.is_finite() {
+            if curve_has_non_finite(&piece.outline) {
                 return Err(format!("O contorno da peça '{}' contém coordenadas não finitas.", piece.name));
             }
+            if piece.sewing_line.as_ref().is_some_and(|curve| {
+                curve.segments.is_empty() || curve_has_non_finite(curve)
+            }) {
+                return Err(format!("A linha de costura da peça '{}' contém geometria inválida.", piece.name));
+            }
+            if piece.internal_lines.iter().any(|curve| {
+                curve.segments.is_empty() || curve_has_non_finite(curve)
+            }) {
+                return Err(format!("Uma linha interna da peça '{}' contém geometria inválida.", piece.name));
+            }
+            if piece.grain_line.as_ref().is_some_and(|line| {
+                point_has_non_finite(&line.start) || point_has_non_finite(&line.end)
+            }) {
+                return Err(format!("A linha de fio da peça '{}' contém coordenadas não finitas.", piece.name));
+            }
+            if piece.darts.iter().any(|dart| {
+                point_has_non_finite(&dart.apex)
+                    || point_has_non_finite(&dart.leg_a)
+                    || point_has_non_finite(&dart.leg_b)
+                    || !dart.intake_meters.is_finite()
+                    || dart.intake_meters < 0.0
+            }) {
+                return Err(format!("Uma pence da peça '{}' contém coordenadas ou medidas inválidas.", piece.name));
+            }
+            if piece.holes.iter().any(|hole| {
+                point_has_non_finite(&hole.center)
+                    || !hole.radius_meters.is_finite()
+                    || hole.radius_meters < 0.0
+            }) {
+                return Err(format!("Um furo da peça '{}' contém coordenadas ou raio inválido.", piece.name));
+            }
+            if piece.annotations.iter().any(|annotation| {
+                point_has_non_finite(&annotation.position)
+                    || !annotation.rotation_degrees.is_finite()
+            }) {
+                return Err(format!("Uma anotação da peça '{}' contém valores não finitos.", piece.name));
+            }
             for fold in &piece.fold_lines {
+                if fold.curve.segments.is_empty() || curve_has_non_finite(&fold.curve) {
+                    return Err(format!("A linha de dobra da peça '{}' contém geometria inválida.", piece.name));
+                }
                 if !fold.stiffness.is_finite() || !(0.0..=1.0).contains(&fold.stiffness)
                     || !fold.angle_radians.is_finite()
                     || !(0.0..=std::f64::consts::PI).contains(&fold.angle_radians)
@@ -425,6 +477,9 @@ impl PatternProject {
                 }
             }
             for pleat in &piece.pleats {
+                if pleat.axis.segments.is_empty() || curve_has_non_finite(&pleat.axis) {
+                    return Err(format!("O eixo de prega da peça '{}' contém geometria inválida.", piece.name));
+                }
                 if !pleat.depth_meters.is_finite() || pleat.depth_meters <= 0.0
                     || !pleat.angle_radians.is_finite()
                     || !(0.0..=std::f64::consts::PI).contains(&pleat.angle_radians)
@@ -453,6 +508,9 @@ impl PatternProject {
                 .any(|value| !value.is_finite())
             {
                 return Err(format!("A transformação 3D do molde '{}' contém valores não finitos.", piece.name));
+            }
+            if piece.assembly.scale.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+                return Err(format!("A escala 3D do molde '{}' precisa ter valores finitos e positivos.", piece.name));
             }
             let anchor_count = piece.outline.segments.len();
             let mut pinned = HashSet::new();
@@ -504,6 +562,12 @@ impl PatternProject {
             if !symmetry_pairs.insert(pair) {
                 return Err("Há mais de uma relação de simetria entre o mesmo par de moldes.".into());
             }
+        }
+
+        if self.grading_rules.iter().any(|rule| {
+            rule.matrix.iter().any(|value| !value.is_finite())
+        }) {
+            return Err("Uma regra de graduação contém coeficientes não finitos.".into());
         }
 
         let mut seam_ids = HashSet::new();
@@ -704,4 +768,51 @@ mod tests {
         });
         assert!(project.validate().is_err());
     }
+    #[test]
+    fn validation_rejects_non_finite_internal_curve_geometry() {
+        let mut project = PatternProject::new("Detalhes");
+        let mut piece = PatternPiece::from_polygon(1, "Frente", &[
+            Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
+            Point2::new(1.0, 1.0), Point2::new(0.0, 1.0),
+        ]).unwrap();
+        piece.internal_lines.push(Curve2D {
+            start: Point2::new(f64::NAN, 0.5),
+            segments: vec![CurveSegment::Line { to: Point2::new(0.8, 0.5) }],
+            closed: false,
+        });
+        project.pieces.push(piece);
+        let error = project.validate().unwrap_err();
+        assert!(error.contains("linha interna"));
+    }
+
+    #[test]
+    fn validation_rejects_invalid_assembly_scale_and_dart_points() {
+        let mut project = PatternProject::new("Transformações");
+        project.pieces.push(PatternPiece::from_polygon(1, "Frente", &[
+            Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
+            Point2::new(1.0, 1.0), Point2::new(0.0, 1.0),
+        ]).unwrap());
+        project.pieces[0].assembly.scale[0] = 0.0;
+        assert!(project.validate().unwrap_err().contains("escala 3D"));
+
+        project.pieces[0].assembly.scale = [1.0; 3];
+        project.pieces[0].darts.push(Dart {
+            apex: Point2::new(f64::NAN, 0.5),
+            leg_a: Point2::new(0.2, 0.7),
+            leg_b: Point2::new(0.8, 0.7),
+            intake_meters: 0.1,
+        });
+        assert!(project.validate().unwrap_err().contains("pence"));
+    }
+
+    #[test]
+    fn validation_rejects_non_finite_grading_coefficients() {
+        let mut project = PatternProject::new("Graduação");
+        project.grading_rules.push(GradingRule {
+            label: "M".into(),
+            matrix: [1.0, 0.0, 0.0, 0.0, f64::INFINITY, 0.0],
+        });
+        assert!(project.validate().unwrap_err().contains("graduação"));
+    }
+
 }
