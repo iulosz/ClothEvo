@@ -961,23 +961,30 @@ impl ClothEvoApp {
     }
 
     fn move_pattern_target(&mut self, target: PatternEditTarget, point: PatternPoint2) {
-        let Some(piece) = self.pattern_project.pieces.get_mut(target.piece()) else { return; };
-        match target {
-            PatternEditTarget::Anchor { index, .. } => {
-                set_curve_anchor(&mut piece.outline, index, point);
-            }
-            PatternEditTarget::Control1 { segment, .. } => {
-                if let Some(CurveSegment::CubicBezier { control1, .. }) = piece.outline.segments.get_mut(segment) {
-                    *control1 = point;
+        let piece_index = target.piece();
+        let Some(piece_id) = self.pattern_project.pieces.get(piece_index).map(|piece| piece.id) else {
+            return;
+        };
+        {
+            let Some(piece) = self.pattern_project.pieces.get_mut(piece_index) else { return; };
+            match target {
+                PatternEditTarget::Anchor { index, .. } => {
+                    set_curve_anchor(&mut piece.outline, index, point);
                 }
-            }
-            PatternEditTarget::Control2 { segment, .. } => {
-                if let Some(CurveSegment::CubicBezier { control2, .. }) = piece.outline.segments.get_mut(segment) {
-                    *control2 = point;
+                PatternEditTarget::Control1 { segment, .. } => {
+                    if let Some(CurveSegment::CubicBezier { control1, .. }) = piece.outline.segments.get_mut(segment) {
+                        *control1 = point;
+                    }
                 }
+                PatternEditTarget::Control2 { segment, .. } => {
+                    if let Some(CurveSegment::CubicBezier { control2, .. }) = piece.outline.segments.get_mut(segment) {
+                        *control2 = point;
+                    }
+                }
+                PatternEditTarget::Piece { .. } | PatternEditTarget::Edge { .. } => {}
             }
-            PatternEditTarget::Piece { .. } | PatternEditTarget::Edge { .. } => {}
         }
+        self.sync_symmetric_mate(piece_id);
     }
 
     fn insert_selected_vertex(&mut self) {
@@ -985,17 +992,29 @@ impl ClothEvoApp {
             self.pattern_message = "Selecione uma borda no modo Editar antes de inserir um vértice.".into();
             return;
         };
-        let Some(piece_data) = self.pattern_project.pieces.get(piece) else { return; };
-        let id = piece_data.id;
+        let Some(id) = self.pattern_project.pieces.get(piece).map(|piece| piece.id) else { return; };
         let before = self.editor_snapshot();
-        match split_project_segment(&mut self.pattern_project, id, segment, t) {
-            Ok(new_anchor) => {
-                self.selected_target = Some(PatternEditTarget::Anchor { piece, index: new_anchor });
-                self.pattern_message = "Vértice inserido; a curva mantém sua forma original.".into();
-                self.remember_pattern_change(before);
+        let mut project = self.pattern_project.clone();
+        let mate_id = symmetry_counterpart_id(&project, id);
+        let result = split_project_segment(&mut project, id, segment, t);
+        let new_anchor = match result {
+            Ok(index) => index,
+            Err(error) => { self.pattern_message = error; return; }
+        };
+        if let Some(mate_id) = mate_id {
+            if let Err(error) = split_project_segment(&mut project, mate_id, segment, t) {
+                self.pattern_message = format!("Não foi possível inserir o vértice nos dois moldes; nenhuma alteração foi aplicada: {error}");
+                return;
             }
-            Err(e) => self.pattern_message = e,
         }
+        self.pattern_project = project;
+        self.selected_target = Some(PatternEditTarget::Anchor { piece, index: new_anchor });
+        self.pattern_message = if mate_id.is_some() {
+            "Vértice inserido e refletido no molde vinculado."
+        } else {
+            "Vértice inserido; a curva mantém sua forma original."
+        }.into();
+        self.remember_pattern_change(before);
     }
 
     fn convert_selected_edge_to_bezier(&mut self) {
@@ -1003,33 +1022,55 @@ impl ClothEvoApp {
             self.pattern_message = "Selecione um segmento para convertê-lo em Bézier.".into();
             return;
         };
-        let Some(piece_data) = self.pattern_project.pieces.get(piece) else { return; };
-        let id = piece_data.id;
+        let Some(id) = self.pattern_project.pieces.get(piece).map(|piece| piece.id) else { return; };
         let before = self.editor_snapshot();
-        match convert_project_segment_to_bezier(&mut self.pattern_project, id, segment) {
-            Ok(()) => {
-                self.selected_target = Some(PatternEditTarget::Control1 { piece, segment });
-                self.pattern_message = "Segmento convertido. Arraste as alças roxas para editar a curva.".into();
-                self.remember_pattern_change(before);
-            }
-            Err(e) => self.pattern_message = e,
+        let mut project = self.pattern_project.clone();
+        let mate_id = symmetry_counterpart_id(&project, id);
+        if let Err(error) = convert_project_segment_to_bezier(&mut project, id, segment) {
+            self.pattern_message = error;
+            return;
         }
+        if let Some(mate_id) = mate_id {
+            if let Err(error) = convert_project_segment_to_bezier(&mut project, mate_id, segment) {
+                self.pattern_message = format!("Conversão cancelada para preservar a simetria: {error}");
+                return;
+            }
+        }
+        self.pattern_project = project;
+        self.selected_target = Some(PatternEditTarget::Control1 { piece, segment });
+        self.pattern_message = if mate_id.is_some() {
+            "Segmento convertido em Bézier nos dois moldes. Arraste as alças para editar."
+        } else {
+            "Segmento convertido. Arraste as alças roxas para editar a curva."
+        }.into();
+        self.remember_pattern_change(before);
     }
 
     fn delete_selected_vertex(&mut self) {
         let Some(PatternEditTarget::Anchor { piece, index }) = self.selected_target else { return; };
-        let Some(piece_data) = self.pattern_project.pieces.get(piece) else { return; };
-        let id = piece_data.id;
+        let Some(id) = self.pattern_project.pieces.get(piece).map(|piece| piece.id) else { return; };
         let before = self.editor_snapshot();
-        match delete_project_anchor(&mut self.pattern_project, id, index) {
-            Ok(()) => {
-                self.selected_target = None;
-                self.dragging_target = None;
-                self.pattern_message = "Vértice removido.".into();
-                self.remember_pattern_change(before);
-            }
-            Err(e) => self.pattern_message = e,
+        let mut project = self.pattern_project.clone();
+        let mate_id = symmetry_counterpart_id(&project, id);
+        if let Err(error) = delete_project_anchor(&mut project, id, index) {
+            self.pattern_message = error;
+            return;
         }
+        if let Some(mate_id) = mate_id {
+            if let Err(error) = delete_project_anchor(&mut project, mate_id, index) {
+                self.pattern_message = format!("Exclusão cancelada para preservar a simetria: {error}");
+                return;
+            }
+        }
+        self.pattern_project = project;
+        self.selected_target = None;
+        self.dragging_target = None;
+        self.pattern_message = if mate_id.is_some() {
+            "Vértice removido nos dois moldes vinculados."
+        } else {
+            "Vértice removido."
+        }.into();
+        self.remember_pattern_change(before);
     }
 
     fn delete_selected_piece(&mut self) {
@@ -1790,17 +1831,16 @@ impl ClothEvoApp {
                         world.y = (world.y * 100.0).round() / 100.0;
                     }
                     if let PatternEditTarget::Piece { piece } = target {
-                        if let (Some(previous), Some(piece_data)) = (
-                            self.drag_last_world,
-                            self.pattern_project.pieces.get(piece),
-                        ) {
-                            let id = piece_data.id;
-                            translate_project_piece(
-                                &mut self.pattern_project,
-                                id,
-                                world.x - previous.x,
-                                world.y - previous.y,
-                            );
+                        if let Some(previous) = self.drag_last_world {
+                            if let Some(id) = self.pattern_project.pieces.get(piece).map(|data| data.id) {
+                                translate_project_piece(
+                                    &mut self.pattern_project,
+                                    id,
+                                    world.x - previous.x,
+                                    world.y - previous.y,
+                                );
+                                self.sync_symmetric_mate(id);
+                            }
                         }
                     } else {
                         self.move_pattern_target(target, world);
