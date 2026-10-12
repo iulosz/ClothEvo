@@ -429,6 +429,13 @@ fn pair_by_arc_between_anchors(
     for &(pa, pb) in &anchors {
         pairs.push((a[nearest_arc_index(pa, ta)], b[nearest_arc_index(pb, tb)]));
     }
+    // Os piques são pares fixos, mesmo quando coincidem com uma extremidade (0 ou 1).
+    // Acrescentá-los explicitamente preserva a correspondência exata indicada pelo molde.
+    for &(pa, pb) in notch_markers {
+        if pa.is_finite() && pb.is_finite() {
+            pairs.push((a[nearest_arc_index(pa, ta)], b[nearest_arc_index(pb, tb)]));
+        }
+    }
     for window in anchors.windows(2) {
         let (a0, b0) = window[0];
         let (a1, b1) = window[1];
@@ -609,10 +616,15 @@ mod tests {
         assert!((distance[1].rest - 0.5).abs() < 1e-6);
 
         // Quando B excede a relação desejada, B é reduzida mesmo com folga positiva.
+        // A geometria UV também deve refletir esse caso: A = 0,5 m, B = 1,0 m.
         distance[0].rest = 0.5;
         distance[1].rest = 1.0;
+        let uv_b_longer = vec![
+            Vec2::new(0.0, 0.0), Vec2::new(0.0, 0.5),
+            Vec2::new(1.0, 0.0), Vec2::new(1.0, 1.0),
+        ];
         let positive_ease = SeamSpec { ease_meters: 0.25, ..seam };
-        adjust_seam_ease(&mut distance, &indices, &uv, &positive_ease, &mut HashSet::new());
+        adjust_seam_ease(&mut distance, &indices, &uv_b_longer, &positive_ease, &mut HashSet::new());
         assert!((distance[0].rest - 0.5).abs() < 1e-6);
         assert!((distance[1].rest - 0.25).abs() < 1e-6);
     }
