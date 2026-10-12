@@ -1091,10 +1091,10 @@ impl ClothEvoApp {
                         }
                     });
                 egui::ComboBox::from_id_salt("seam_a_end")
-                    .selected_text(format!("fim: {}", self.seam_a_segment_end))
+                    .selected_text(format!("Segmentos {} a {}", self.seam_a_segment + 1, self.seam_a_segment_end))
                     .show_ui(ui, |ui| {
                         for end in (self.seam_a_segment + 1)..=a_count {
-                            ui.selectable_value(&mut self.seam_a_segment_end, end, format!("Segmento {}", end));
+                            ui.selectable_value(&mut self.seam_a_segment_end, end, format!("Segmentos {} a {}", self.seam_a_segment + 1, end));
                         }
                     });
             });
@@ -1108,14 +1108,31 @@ impl ClothEvoApp {
                         }
                     });
                 egui::ComboBox::from_id_salt("seam_b_end")
-                    .selected_text(format!("fim: {}", self.seam_b_segment_end))
+                    .selected_text(format!("Segmentos {} a {}", self.seam_b_segment + 1, self.seam_b_segment_end))
                     .show_ui(ui, |ui| {
                         for end in (self.seam_b_segment + 1)..=b_count {
-                            ui.selectable_value(&mut self.seam_b_segment_end, end, format!("Segmento {}", end));
+                            ui.selectable_value(&mut self.seam_b_segment_end, end, format!("Segmentos {} a {}", self.seam_b_segment + 1, end));
                         }
                     });
             });
             self.seam_b_segment_end = self.seam_b_segment_end.clamp(self.seam_b_segment + 1, b_count);
+
+            ui.checkbox(&mut self.seam_free_mode, "Costura livre (extremidades parciais)");
+            if self.seam_free_mode {
+                ui.label("A — parâmetros das extremidades");
+                ui.horizontal(|ui| {
+                    ui.add(egui::Slider::new(&mut self.seam_a_start_t, 0.0..=1.0).text("Início t"));
+                    ui.add(egui::Slider::new(&mut self.seam_a_end_t, 0.0..=1.0).text("Fim t"));
+                });
+                ui.label("B — parâmetros das extremidades");
+                ui.horizontal(|ui| {
+                    ui.add(egui::Slider::new(&mut self.seam_b_start_t, 0.0..=1.0).text("Início t"));
+                    ui.add(egui::Slider::new(&mut self.seam_b_end_t, 0.0..=1.0).text("Fim t"));
+                });
+                ui.add(egui::Slider::new(&mut self.seam_snap_tolerance_px, 4.0..=32.0)
+                    .text("Tolerância de encaixe (px)"));
+                ui.weak("Arraste os pontos de início/fim no canvas; eles encaixam em vértices e piques.");
+            }
 
             ui.horizontal(|ui| {
                 if ui.button("Usar borda selecionada como A").clicked() {
@@ -1123,6 +1140,8 @@ impl ClothEvoApp {
                         self.seam_a_piece = piece.min(options.len() - 1);
                         self.seam_a_segment = segment;
                         self.seam_a_segment_end = segment + 1;
+                        self.seam_a_start_t = 0.0;
+                        self.seam_a_end_t = 1.0;
                     } else {
                         self.pattern_message = "Selecione uma borda no canvas antes de defini-la como A.".into();
                     }
@@ -1132,6 +1151,8 @@ impl ClothEvoApp {
                         self.seam_b_piece = piece.min(options.len() - 1);
                         self.seam_b_segment = segment;
                         self.seam_b_segment_end = segment + 1;
+                        self.seam_b_start_t = 0.0;
+                        self.seam_b_end_t = 1.0;
                     } else {
                         self.pattern_message = "Selecione uma borda no canvas antes de defini-la como B.".into();
                     }
