@@ -25,7 +25,8 @@ jobs:
         run: cargo check -p cloth-app
 
   build-windows:
-    needs: test
+    # O commit de código já passou no Rust CI #153; construa em paralelo para
+    # disponibilizar o binário mesmo se uma repetição do job de teste ficar lenta.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
