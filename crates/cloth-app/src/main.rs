@@ -383,16 +383,19 @@ impl ClothEvoApp {
             }
             if ui.selectable_label(self.workspace == WorkspaceMode::Placement, "Posicionamento 3D").clicked() {
                 self.playing = false;
-                if self.using_pattern_sim && !self.placement_ranges.is_empty() {
-                    self.workspace = WorkspaceMode::Placement;
-                } else if !self.pattern_project.pieces.is_empty() {
-                    if let Err(error) = self.start_pattern_simulation() {
+                // Recria a prévia ao voltar do editor/simulação, para refletir Undo/Redo e
+                // transformações persistidas no projeto. Clicar na aba já ativa não reinicia o painel.
+                if self.workspace != WorkspaceMode::Placement
+                    || !self.using_pattern_sim
+                    || self.placement_ranges.is_empty()
+                {
+                    if self.pattern_project.pieces.is_empty() {
+                        self.workspace = WorkspaceMode::Pattern;
+                        self.pattern_message = "Crie pelo menos um molde antes de entrar no posicionamento 3D.".into();
+                    } else if let Err(error) = self.start_pattern_simulation() {
                         self.pattern_message = error;
                         self.workspace = WorkspaceMode::Pattern;
                     }
-                } else {
-                    self.workspace = WorkspaceMode::Pattern;
-                    self.pattern_message = "Crie pelo menos um molde antes de entrar no posicionamento 3D.".into();
                 }
             }
             if ui.selectable_label(self.workspace == WorkspaceMode::Split, "3D + 2D").clicked() {
@@ -4380,3 +4383,35 @@ mod pattern_editor_tests {
         assert_eq!(project, before);
     }
 }
+
+#[cfg(test)]
+mod placement_ui_tests {
+    use super::*;
+
+    #[test]
+    fn screen_projection_maps_camera_target_to_viewport_center() {
+        let camera = OrbitCamera::default();
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(30.0, 50.0),
+            egui::vec2(600.0, 400.0),
+        );
+        let (point, depth) = project_world_to_screen(
+            camera.target,
+            camera.view_proj(1.5),
+            rect,
+        ).expect("camera target should be in view");
+        assert!((point.x - rect.center().x).abs() < 1.0e-3);
+        assert!((point.y - rect.center().y).abs() < 1.0e-3);
+        assert!((0.0..=1.0).contains(&depth));
+    }
+
+    #[test]
+    fn triangle_hit_test_accepts_inside_and_rejects_outside_points() {
+        let a = egui::pos2(0.0, 0.0);
+        let b = egui::pos2(10.0, 0.0);
+        let c = egui::pos2(0.0, 10.0);
+        assert!(point_in_triangle(egui::pos2(2.0, 2.0), a, b, c));
+        assert!(!point_in_triangle(egui::pos2(9.0, 9.0), a, b, c));
+    }
+}
+
