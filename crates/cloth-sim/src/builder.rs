@@ -35,6 +35,14 @@ struct SeamSpec {
     ease_meters: f32,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct FoldEdgeSpec {
+    /// Fração da rigidez de flexão local, normalizada em [0.02, 1].
+    stiffness: f32,
+    /// Ângulo diedral de repouso, já orientado pelo sentido da aresta.
+    rest_angle: f32,
+}
+
 /// Monta uma [`Simulation`] a partir de painéis 2D, costuras, pinos e colisores.
 #[derive(Default)]
 pub struct ClothBuilder {
@@ -45,6 +53,8 @@ pub struct ClothBuilder {
     triangles: Vec<[u32; 3]>,
     pinned: Vec<u32>,
     seams: Vec<SeamSpec>,
+    /// Dobradiças físicas por aresta de malha (índices globais ordenados).
+    fold_edges: BTreeMap<(u32, u32), FoldEdgeSpec>,
     colliders: Vec<Collider>,
     /// Uma entrada por painel adicionado. None preserva os parâmetros globais para cenas antigas.
     panel_materials: Vec<Option<PanelMaterial>>,
@@ -201,6 +211,39 @@ impl ClothBuilder {
         });
     }
 
+    /// Associa uma aresta interna à dobra física. A linha deve ter sido mapeada para
+    /// arestas existentes da malha; arestas de contorno sem duas faces não geram dobradiça.
+    /// stiffness é a fração da rigidez de flexão base; rest_angle é em radianos.
+    pub fn add_fold_edge(
+        &mut self,
+        handle: PanelHandle,
+        local_a: u32,
+        local_b: u32,
+        stiffness: f32,
+        rest_angle: f32,
+    ) {
+        if local_a >= handle.count || local_b >= handle.count || local_a == local_b
+            || !stiffness.is_finite() || !rest_angle.is_finite()
+        {
+            return;
+        }
+        let global_a = handle.global(local_a);
+        let global_b = handle.global(local_b);
+        let key = if global_a < global_b { (global_a, global_b) } else { (global_b, global_a) };
+        let spec = FoldEdgeSpec {
+            stiffness: stiffness.clamp(0.02, 1.0),
+            rest_angle: rest_angle.clamp(-std::f32::consts::PI, std::f32::consts::PI),
+        };
+        self.fold_edges.entry(key)
+            .and_modify(|existing| {
+                // Linhas de dobra coincidentes combinam seus alvos; preserva a menor rigidez.
+                existing.stiffness = existing.stiffness.min(spec.stiffness);
+                existing.rest_angle =
+                    (existing.rest_angle + spec.rest_angle).clamp(-std::f32::consts::PI, std::f32::consts::PI);
+            })
+            .or_insert(spec);
+    }
+
     pub fn particle_count(&self) -> usize {
         self.pos.len()
     }
@@ -305,16 +348,28 @@ impl ClothBuilder {
             });
             edge_constraint_indices.insert((i, j), distance.len() - 1);
 
-            if let [Some(p3), Some(p4)] = e.opposite {
-                // k_flexão = 3 B l² / (A1 + A2)  →  α = (A / (3 l²)) / B
+            if let [Some(mut p3), Some(mut p4)] = e.opposite {
+                // Canonicaliza os vértices opostos: p3 sempre fica à esquerda da aresta
+                // orientada i→j e p4 à direita. Isso torna o sinal de rest_angle estável
+                // mesmo que a ordem dos triângulos na CDT varie.
+                let edge = self.uv[j as usize] - self.uv[i as usize];
+                let side3 = edge.perp_dot(self.uv[p3 as usize] - self.uv[i as usize]);
+                let side4 = edge.perp_dot(self.uv[p4 as usize] - self.uv[i as usize]);
+                if side3 < side4 { std::mem::swap(&mut p3, &mut p4); }
+
+                // k_flexão = 3 B l² / (A1 + A2) → α = (A / (3 l²)) / B.
+                // Uma dobra com rigidez fracionária s usa compliance 1/s e seu próprio
+                // ângulo diedral de repouso; as demais arestas mantêm exatamente o alvo plano.
                 let geometric_scale = (e.area / (3.0 * rest * rest)).max(1e-6);
                 let material_scale = self.panel_materials[self.panel_of[i as usize] as usize]
                     .map(|material| global_bend / material.bend_nm.max(1.0e-9))
                     .unwrap_or(1.0);
+                let fold = self.fold_edges.get(&(i, j));
+                let fold_compliance = fold.map(|spec| 1.0 / spec.stiffness.clamp(0.02, 1.0)).unwrap_or(1.0);
                 bending.push(BendConstraint {
                     p: [i, j, p3, p4],
-                    rest_angle: 0.0, // painéis são planos no repouso
-                    scale: geometric_scale * material_scale,
+                    rest_angle: fold.map(|spec| spec.rest_angle).unwrap_or(0.0),
+                    scale: geometric_scale * material_scale * fold_compliance,
                 });
             }
         }
