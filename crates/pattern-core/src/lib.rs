@@ -411,11 +411,15 @@ impl PatternProject {
                 piece.fabric.shear_n_m,
                 piece.fabric.bend_nm,
                 piece.fabric.thickness_meters,
-                piece.fabric.friction_coefficient,
                 piece.fabric.particle_distance_meters,
             ];
             if fabric_values.iter().any(|value| !value.is_finite() || *value <= 0.0) {
                 return Err(format!("As propriedades físicas do molde '{}' precisam ser finitas e positivas.", piece.name));
+            }
+            if !piece.fabric.friction_coefficient.is_finite()
+                || !(0.0..=5.0).contains(&piece.fabric.friction_coefficient)
+            {
+                return Err(format!("O atrito do tecido '{}' precisa estar entre 0 e 5.", piece.name));
             }
             if piece.assembly.translation_meters.iter().chain(piece.assembly.rotation_degrees.iter())
                 .any(|value| !value.is_finite())
