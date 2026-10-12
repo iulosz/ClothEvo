@@ -16,8 +16,8 @@ use eframe::{egui, egui_wgpu};
 use glam::{EulerRot, Quat, Vec2, Vec3};
 use pattern_core::{
     BoundaryCurve, Curve2D, CurveParam, CurveSegment, EdgePath, EdgeRef, FoldKind, FoldLine, GrainLine,
-    Notch, PatternPiece, PatternProject, Pleat,
-    Point2 as PatternPoint2, SeamDefinition, SymmetryLink,
+    Notch, PatternPiece, PatternProject, Pleat, SeamDefinition, SeamSuggestion,
+    SeamSuggestionParams, Point2 as PatternPoint2, SymmetryLink,
 };
 use pattern_geom::{
     cut_closed_outline, mirror_curve_x, offset_polygon, point_in_polygon, rectangle,
@@ -161,6 +161,10 @@ struct ClothEvoApp {
     seam_ease_m: f64,
     seam_name: String,
     selected_seam_id: Option<u64>,
+    auto_seam_suggestions: Vec<SeamSuggestion>,
+    auto_seam_selected: Vec<bool>,
+    hovered_auto_suggestion: Option<usize>,
+    auto_seam_minimum_score: f64,
     notch_segment: usize,
     notch_t: f64,
     notch_depth_m: f64,
@@ -282,6 +286,10 @@ impl ClothEvoApp {
             seam_ease_m: 0.0,
             seam_name: String::new(),
             selected_seam_id: None,
+            auto_seam_suggestions: Vec::new(),
+            auto_seam_selected: Vec::new(),
+            hovered_auto_suggestion: None,
+            auto_seam_minimum_score: 0.35,
             notch_segment: 0,
             notch_t: 0.5,
             notch_depth_m: 0.008,
