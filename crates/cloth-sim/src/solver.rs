@@ -319,7 +319,7 @@ impl Simulation {
                         &self.inv_mass,
                         inv_h2,
                         &stiff,
-                        seam_step / iterations as f32,
+                        seam_step,
                         parallel,
                     );
                 }
@@ -778,14 +778,20 @@ fn solve_distance(
             if len < 1e-9 {
                 return;
             }
-            let mut cval = len - c.rest;
-            if c.kind == ConstraintKind::Seam {
-                // A costura "puxa" devagar, para não lançar o tecido.
-                cval = cval.min(seam_step);
-            }
+            let cval = len - c.rest;
             let alpha = c.scale / stiff[c.kind as usize] * inv_h2;
-            let dl = (-cval - alpha * *lam) / (w + alpha);
-            *lam += dl;
+            let mut dl = (-cval - alpha * *lam) / (w + alpha);
+            if c.kind == ConstraintKind::Seam {
+                // Limita a correção acumulada de cada costura por substep.
+                // Assim, mais iterações melhoram a convergência, mas não aumentam
+                // indefinidamente a distância que a costura pode puxar neste substep.
+                let max_lambda = seam_step / w;
+                let next_lambda = (*lam + dl).clamp(-max_lambda, max_lambda);
+                dl = next_lambda - *lam;
+                *lam = next_lambda;
+            } else {
+                *lam += dl;
+            }
             let corr = d * (dl / len);
             *ptr.get().add(a) = pa + corr * wa;
             *ptr.get().add(b) = pb - corr * wb;
@@ -1243,6 +1249,31 @@ mod stability_tests {
             Vec::new(),
             params,
         )
+    }
+
+    #[test]
+    fn seam_pull_budget_is_independent_of_solver_iteration_count() {
+        let run = |iterations: usize| {
+            let mut positions = vec![Vec3::ZERO, Vec3::X];
+            let inv_mass = [1.0_f32, 1.0];
+            let constraint = DistanceConstraint {
+                a: 0, b: 1, rest: 0.0, scale: 1.0e-6, kind: ConstraintKind::Seam,
+            };
+            let mut lambda = [0.0_f32];
+            let stiffness = [1.0, 1.0, 1.0, 5_000.0];
+            for _ in 0..iterations {
+                solve_distance(
+                    &[constraint], &mut lambda, &mut positions, &inv_mass,
+                    1.0, &stiffness, 0.01, false,
+                );
+            }
+            1.0 - (positions[0] - positions[1]).length()
+        };
+        let one_iteration = run(1);
+        let many_iterations = run(8);
+        assert!(one_iteration <= 0.010_001, "single iteration exceeded seam budget: {one_iteration}");
+        assert!(many_iterations <= 0.010_001, "multiple iterations exceeded seam budget: {many_iterations}");
+        assert!((one_iteration - many_iterations).abs() < 1.0e-5);
     }
 
     #[test]
