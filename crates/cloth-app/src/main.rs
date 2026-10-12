@@ -76,6 +76,7 @@ struct PatternEditorSnapshot {
     draft_points: Vec<PatternPoint2>,
     selected_piece: usize,
     selected_target: Option<PatternEditTarget>,
+    saved_path: Option<std::path::PathBuf>,
 }
 
 impl PatternEditTarget {
@@ -425,6 +426,7 @@ impl ClothEvoApp {
             draft_points: self.draft_points.clone(),
             selected_piece: self.selected_piece,
             selected_target: self.selected_target,
+            saved_path: self.pattern_saved_path.clone(),
         }
     }
 
@@ -447,6 +449,7 @@ impl ClothEvoApp {
         self.selected_target = snapshot.selected_target.filter(|target| {
             target.piece() < self.pattern_project.pieces.len()
         });
+        self.pattern_saved_path = snapshot.saved_path;
         self.dragging_target = None;
         self.dragging_before = None;
         self.drag_last_world = None;
@@ -761,6 +764,26 @@ impl ClothEvoApp {
                         ui.selectable_value(&mut self.seam_b_segment, index, format!("Segmento {}", index + 1));
                     }
                 });
+            ui.horizontal(|ui| {
+                if ui.button("Usar borda selecionada como A").clicked() {
+                    if let Some(PatternEditTarget::Edge { piece, segment, .. }) = self.selected_target {
+                        self.seam_a_piece = piece.min(options.len() - 1);
+                        self.seam_a_segment = segment;
+                    } else {
+                        self.pattern_message = "Selecione uma borda no canvas antes de defini-la como A.".into();
+                    }
+                }
+                if ui.button("Usar borda selecionada como B").clicked() {
+                    if let Some(PatternEditTarget::Edge { piece, segment, .. }) = self.selected_target {
+                        self.seam_b_piece = piece.min(options.len() - 1);
+                        self.seam_b_segment = segment;
+                    } else {
+                        self.pattern_message = "Selecione uma borda no canvas antes de defini-la como B.".into();
+                    }
+                }
+            });
+            ui.label(format!("A: {} · borda {}", options[self.seam_a_piece].1, self.seam_a_segment + 1));
+            ui.label(format!("B: {} · borda {}", options[self.seam_b_piece].1, self.seam_b_segment + 1));
             ui.add(egui::DragValue::new(&mut self.seam_ease_m).speed(0.001).prefix("Folga (m) "));
             ui.checkbox(&mut self.seam_a_reversed, "Inverter orientação da borda A");
             ui.checkbox(&mut self.seam_b_reversed, "Inverter orientação da borda B");
@@ -1113,6 +1136,21 @@ impl ClothEvoApp {
                     [to_screen(points[i]), to_screen(points[(i + 1) % points.len()])],
                     egui::Stroke::new(2.0, outline_color),
                 );
+            }
+            if let Some(PatternEditTarget::Edge { piece: selected_index, segment, .. }) = self.selected_target {
+                if selected_index == piece_index {
+                    if let Some(&(start, end)) = sampled.segment_vertex_ranges.get(segment) {
+                        let sample_count = if end >= start { end - start } else { points.len() - start };
+                        for step in 0..sample_count {
+                            let ia = (start + step) % points.len();
+                            let ib = (ia + 1) % points.len();
+                            painter.line_segment(
+                                [to_screen(points[ia]), to_screen(points[ib])],
+                                egui::Stroke::new(4.5, egui::Color32::from_rgb(255, 196, 76)),
+                            );
+                        }
+                    }
+                }
             }
 
             let centroid = points.iter().fold(PatternPoint2::new(0.0, 0.0), |sum, point| {
@@ -1844,6 +1882,7 @@ mod pattern_editor_tests {
             draft_points: vec![PatternPoint2::new(0.0, 0.0)],
             selected_piece: 0,
             selected_target: None,
+            saved_path: None,
         };
         let mut b = a.clone();
         assert_eq!(a, b);
