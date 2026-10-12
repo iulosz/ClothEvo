@@ -3062,7 +3062,7 @@ mod pattern_editor_tests {
     fn pattern_sim_shell_layers_start_outside_the_body_collision_shell() {
         let thickness = 0.005;
         for index in 0..12 {
-            let layer_z = pattern_sim_shell_radiusindex, thickness);
+            let shell_radius = pattern_sim_shell_radius(index, thickness);
             // perturb() pode deslocar Z para ambos os lados em até sua amplitude.
             let lowest_radius = shell_radius - PATTERN_SIM_PERTURBATION;
             assert!(
