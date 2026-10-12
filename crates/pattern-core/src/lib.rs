@@ -227,6 +227,27 @@ pub struct Annotation {
     pub rotation_degrees: f64,
 }
 
+/// Transformação de montagem no espaço 3D. A origem é um deslocamento relativo ao
+/// posicionamento automático do painel; a rotação é expressa em graus XYZ.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AssemblyTransform {
+    pub translation_meters: [f64; 3],
+    pub rotation_degrees: [f64; 3],
+    /// Índices de âncoras do contorno a fixar na simulação. Vazio significa peça livre.
+    #[serde(default)]
+    pub pinned_anchors: Vec<u32>,
+}
+
+impl Default for AssemblyTransform {
+    fn default() -> Self {
+        Self {
+            translation_meters: [0.0; 3],
+            rotation_degrees: [0.0; 3],
+            pinned_anchors: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PatternPiece {
     pub id: PieceId,
@@ -244,6 +265,8 @@ pub struct PatternPiece {
     pub pleats: Vec<Pleat>,
     #[serde(default)]
     pub fabric: FabricProperties,
+    #[serde(default)]
+    pub assembly: AssemblyTransform,
     pub darts: Vec<Dart>,
     pub notches: Vec<Notch>,
     pub holes: Vec<Hole>,
@@ -263,6 +286,7 @@ impl PatternPiece {
             fold_lines: Vec::new(),
             pleats: Vec::new(),
             fabric: FabricProperties::default(),
+            assembly: AssemblyTransform::default(),
             darts: Vec::new(),
             notches: Vec::new(),
             holes: Vec::new(),
@@ -441,6 +465,23 @@ mod tests {
         assert!(project.pieces[0].fold_lines.is_empty());
         assert!(project.pieces[0].pleats.is_empty());
         assert_eq!(project.pieces[0].fabric, FabricProperties::default());
+    }
+
+    #[test]
+    fn old_project_piece_json_defaults_assembly_transform() {
+        let json = r#"{ "schema_version":1, "name":"Legacy", "units":"Centimeter",
+            "pieces":[{"id":1,"name":"A","outline":{"start":{"x":0.0,"y":0.0},
+            "segments":[{"Line":{"to":{"x":1.0,"y":0.0}}},
+            {"Line":{"to":{"x":1.0,"y":1.0}}},
+            {"Line":{"to":{"x":0.0,"y":1.0}}},
+            {"Line":{"to":{"x":0.0,"y":0.0}}}],"closed":true},
+            "sewing_line":null,"seam_allowance_meters":0.01,"grain_line":null,
+            "internal_lines":[],"fold_lines":[],"pleats":[],"fabric":{"density_kg_m2":0.18,
+            "stretch_warp_n_m":8000.0,"stretch_weft_n_m":6000.0,"shear_n_m":1200.0,
+            "bend_nm":0.0001,"thickness_meters":0.001,"particle_distance_meters":0.01},
+            "darts":[],"notches":[],"holes":[],"annotations":[]}],"seams":[]}"#;
+        let project = PatternProject::from_json(json).unwrap();
+        assert_eq!(project.pieces[0].assembly, AssemblyTransform::default());
     }
 
     #[test]
