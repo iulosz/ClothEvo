@@ -465,7 +465,11 @@ pub fn validate_simple_polygon(polygon: &[Point2]) -> Result<(), GeometryError> 
             if segments_intersect(a, b, c, d) { return Err(GeometryError::SelfIntersection); }
         }
     }
-    if signed_area(polygon).abs() <= EPS { return Err(GeometryError::TooFewPoints); }
+    let area = signed_area(polygon);
+    if !area.is_finite() {
+        return Err(GeometryError::InvalidParameter);
+    }
+    if area.abs() <= EPS { return Err(GeometryError::TooFewPoints); }
     Ok(())
 }
 
@@ -739,6 +743,17 @@ mod tests {
         let polygon = [
             Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
             Point2::new(f64::NAN, 1.0), Point2::new(0.0, 1.0),
+        ];
+        assert_eq!(validate_simple_polygon(&polygon), Err(GeometryError::InvalidParameter));
+    }
+
+    #[test]
+    fn simple_polygon_rejects_overflowing_area_calculation() {
+        let polygon = [
+            Point2::new(-1.0e200, -1.0e200),
+            Point2::new(1.0e200, -1.0e200),
+            Point2::new(1.0e200, 1.0e200),
+            Point2::new(-1.0e200, 1.0e200),
         ];
         assert_eq!(validate_simple_polygon(&polygon), Err(GeometryError::InvalidParameter));
     }

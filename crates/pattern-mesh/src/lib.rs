@@ -259,6 +259,18 @@ mod tests {
     }
 
     #[test]
+    fn excessive_boundary_vertex_count_is_rejected_before_quadratic_validation() {
+        let points = (0..=4_096).map(|index| {
+            let angle = std::f64::consts::TAU * index as f64 / 4_097.0;
+            Point2::new(angle.cos(), angle.sin())
+        }).collect::<Vec<_>>();
+        assert!(matches!(
+            triangulate_outline(&points, 0.1),
+            Err(MeshError::ResourceLimit)
+        ));
+    }
+
+    #[test]
     fn invalid_spacing_is_rejected() {
         assert_eq!(triangulate_outline(&rectangle(), 0.0), Err(MeshError::InvalidSpacing));
     }

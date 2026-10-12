@@ -666,6 +666,7 @@ fn bounded_self_collision_candidate_pairs(
     cell_size: f32,
     exclusions: &HashSet<(u32, u32)>,
 ) -> Vec<(u32, u32)> {
+    if positions.len() < 2 { return Vec::new(); }
     let cell_size = cell_size.max(1.0e-5);
     let cell_of = |p: Vec3| -> (i32, i32, i32) {
         ((p.x / cell_size).floor() as i32,

@@ -262,7 +262,7 @@ Os testes incluem regressões para geometria não finita, escalas inválidas, co
 
 ### Limites de segurança da simulação e da malha
 
-A auto-colisão limita a 96 candidatos examinados por partícula em cada substep, evitando crescimento quadrático de memória quando muitos vértices colapsam numa célula. Esse limite protege o aplicativo, mas em congestionamentos extremos também reduz os pares examinados; use-o como proteção de estabilidade, não como garantia de colisão exaustiva.
+A auto-colisão examina até 96 candidatos por partícula, com um orçamento global de 2 milhões de pares por substep e sem pré-alocação proporcional à malha. Isso evita crescimento quadrático de memória quando vértices colapsam numa célula. Em congestionamentos extremos, alguns pares deixam de ser examinados; o limite é uma proteção de estabilidade/desempenho, não uma garantia de colisão exaustiva.
 
 A preparação da malha recusa contornos com mais de 4.096 vértices, grades acima de 2 milhões de candidatos, custo estimado acima de 25 milhões de verificações ponto-contorno ou malhas acima de 500 mil vértices. Quando um limite é ultrapassado, aumente o espaçamento entre partículas ou simplifique o contorno.
 
