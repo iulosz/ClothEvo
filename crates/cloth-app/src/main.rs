@@ -781,7 +781,7 @@ impl ClothEvoApp {
         self.apply_placement_translation(piece_id, delta);
     }
 
-    /// Centro y bases del gizmo a partir de la transformación real del panel.
+    /// Centro e eixos do gizmo a partir da transformação atual do painel.
     fn placement_gizmo_axes(&self, piece_id: u64) -> Option<(Vec3, [Vec3; 3], [Vec3; 3])> {
         let range = self.placement_ranges.iter().find(|range| range.piece_id == piece_id)?;
         let positions = self.sim.pos.get(range.first..range.end)?;
@@ -860,7 +860,8 @@ impl ClothEvoApp {
                 let screen_axis = screen_delta / screen_length;
                 let (distance, t) = point_segment_distance(pointer, screen_center, endpoint);
                 let on_handle = pointer.distance(endpoint) <= 12.0;
-                let in_scale_region = mode != GizmoMode::Transform || t >= 0.54;
+                // No modo combinado, mantém os quadrados de escala fora da ponta das setas.
+                let in_scale_region = mode != GizmoMode::Transform || t >= 0.72;
                 if on_handle || (distance <= 7.5 && in_scale_region) {
                     return Some(PlacementGizmoDrag {
                         piece_id,
