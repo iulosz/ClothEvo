@@ -2756,6 +2756,37 @@ mod pattern_editor_tests {
     }
 
     #[test]
+    fn mirror_pattern_piece_reflects_outline_and_internal_metadata() {
+        let mut source = PatternPiece::from_polygon(10, "Frente", &[
+            PatternPoint2::new(0.0, 0.0),
+            PatternPoint2::new(1.0, 0.0),
+            PatternPoint2::new(1.0, 1.0),
+            PatternPoint2::new(0.0, 1.0),
+        ]).unwrap();
+        source.internal_lines.push(Curve2D::polyline(&[
+            PatternPoint2::new(0.2, 0.2),
+            PatternPoint2::new(0.4, 0.5),
+        ], false).unwrap());
+        source.grain_line = Some(GrainLine {
+            start: PatternPoint2::new(0.3, 0.1),
+            end: PatternPoint2::new(0.3, 0.9),
+        });
+        source.darts.push(pattern_core::Dart {
+            apex: PatternPoint2::new(0.5, 0.6),
+            leg_a: PatternPoint2::new(0.4, 0.5),
+            leg_b: PatternPoint2::new(0.6, 0.5),
+            intake_meters: 0.02,
+        });
+        let mirrored = mirror_pattern_piece(&source, 11, "Costas".into(), 0.0).unwrap();
+        assert_eq!(mirrored.id, 11);
+        assert_eq!(mirrored.outline.start, PatternPoint2::new(0.0, 0.0));
+        assert_eq!(mirrored.outline.segments[0].endpoint(), PatternPoint2::new(-1.0, 0.0));
+        assert_eq!(mirrored.internal_lines[0].start, PatternPoint2::new(-0.2, 0.2));
+        assert_eq!(mirrored.grain_line.as_ref().unwrap().start.x, -0.3);
+        assert_eq!(mirrored.darts[0].apex.x, -0.5);
+    }
+
+    #[test]
     fn translating_piece_moves_every_curve_point_without_changing_seam_ids() {
         let mut project = square_project();
         let before = project.pieces[0].clone();
