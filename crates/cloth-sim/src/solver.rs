@@ -169,6 +169,7 @@ impl Simulation {
 
     /// Acesso somente de crate para validar os alvos das dobradiças físicas sem expor
     /// os buffers internos do solver à API pública.
+    #[cfg(test)]
     pub(crate) fn bending_constraints(&self) -> &[BendConstraint] {
         &self.bending
     }
