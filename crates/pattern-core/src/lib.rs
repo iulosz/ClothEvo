@@ -853,8 +853,8 @@ mod tests {
         let mut project = PatternProject::new("Teste");
         project.seams.push(SeamDefinition {
             id: 1, name: "Costura inválida".into(),
-            a: EdgeRef::single_segment(7, 0),
-            b: EdgeRef::single_segment(8, 0), ease_meters: 0.0,
+            a: EdgeRef::single_segment(7, 0).into(),
+            b: EdgeRef::single_segment(8, 0).into(), ease_meters: 0.0,
         });
         assert!(project.validate().is_err());
     }
@@ -875,7 +875,7 @@ mod tests {
         ]).unwrap());
         self_seam.seams.push(SeamDefinition {
             id: 1, name: "A para A".into(),
-            a: EdgeRef::single_segment(1, 0), b: EdgeRef::single_segment(1, 0),
+            a: EdgeRef::single_segment(1, 0).into(), b: EdgeRef::single_segment(1, 0).into(),
             ease_meters: 0.0,
         });
         assert!(self_seam.validate().unwrap_err().contains("mesma peça"));
@@ -889,12 +889,12 @@ mod tests {
         }
         overlap.seams.push(SeamDefinition {
             id: 1, name: "Primeira".into(),
-            a: EdgeRef::single_segment(1, 0), b: EdgeRef::single_segment(2, 0),
+            a: EdgeRef::single_segment(1, 0).into(), b: EdgeRef::single_segment(2, 0).into(),
             ease_meters: 0.0,
         });
         overlap.seams.push(SeamDefinition {
             id: 2, name: "Duplicada".into(),
-            a: EdgeRef::single_segment(1, 0), b: EdgeRef::single_segment(2, 1),
+            a: EdgeRef::single_segment(1, 0).into(), b: EdgeRef::single_segment(2, 1).into(),
             ease_meters: 0.0,
         });
         assert!(overlap.validate().unwrap_err().contains("já está vinculada"));
@@ -913,7 +913,7 @@ mod tests {
         ]).unwrap());
         project.seams.push(SeamDefinition {
             id: 1, name: "Comprimentos incompatíveis".into(),
-            a: EdgeRef::single_segment(1, 0), b: EdgeRef::single_segment(2, 0),
+            a: EdgeRef::single_segment(1, 0).into(), b: EdgeRef::single_segment(2, 0).into(),
             ease_meters: 0.0,
         });
         assert!(project.validate().is_ok());
