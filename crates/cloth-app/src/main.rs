@@ -182,36 +182,45 @@ fn trace_curve_to_mesh_edges(
 /// Cria dobradiças físicas para linhas de dobra e os dois vincos opostos de uma prega.
 /// Linhas Decorativas continuam apenas visuais. O mapeamento segue arestas já existentes,
 /// sem retopologizar nem inserir vértices na CDT.
+fn merge_fold_curve_edges(
+    combined: &mut BTreeMap<(u32, u32), (f32, f32)>,
+    vertices: &[PatternPoint2],
+    triangles: &[[u32; 3]],
+    curve: &Curve2D,
+    stiffness: f32,
+    angle: f32,
+    spacing: f64,
+) {
+    for (a, b, local_stiffness, rest_angle) in trace_curve_to_mesh_edges(
+        vertices, triangles, curve, spacing, stiffness, angle,
+    ) {
+        combined.entry((a, b))
+            .and_modify(|spec| {
+                spec.0 = spec.0.min(local_stiffness);
+                spec.1 = (spec.1 + rest_angle) * 0.5;
+            })
+            .or_insert((local_stiffness, rest_angle));
+    }
+}
+
+/// Cria dobradiças físicas para linhas de dobra e os dois vincos opostos de uma prega.
+/// Linhas Decorativas continuam apenas visuais. O mapeamento segue arestas já existentes,
+/// sem retopologizar nem inserir vértices na CDT.
 fn physical_fold_edges(
     vertices: &[PatternPoint2],
     triangles: &[[u32; 3]],
     piece: &PatternPiece,
 ) -> Vec<LocalFoldEdge> {
     let mut combined = BTreeMap::<(u32, u32), (f32, f32)>::new();
-    let mut add_curve = |curve: &Curve2D, stiffness: f32, angle: f32, spacing: f64| {
-        for (a, b, s, rest_angle) in trace_curve_to_mesh_edges(
-            vertices, triangles, curve, spacing, stiffness, angle,
-        ) {
-            combined.entry((a, b))
-                .and_modify(|spec| {
-                    spec.0 = spec.0.min(s);
-                    spec.1 = (spec.1 + rest_angle) * 0.5;
-                })
-                .or_insert((s, rest_angle));
-        }
-    };
-
     for fold in &piece.fold_lines {
         let base_angle = match fold.kind {
             FoldKind::Valley => fold.angle_radians as f32,
             FoldKind::Mountain => -(fold.angle_radians as f32),
             FoldKind::Decorative => continue,
         };
-        add_curve(
-            &fold.curve,
-            fold.stiffness as f32,
-            base_angle,
-            piece.fabric.particle_distance_meters,
+        merge_fold_curve_edges(
+            &mut combined, vertices, triangles, &fold.curve,
+            fold.stiffness as f32, base_angle, piece.fabric.particle_distance_meters,
         );
     }
 
@@ -226,17 +235,16 @@ fn physical_fold_edges(
             &pleat.axis, half_depth, piece.fabric.particle_distance_meters * 0.5,
         ) else { continue; };
         let angle = pleat.angle_radians as f32;
-        add_curve(
-            &first_crease, 0.22, angle,
-            piece.fabric.particle_distance_meters,
+        merge_fold_curve_edges(
+            &mut combined, vertices, triangles, &first_crease,
+            0.22, angle, piece.fabric.particle_distance_meters,
         );
-        add_curve(
-            &second_crease, 0.22, -angle,
-            piece.fabric.particle_distance_meters,
+        merge_fold_curve_edges(
+            &mut combined, vertices, triangles, &second_crease,
+            0.22, -angle, piece.fabric.particle_distance_meters,
         );
     }
 
-    drop(add_curve);
     combined.into_iter().map(|((a, b), (stiffness, angle))| {
         (a, b, stiffness, angle)
     }).collect()
