@@ -2125,6 +2125,71 @@ impl ClothEvoApp {
         self.seam_drag_before = None;
     }
 
+    fn load_seam_edge_to_controls(&mut self, is_a: bool, edge: &EdgePath) {
+        let Some(index) = self.pattern_project.pieces.iter().position(|piece| piece.id == edge.piece_id) else {
+            return;
+        };
+        let segment_count = self.pattern_project.pieces[index].outline.segment_count().max(1);
+        let start = (edge.start.segment as usize).min(segment_count - 1);
+        let end = (edge.end.segment as usize
+            + usize::from(edge.end.t >= 1.0 - 1.0e-9)).clamp(start + 1, segment_count);
+        if is_a {
+            self.seam_a_piece = index;
+            self.seam_a_segment = start;
+            self.seam_a_segment_end = end;
+            self.seam_a_start_t = edge.start.t;
+            self.seam_a_end_t = edge.end.t;
+            self.seam_a_reversed = edge.reversed;
+        } else {
+            self.seam_b_piece = index;
+            self.seam_b_segment = start;
+            self.seam_b_segment_end = end;
+            self.seam_b_start_t = edge.start.t;
+            self.seam_b_end_t = edge.end.t;
+            self.seam_b_reversed = edge.reversed;
+        }
+        self.seam_free_mode |= edge.start.t > 1.0e-9 || edge.end.t < 1.0 - 1.0e-9;
+    }
+
+    fn load_active_chain_edge_to_controls(&mut self, is_a: bool) {
+        let index = if is_a { self.seam_a_active_path } else { self.seam_b_active_path };
+        let edge = if is_a { self.seam_sides_a.get(index) } else { self.seam_sides_b.get(index) }.cloned();
+        if let Some(edge) = edge { self.load_seam_edge_to_controls(is_a, &edge); }
+    }
+
+    fn current_seam_sides_with_draft(&self) -> Result<(Vec<EdgePath>, Vec<EdgePath>), String> {
+        let (draft_a, draft_b) = self.seam_edges_from_controls()?;
+        let merge = |stored: &[EdgePath], active: usize, draft: EdgePath| {
+            let mut result = stored.to_vec();
+            if result.is_empty() { result.push(draft); }
+            else if active < result.len() { result[active] = draft; }
+            else { result.push(draft); }
+            result
+        };
+        Ok((
+            merge(&self.seam_sides_a, self.seam_a_active_path, draft_a),
+            merge(&self.seam_sides_b, self.seam_b_active_path, draft_b),
+        ))
+    }
+
+    fn add_draft_edge_to_side(&mut self, is_a: bool, edge: EdgePath) {
+        let target = if is_a { &mut self.seam_sides_a } else { &mut self.seam_sides_b };
+        if target.iter().any(|existing| existing.piece_id == edge.piece_id
+            && existing.curve == edge.curve
+            && existing.start_position() < edge.end_position() - 1.0e-9
+            && edge.start_position() < existing.end_position() - 1.0e-9)
+        {
+            self.pattern_message = "Essa borda já está presente ou sobreposta no lado da costura.".into();
+            return;
+        }
+        target.push(edge);
+        if is_a { self.seam_a_active_path = target.len() - 1; }
+        else { self.seam_b_active_path = target.len() - 1; }
+        self.seam_active_side_a = is_a;
+        self.load_active_chain_edge_to_controls(is_a);
+        self.pattern_message = format!("Borda adicionada ao lado {}.", if is_a { "A" } else { "B" });
+    }
+
     fn seam_edges_from_controls(&self) -> Result<(EdgePath, EdgePath), String> {
         let count = self.pattern_project.pieces.len();
         if count < 2 { return Err("Crie pelo menos duas peças antes de costurá-las.".into()); }
@@ -2235,14 +2300,14 @@ impl ClothEvoApp {
     fn commit_seam_handle_drag(&mut self) {
         let Some(before) = self.seam_drag_before.take() else { return; };
         let Some(id) = self.selected_seam_id else { return; };
-        let (edge_a, edge_b) = match self.seam_edges_from_controls() {
-            Ok(edges) => edges,
+        let (sides_a, sides_b) = match self.current_seam_sides_with_draft() {
+            Ok(sides) => sides,
             Err(error) => { self.pattern_message = error; return; }
         };
         let mut staged = self.pattern_project.clone();
         let Some(seam) = staged.seams.iter_mut().find(|seam| seam.id == id) else { return; };
-        seam.a = edge_a;
-        seam.b = edge_b;
+        seam.sides_a = sides_a;
+        seam.sides_b = sides_b;
         if let Err(error) = staged.validate() {
             self.pattern_message = format!("A extremidade não foi aplicada: {error}");
             return;
@@ -2253,8 +2318,8 @@ impl ClothEvoApp {
     }
 
     fn add_seam_from_controls(&mut self) {
-        let (edge_a, edge_b) = match self.seam_edges_from_controls() {
-            Ok(edges) => edges,
+        let (sides_a, sides_b) = match self.current_seam_sides_with_draft() {
+            Ok(sides) => sides,
             Err(error) => { self.pattern_message = error; return; }
         };
         let next_id = self.pattern_project.seams.iter().map(|seam| seam.id).max().unwrap_or(0) + 1;
@@ -2264,8 +2329,8 @@ impl ClothEvoApp {
         let seam = SeamDefinition {
             id: next_id,
             name: name.clone(),
-            a: edge_a.clone(),
-            b: edge_b.clone(),
+            sides_a,
+            sides_b,
             ease_meters: self.seam_ease_m,
         };
         let before = self.editor_snapshot();
@@ -2287,8 +2352,8 @@ impl ClothEvoApp {
             self.add_seam_from_controls();
             return;
         };
-        let (edge_a, edge_b) = match self.seam_edges_from_controls() {
-            Ok(edges) => edges,
+        let (sides_a, sides_b) = match self.current_seam_sides_with_draft() {
+            Ok(sides) => sides,
             Err(error) => { self.pattern_message = error; return; }
         };
         let before = self.editor_snapshot();
@@ -2301,8 +2366,8 @@ impl ClothEvoApp {
         seam.name = if self.seam_name.trim().is_empty() {
             format!("Costura {id}")
         } else { self.seam_name.trim().to_owned() };
-        seam.a = edge_a;
-        seam.b = edge_b;
+        seam.sides_a = sides_a;
+        seam.sides_b = sides_b;
         seam.ease_meters = self.seam_ease_m;
         if let Err(error) = staged.validate() {
             self.pattern_message = error;
