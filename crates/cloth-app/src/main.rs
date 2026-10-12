@@ -58,13 +58,14 @@ fn offset_open_curve(
     let points = curve_points_at_spacing(curve, sampling_spacing)?;
     let mut shifted = Vec::with_capacity(points.len());
     for index in 0..points.len() {
-        let tangent = if index == 0 {
-            points[1] - points[0]
+        let (a, b) = if index == 0 {
+            (points[0], points[1])
         } else if index + 1 == points.len() {
-            points[index] - points[index - 1]
+            (points[index - 1], points[index])
         } else {
-            points[index + 1] - points[index - 1]
+            (points[index - 1], points[index + 1])
         };
+        let tangent = PatternPoint2::new(b.x - a.x, b.y - a.y);
         let length = (tangent.x * tangent.x + tangent.y * tangent.y).sqrt();
         if length <= 1.0e-9 { return None; }
         let normal = PatternPoint2::new(-tangent.y / length, tangent.x / length);
