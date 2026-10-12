@@ -124,3 +124,55 @@ impl FabricPreset {
         p.bend = bend;
     }
 }
+
+/// Parâmetros físicos de um painel de molde. Unidades SI; os valores do painel são
+/// convertidos em multiplicadores relativos aos controles globais no momento da montagem.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PanelMaterial {
+    pub density_kg_m2: f32,
+    pub stretch_warp_n_m: f32,
+    pub stretch_weft_n_m: f32,
+    pub shear_n_m: f32,
+    pub bend_nm: f32,
+    pub thickness_meters: f32,
+}
+
+impl Default for PanelMaterial {
+    fn default() -> Self {
+        Self {
+            density_kg_m2: 0.2,
+            stretch_warp_n_m: 5_000.0,
+            stretch_weft_n_m: 5_000.0,
+            shear_n_m: 300.0,
+            bend_nm: 5.0e-5,
+            thickness_meters: 0.005,
+        }
+    }
+}
+
+impl PanelMaterial {
+    pub fn validate(self) -> Result<Self, &'static str> {
+        let values = [
+            self.density_kg_m2,
+            self.stretch_warp_n_m,
+            self.stretch_weft_n_m,
+            self.shear_n_m,
+            self.bend_nm,
+            self.thickness_meters,
+        ];
+        if values.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+            return Err("As propriedades físicas do painel precisam ser finitas e positivas.");
+        }
+        Ok(self)
+    }
+
+    pub fn stiffness(self, kind: ConstraintKind) -> f32 {
+        match kind {
+            ConstraintKind::Warp => self.stretch_warp_n_m,
+            ConstraintKind::Weft => self.stretch_weft_n_m,
+            ConstraintKind::Shear => self.shear_n_m,
+            ConstraintKind::Seam => 1.0,
+        }
+    }
+}
+
