@@ -54,11 +54,19 @@ pub fn triangulate_outline(outline: &[Point2], target_spacing: f64) -> Result<Pa
     let max_y = boundary.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
 
     let mut points = boundary.clone();
+    // Uma malha triangular alternada evita a anisotropia da grade quadrada: os pontos
+    // das linhas adjacentes ficam deslocados em meia célula e as arestas tendem a ser
+    // mais uniformes, reduzindo triângulos longos e concentração de tensão no tecido.
+    let row_spacing = target_spacing * 0.866_025_403_784_438_6; // sqrt(3) / 2
+    let mut row = 0usize;
     let mut y = min_y + target_spacing * 0.5;
     while y < max_y {
-        let mut x = min_x + target_spacing * 0.5;
+        let row_offset = if row % 2 == 0 { 0.0 } else { target_spacing * 0.5 };
+        let mut x = min_x + target_spacing * 0.5 + row_offset;
         while x < max_x {
             let candidate = Point2::new(x, y);
+            // Mantém uma pequena faixa de segurança junto ao contorno; pontos quase
+            // coincidentes com a borda geram elementos degenerados e solver instável.
             if point_in_polygon(candidate, &boundary)
                 && distance_to_boundary(candidate, &boundary) >= target_spacing * 0.2
             {
@@ -66,7 +74,8 @@ pub fn triangulate_outline(outline: &[Point2], target_spacing: f64) -> Result<Pa
             }
             x += target_spacing;
         }
-        y += target_spacing;
+        row += 1;
+        y = min_y + target_spacing * 0.5 + row as f64 * row_spacing;
     }
 
     let boundary_count = boundary.len();
