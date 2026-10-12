@@ -205,3 +205,14 @@ No Pattern Studio, selecione uma costura existente para editar os moldes, interv
 O solver faz pareamento das duas bordas pelo comprimento de arco normalizado e cobre os vértices de ambos os lados mesmo quando a malha tem densidades diferentes. Piques (notches) podem ser adicionados, editados e removidos; os piques de ambas as bordas são pareados por progresso de arco e recebem vínculos explícitos no solver. O canvas 2D mostra piques e costuras, com vermelho para diferenças medidas que não coincidem com a meta. Na viewport 3D, vínculos cuja abertura supera 15 mm são realçados em vermelho; essa abertura é um indicador de diagnóstico, não uma estimativa de força em newtons.
 
 Ações disponíveis: criar costura, selecionar e alterar uma costura existente, inverter a direção de A ou B, selecionar intervalos com vários segmentos e descosturar. A simulação atual ainda costura apenas bordas do contorno; linhas de costura internas exigem um mapeamento de malha próprio em uma etapa futura.
+
+
+## Estabilidade e auto-colisão da simulação
+
+O painel **Solver e estabilidade** permite controlar substeps por quadro, iterações por substep, auto-colisão e velocidade máxima das partículas. O preset **Equilibrado** privilegia desempenho; **Mais estável** aumenta substeps e iterações e reduz o limite de velocidade. Pausar interrompe o avanço automático; **Avançar 1 quadro** executa exatamente um passo fixo e deixa a simulação pausada; **Reiniciar** restaura a colocação inicial e também pausa a reprodução.
+
+A auto-colisão é opcional por custo de CPU. Ela usa uma grade espacial para encontrar partículas próximas, resolve a separação por projeção posicional e ignora pares adjacentes no triângulo ou explicitamente costurados. Isso reduz interpenetrações entre camadas de tecido, mas é uma aproximação de contato partícula–partícula: não substitui detecção contínua entre triângulos e pode deixar atravessamentos em malhas muito grossas ou com velocidades altas.
+
+A espessura de contato já é aplicada por molde; agora o atrito também é configurável no material de cada molde. O controle global de atrito permanece como multiplicador mestre. A velocidade máxima funciona como limitador numérico para conter explosões e registrar quantas correções ocorreram no último passo.
+
+O painel de métricas mostra velocidade máxima, partículas próximas do limite, correções de estabilidade, contatos de auto-colisão e a maior penetração estimada no último passo. Para costuras, a abertura acima do limite visual continua sendo um indicador geométrico, não uma medição calibrada de força em newtons.
