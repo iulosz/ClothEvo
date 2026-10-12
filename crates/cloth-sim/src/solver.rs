@@ -11,6 +11,8 @@ use crate::params::{ConstraintKind, SimParams, KIND_COUNT};
 
 /// Grupos de cor menores que isso são resolvidos em série (overhead do rayon não compensa).
 const PAR_MIN: usize = 256;
+/// Limite determinístico por partícula para impedir custo quadrático quando a malha colapsa.
+const MAX_SELF_COLLISION_CANDIDATES_PER_PARTICLE: usize = 96;
 
 /// Restrição de distância entre duas partículas (stretch, shear ou costura).
 #[derive(Clone, Copy, Debug)]
@@ -382,14 +384,21 @@ impl Simulation {
         for i in 0..n {
             if !self.pos[i].is_finite() { continue; }
             let (cx, cy, cz) = cells[i];
-            for dx in -1..=1 {
+            let mut candidates = 0usize;
+            'neighbor_cells: for dx in -1..=1 {
                 for dy in -1..=1 {
                     for dz in -1..=1 {
                         let Some(indices) = grid.get(&(cx + dx, cy + dy, cz + dz)) else { continue; };
-                        for &j in indices {
-                            if j <= i { continue; }
+                        // Cada lista é inserida em ordem de índice: binary partition evita
+                        // varrer milhares de candidatos anteriores em uma célula degenerada.
+                        let first_after_i = indices.partition_point(|&index| index <= i);
+                        for &j in &indices[first_after_i..] {
                             let key = (i as u32, j as u32);
                             if self.self_collision_exclusions.contains(&key) { continue; }
+                            candidates += 1;
+                            if candidates > MAX_SELF_COLLISION_CANDIDATES_PER_PARTICLE {
+                                break 'neighbor_cells;
+                            }
                             let target = radii[i] + radii[j];
                             if target <= 1.0e-6 { continue; }
                             let delta = self.pos[i] - self.pos[j];
