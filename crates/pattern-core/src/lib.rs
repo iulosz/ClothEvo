@@ -927,7 +927,7 @@ pub fn suggest_seams(
 
     let mut candidates: Vec<SeamSuggestion> = Vec::new();
     for (index_a, piece_a) in project.pieces.iter().enumerate() {
-        for (index_b, piece_b) in project.pieces.iter().enumerate().skip(index_a + 1) {
+        for piece_b in project.pieces.iter().skip(index_a + 1) {
             for segment_a in 0..piece_a.outline.segments.len() {
                 if edge_was_sewn(project, piece_a.id, BoundaryCurve::Outline, segment_a as u32) { continue; }
                 let edge_a = EdgePath {
@@ -998,7 +998,7 @@ pub fn suggest_seams(
                     } else {
                         reasons.push("Nenhum pique nas bordas; pontuação neutra por contagem/posição.".into());
                     }
-                    candidates.push(SeamSuggestion { a: edge_a, b: edge_b, score, reasons });
+                    candidates.push(SeamSuggestion { a: edge_a.clone(), b: edge_b, score, reasons });
                 }
             }
         }
