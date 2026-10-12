@@ -15,16 +15,16 @@ use cloth_sim::{
 use eframe::{egui, egui_wgpu};
 use glam::{EulerRot, Quat, Vec2, Vec3};
 use pattern_core::{
-    BoundaryCurve, Curve2D, CurveSegment, EdgeRef, FoldKind, FoldLine, GrainLine,
+    BoundaryCurve, Curve2D, CurveParam, CurveSegment, EdgePath, EdgeRef, FoldKind, FoldLine, GrainLine,
     Notch, PatternPiece, PatternProject, Pleat,
     Point2 as PatternPoint2, SeamDefinition, SymmetryLink,
 };
 use pattern_geom::{
     cut_closed_outline, mirror_curve_x, offset_polygon, point_in_polygon, rectangle,
-    regular_polygon, sample_curve, sample_curve_with_ranges, validate_simple_polygon,
+    regular_polygon, sample_curve, sample_curve_with_forced_params, sample_curve_with_ranges, validate_simple_polygon,
     CutAndSewResult, SourceSegmentFragment,
 };
-use pattern_mesh::triangulate_outline;
+use pattern_mesh::{triangulate_outline, triangulate_outline_with_forced_vertices};
 
 const FIXED_DT: f32 = 1.0 / 60.0;
 const DEFAULT_RES: u32 = 40;
@@ -138,6 +138,14 @@ struct ClothEvoApp {
     seam_b_segment_end: usize,
     seam_a_reversed: bool,
     seam_b_reversed: bool,
+    seam_a_start_t: f64,
+    seam_a_end_t: f64,
+    seam_b_start_t: f64,
+    seam_b_end_t: f64,
+    seam_free_mode: bool,
+    seam_snap_tolerance_px: f32,
+    dragging_seam_handle: Option<(bool, bool)>,
+    seam_drag_before: Option<PatternEditorSnapshot>,
     seam_ease_m: f64,
     seam_name: String,
     selected_seam_id: Option<u64>,
@@ -246,6 +254,14 @@ impl ClothEvoApp {
             seam_b_segment_end: 1,
             seam_a_reversed: false,
             seam_b_reversed: false,
+            seam_a_start_t: 0.0,
+            seam_a_end_t: 1.0,
+            seam_b_start_t: 0.0,
+            seam_b_end_t: 1.0,
+            seam_free_mode: false,
+            seam_snap_tolerance_px: 10.0,
+            dragging_seam_handle: None,
+            seam_drag_before: None,
             seam_ease_m: 0.0,
             seam_name: String::new(),
             selected_seam_id: None,
@@ -1009,12 +1025,20 @@ impl ClothEvoApp {
                         if let Some(index) = self.pattern_project.pieces.iter().position(|piece| piece.id == seam.b.piece_id) {
                             self.seam_b_piece = index;
                         }
-                        self.seam_a_segment = seam.a.segment_start as usize;
-                        self.seam_a_segment_end = seam.a.segment_end as usize;
-                        self.seam_b_segment = seam.b.segment_start as usize;
-                        self.seam_b_segment_end = seam.b.segment_end as usize;
+                        self.seam_a_segment = seam.a.start.segment as usize;
+                        self.seam_a_segment_end = (seam.a.end.segment as usize + usize::from(seam.a.end.t >= 1.0 - 1.0e-9))
+                            .max(self.seam_a_segment + 1);
+                        self.seam_b_segment = seam.b.start.segment as usize;
+                        self.seam_b_segment_end = (seam.b.end.segment as usize + usize::from(seam.b.end.t >= 1.0 - 1.0e-9))
+                            .max(self.seam_b_segment + 1);
+                        self.seam_a_start_t = seam.a.start.t;
+                        self.seam_a_end_t = seam.a.end.t;
+                        self.seam_b_start_t = seam.b.start.t;
+                        self.seam_b_end_t = seam.b.end.t;
                         self.seam_a_reversed = seam.a.reversed;
                         self.seam_b_reversed = seam.b.reversed;
+                        self.seam_free_mode = seam.a.start.t > 1.0e-9 || seam.b.start.t > 1.0e-9
+                            || seam.a.end.t < 1.0 - 1.0e-9 || seam.b.end.t < 1.0 - 1.0e-9;
                         self.seam_ease_m = seam.ease_meters;
                         self.seam_name = seam.name;
                     }
@@ -1954,11 +1978,11 @@ impl ClothEvoApp {
             a: EdgeRef {
                 piece_id: first_id, curve: BoundaryCurve::Outline,
                 segment_start: a_start as u32, segment_end: a_end as u32, reversed: false,
-            },
+            }.into(),
             b: EdgeRef {
                 piece_id: second_id, curve: BoundaryCurve::Outline,
                 segment_start: b_start as u32, segment_end: b_end as u32, reversed: true,
-            },
+            }.into(),
             ease_meters: 0.0,
         });
         next_seam_id += 1;
@@ -1972,11 +1996,11 @@ impl ClothEvoApp {
                 a: EdgeRef {
                     piece_id: mate_source.id, curve: BoundaryCurve::Outline,
                     segment_start: mate_a_start as u32, segment_end: mate_a_end as u32, reversed: false,
-                },
+                }.into(),
                 b: EdgeRef {
                     piece_id: *mate_second_id, curve: BoundaryCurve::Outline,
                     segment_start: mate_b_start as u32, segment_end: mate_b_end as u32, reversed: true,
-                },
+                }.into(),
                 ease_meters: 0.0,
             });
         }
@@ -2039,6 +2063,13 @@ impl ClothEvoApp {
         self.seam_b_segment_end = 1;
         self.seam_a_reversed = false;
         self.seam_b_reversed = false;
+        self.seam_a_start_t = 0.0;
+        self.seam_a_end_t = 1.0;
+        self.seam_b_start_t = 0.0;
+        self.seam_b_end_t = 1.0;
+        self.seam_free_mode = false;
+        self.dragging_seam_handle = None;
+        self.seam_drag_before = None;
     }
 
     fn seam_edges_from_controls(&self) -> Result<(EdgeRef, EdgeRef), String> {
@@ -3768,8 +3799,8 @@ mod pattern_editor_tests {
         project.seams.push(SeamDefinition {
             id: 1,
             name: "A-B".into(),
-            a: EdgeRef::single_segment(1, 1),
-            b: EdgeRef::single_segment(2, 3),
+            a: EdgeRef::single_segment(1, 1).into(),
+            b: EdgeRef::single_segment(2, 3).into(),
             ease_meters: 0.0,
         });
         project
