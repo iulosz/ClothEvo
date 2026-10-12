@@ -462,26 +462,26 @@ impl PatternProject {
         }
     }
 
-    /// Comprimento de arco aproximado do EdgePath. Cada Bézier é amostrada em 24 partes.
+    /// Mede a mesma polilinha de contorno que entra no builder: Béziers em 8 passos e
+    /// todos os piques/extremos parciais inseridos como vértices forçados.
     pub fn edge_length_meters(&self, edge: &EdgePath) -> Option<f64> {
         let piece = self.pieces.iter().find(|piece| piece.id == edge.piece_id)?;
         let curve = match edge.curve {
             BoundaryCurve::Outline => Some(&piece.outline),
             BoundaryCurve::SewingLine => piece.sewing_line.as_ref(),
         }?;
-        let scalar_start = edge.start_position();
-        let scalar_end = edge.end_position();
-        if !scalar_start.is_finite() || !scalar_end.is_finite() || scalar_end <= scalar_start {
-            return Some(0.0);
-        }
+        if !edge.start.t.is_finite() || !edge.end.t.is_finite()
+            || !(0.0..=1.0).contains(&edge.start.t) || !(0.0..=1.0).contains(&edge.end.t)
+            || edge.start_position() >= edge.end_position()
+        { return Some(0.0); }
         let first = edge.start.segment as usize;
         let last = edge.end.segment as usize;
         if last >= curve.segments.len() { return None; }
 
         let mut points = Vec::new();
         for index in first..=last {
-            let t0 = if index == first { edge.start.t.clamp(0.0, 1.0) } else { 0.0 };
-            let t1 = if index == last { edge.end.t.clamp(0.0, 1.0) } else { 1.0 };
+            let t0 = if index == first { edge.start.t } else { 0.0 };
+            let t1 = if index == last { edge.end.t } else { 1.0 };
             if t1 < t0 { return Some(0.0); }
             let p0 = if index == 0 { curve.start } else { curve.segments[index - 1].endpoint() };
             let segment = &curve.segments[index];
@@ -498,11 +498,34 @@ impl PatternProject {
                     )
                 }
             };
-            if points.is_empty() { points.push(eval(t0)); }
-            for step in 1..=24 {
-                let t = t0 + (t1 - t0) * step as f64 / 24.0;
-                points.push(eval(t));
+            let mut ts = Vec::new();
+            if matches!(segment, CurveSegment::CubicBezier { .. }) {
+                ts.extend((1..8).map(|step| step as f64 / 8.0));
             }
+            if edge.curve == BoundaryCurve::Outline {
+                ts.extend(piece.notches.iter().filter_map(|notch| {
+                    (notch.segment_index as usize == index && notch.t > t0 && notch.t < t1)
+                        .then_some(notch.t)
+                }));
+                for seam in &self.seams {
+                    for path in [&seam.a, &seam.b] {
+                        if path.piece_id == piece.id && path.curve == edge.curve {
+                            for param in [path.start, path.end] {
+                                if param.segment as usize == index && param.t > t0 && param.t < t1 {
+                                    ts.push(param.t);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ts.retain(|t| *t > t0 + 1.0e-10 && *t < t1 - 1.0e-10);
+            ts.push(t1);
+            ts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            ts.dedup_by(|a, b| (*a - *b).abs() <= 1.0e-9);
+
+            if points.is_empty() { points.push(eval(t0)); }
+            for t in ts { points.push(eval(t)); }
         }
         if edge.reversed { points.reverse(); }
         Some(polyline_length_meters(&points))
