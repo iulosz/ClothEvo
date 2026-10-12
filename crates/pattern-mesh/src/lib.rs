@@ -167,6 +167,17 @@ mod tests {
     }
 
     #[test]
+    fn interior_points_use_staggered_rows_for_more_uniform_triangles() {
+        let mesh = triangulate_outline(&rectangle(), 0.25).unwrap();
+        assert!(mesh.vertices.len() > 12);
+        // A row halfway between the first two rows is offset by half a cell.
+        let staggered_y = 0.125 + 0.25 * 0.866_025_403_784_438_6;
+        assert!(mesh.vertices.iter().any(|point| {
+            (point.x - 0.25).abs() < 1e-5 && (point.y - staggered_y).abs() < 1e-5
+        }));
+    }
+
+    #[test]
     fn concave_outline_is_supported() {
         let l_shape = [
             Point2::new(0.0, 0.0), Point2::new(2.0, 0.0),
