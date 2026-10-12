@@ -72,6 +72,10 @@ pub struct Simulation {
     area: Vec<f32>,
     pinned: Vec<bool>,
     inv_mass: Vec<f32>,
+    /// Multiplicador de densidade por partícula, definido pelo material do painel.
+    mass_scale: Vec<f32>,
+    /// Multiplicador da espessura de colisão por partícula.
+    thickness_scale: Vec<f32>,
     last_density: f32,
 
     distance: Vec<DistanceConstraint>,
@@ -90,6 +94,8 @@ impl Simulation {
         triangles: Vec<[u32; 3]>,
         area: Vec<f32>,
         pinned: Vec<bool>,
+        mass_scale: Vec<f32>,
+        thickness_scale: Vec<f32>,
         distance: Vec<DistanceConstraint>,
         dist_colors: Vec<Range<usize>>,
         bending: Vec<BendConstraint>,
@@ -111,6 +117,8 @@ impl Simulation {
             area,
             pinned,
             inv_mass: vec![0.0; n],
+            mass_scale,
+            thickness_scale,
             dist_lambda: vec![0.0; distance.len()],
             distance,
             dist_colors,
@@ -147,8 +155,9 @@ impl Simulation {
     }
 
     fn refresh_masses(&mut self) {
-        let density = self.params.density.max(1e-4);
+        let global_density = self.params.density.max(1e-4);
         for i in 0..self.pos.len() {
+            let density = global_density * self.mass_scale[i].max(1.0e-4);
             self.inv_mass[i] = if self.pinned[i] {
                 0.0
             } else {
@@ -241,12 +250,12 @@ impl Simulation {
         if self.colliders.is_empty() {
             return;
         }
-        let thickness = self.params.thickness;
         let mu = self.params.friction.max(0.0);
         for i in 0..self.pos.len() {
             if self.inv_mass[i] <= 0.0 {
                 continue;
             }
+            let thickness = self.params.thickness * self.thickness_scale[i].max(1.0e-4);
             let mut p = self.pos[i];
             let mut q = self.prev[i];
             for c in &self.colliders {
