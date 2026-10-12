@@ -3169,6 +3169,77 @@ fn curve_segment_arc_length(curve: &Curve2D, segment_index: usize, end_t: f64) -
     curve_segment_arc_between(curve, segment_index, 0.0, end_t)
 }
 
+fn param_at_curve_position(position: f64, segment_count: usize, upper_bound: f64) -> CurveParam {
+    let max_position = segment_count as f64;
+    let upper = if upper_bound.is_finite() { upper_bound.min(max_position) } else { max_position };
+    let position = position.clamp(0.0, upper.max(0.0));
+    if segment_count == 0 { return CurveParam { segment: 0, t: 0.0 }; }
+    if position >= max_position {
+        return CurveParam { segment: (segment_count - 1) as u32, t: 1.0 };
+    }
+    let segment = position.floor() as usize;
+    CurveParam { segment: segment as u32, t: (position - segment as f64).clamp(0.0, 1.0) }
+}
+
+/// Projeta um ponto sobre a curva amostrando cada segmento; retorna o parâmetro com menor erro.
+fn closest_curve_param(curve: &Curve2D, point: PatternPoint2) -> Option<(CurveParam, f64)> {
+    const STEPS: usize = 64;
+    if curve.segments.is_empty() { return None; }
+    let mut best: Option<(CurveParam, f64)> = None;
+    for segment in 0..curve.segments.len() {
+        for step in 0..STEPS {
+            let t0 = step as f64 / STEPS as f64;
+            let t1 = (step + 1) as f64 / STEPS as f64;
+            let a = curve_segment_point(curve, segment, t0)?;
+            let b = curve_segment_point(curve, segment, t1)?;
+            let dx = b.x - a.x;
+            let dy = b.y - a.y;
+            let length_sq = dx * dx + dy * dy;
+            let alpha = if length_sq > 1.0e-18 {
+                (((point.x - a.x) * dx + (point.y - a.y) * dy) / length_sq).clamp(0.0, 1.0)
+            } else { 0.0 };
+            let projected = PatternPoint2::new(a.x + dx * alpha, a.y + dy * alpha);
+            let distance = point.distance(projected);
+            let param = CurveParam { segment: segment as u32, t: t0 + (t1 - t0) * alpha };
+            if best.as_ref().map(|(_, d)| distance < *d).unwrap_or(true) {
+                best = Some((param, distance));
+            }
+        }
+    }
+    best
+}
+
+fn snap_curve_param_to_features(
+    curve: &Curve2D,
+    notches: &[Notch],
+    fallback: CurveParam,
+    pointer: PatternPoint2,
+    tolerance_world: f64,
+) -> CurveParam {
+    let mut best = (fallback, pointer.distance(
+        curve_segment_point(curve, fallback.segment as usize, fallback.t).unwrap_or(pointer)
+    ));
+    let mut consider = |param: CurveParam| {
+        if let Some(point) = curve_segment_point(curve, param.segment as usize, param.t) {
+            let distance = pointer.distance(point);
+            if distance < best.1 { best = (param, distance); }
+        }
+    };
+    for segment in 0..curve.segments.len() {
+        consider(CurveParam { segment: segment as u32, t: 0.0 });
+        consider(CurveParam { segment: segment as u32, t: 1.0 });
+    }
+    for notch in notches {
+        if notch.segment_index as usize < curve.segments.len() && notch.t.is_finite() {
+            consider(CurveParam {
+                segment: notch.segment_index,
+                t: notch.t.clamp(0.0, 1.0),
+            });
+        }
+    }
+    if best.1 <= tolerance_world { best.0 } else { fallback }
+}
+
 fn edge_curve<'a>(project: &'a PatternProject, edge: &EdgePath) -> Option<&'a Curve2D> {
     let piece = project.pieces.iter().find(|piece| piece.id == edge.piece_id)?;
     match edge.curve {
