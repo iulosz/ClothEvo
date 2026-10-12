@@ -42,6 +42,27 @@ const GIZMO_ROTATE_RADIUS: f32 = 0.34;
 
 type LocalFoldEdge = (u32, u32, f32, f32);
 
+fn bounded_placement_translation(
+    current: [f64; 3],
+    requested_delta: Vec3,
+) -> Option<([f64; 3], Vec3)> {
+    if current.iter().any(|value| !value.is_finite()) || !requested_delta.is_finite() {
+        return None;
+    }
+    let target = [
+        (current[0] + requested_delta.x as f64).clamp(-100.0, 100.0),
+        (current[1] + requested_delta.y as f64).clamp(-100.0, 100.0),
+        (current[2] + requested_delta.z as f64).clamp(-100.0, 100.0),
+    ];
+    let applied = Vec3::new(
+        (target[0] - current[0]) as f32,
+        (target[1] - current[1]) as f32,
+        (target[2] - current[2]) as f32,
+    );
+    if !applied.is_finite() { return None; }
+    Some((target, applied))
+}
+
 fn curve_points_at_spacing(curve: &Curve2D, spacing: f64) -> Option<Vec<PatternPoint2>> {
     let spacing = if spacing.is_finite() { spacing.clamp(0.003, 0.10) } else { 0.02 };
     let sampled = resample_curve(curve, spacing).ok()?;
@@ -968,16 +989,22 @@ impl ClothEvoApp {
             .find(|range| range.piece_id == piece_id)
             .map(|range| (range.first, range.end))
         else { return; };
-        if !self.sim.translate_particles(first, end, delta) {
+        let Some(current_translation) = self.pattern_project.pieces.iter()
+            .find(|piece| piece.id == piece_id)
+            .map(|piece| piece.assembly.translation_meters)
+        else { return; };
+        let Some((target_translation, applied_delta)) =
+            bounded_placement_translation(current_translation, delta)
+        else { return; };
+        if applied_delta.length_squared() <= 1.0e-12 { return; }
+        if !self.sim.translate_particles(first, end, applied_delta) {
             return;
         }
         if let Some(range) = self.placement_ranges.iter_mut().find(|range| range.piece_id == piece_id) {
-            range.pivot += delta;
+            range.pivot += applied_delta;
         }
         if let Some(piece) = self.pattern_project.pieces.iter_mut().find(|piece| piece.id == piece_id) {
-            piece.assembly.translation_meters[0] += delta.x as f64;
-            piece.assembly.translation_meters[1] += delta.y as f64;
-            piece.assembly.translation_meters[2] += delta.z as f64;
+            piece.assembly.translation_meters = target_translation;
         }
     }
 
@@ -5470,6 +5497,17 @@ mod pattern_editor_tests {
 #[cfg(test)]
 mod placement_ui_tests {
     use super::*;
+
+    #[test]
+    fn placement_translation_clamps_to_the_serialized_transform_bounds() {
+        let (target, applied) = bounded_placement_translation(
+            [99.0, -99.0, 0.0],
+            Vec3::new(5.0, -5.0, 2.0),
+        ).unwrap();
+        assert_eq!(target, [100.0, -100.0, 2.0]);
+        assert_eq!(applied, Vec3::new(1.0, -1.0, 2.0));
+        assert!(bounded_placement_translation([0.0; 3], Vec3::splat(f32::NAN)).is_none());
+    }
 
     #[test]
     fn screen_projection_maps_camera_target_to_viewport_center() {
