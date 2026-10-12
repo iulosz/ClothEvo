@@ -561,8 +561,67 @@ mod tests {
     use crate::builder::ClothBuilder;
     use crate::coloring::greedy_coloring;
     use crate::mesh::{GridPanel, PanelMesh, Placement};
+    use crate::params::{PanelMaterial, SimParams};
     use crate::scenes::{build_scene, SceneKind};
     use glam::Vec2;
+
+    #[test]
+    fn per_panel_material_changes_mass_stretch_bend_and_collision_thickness() {
+        let mesh = PanelMesh {
+            uv: vec![
+                Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.0),
+                Vec2::new(1.0, 1.0), Vec2::new(0.0, 1.0),
+            ],
+            triangles: vec![[0, 1, 2], [0, 2, 3]],
+        };
+        let material_a = PanelMaterial::default();
+        let material_b = PanelMaterial {
+            density_kg_m2: 0.8,
+            stretch_warp_n_m: 1_000.0,
+            stretch_weft_n_m: 1_000.0,
+            shear_n_m: 100.0,
+            bend_nm: 2.0e-4,
+            thickness_meters: 0.002,
+        };
+        let mut builder = ClothBuilder::new();
+        let a = builder.add_panel_with_grain_and_material(
+            &mesh, Placement::at(Vec3::ZERO), Vec2::Y, material_a,
+        ).unwrap();
+        let b = builder.add_panel_with_grain_and_material(
+            &mesh, Placement::at(Vec3::new(3.0, 0.0, 0.0)), Vec2::Y, material_b,
+        ).unwrap();
+        assert_eq!(a.count, 4);
+        assert_eq!(b.first, 4);
+
+        let sim = builder.build(SimParams::default());
+        assert!((sim.mass_scale[0] - 1.0).abs() < 1.0e-6);
+        assert!((sim.mass_scale[4] - 4.0).abs() < 1.0e-6);
+        assert!((sim.inv_mass[0] / sim.inv_mass[4] - 4.0).abs() < 1.0e-4);
+        assert!((sim.thickness_scale[0] - 1.0).abs() < 1.0e-6);
+        assert!((sim.thickness_scale[4] - 0.4).abs() < 1.0e-5);
+
+        let edge_a = sim.distance.iter()
+            .find(|constraint| {
+                constraint.kind == ConstraintKind::Weft
+                    && ((constraint.a == 0 && constraint.b == 1)
+                        || (constraint.a == 1 && constraint.b == 0))
+            }).unwrap();
+        let edge_b = sim.distance.iter()
+            .find(|constraint| {
+                constraint.kind == ConstraintKind::Weft
+                    && ((constraint.a == 4 && constraint.b == 5)
+                        || (constraint.a == 5 && constraint.b == 4))
+            }).unwrap();
+        assert!((edge_b.scale / edge_a.scale - 5.0).abs() < 1.0e-4);
+
+        let bend_a = sim.bending.iter().find(|constraint| {
+            constraint.p.contains(&0) && constraint.p.contains(&2)
+        }).unwrap();
+        let bend_b = sim.bending.iter().find(|constraint| {
+            constraint.p.contains(&4) && constraint.p.contains(&6)
+        }).unwrap();
+        assert!((bend_b.scale / bend_a.scale - 0.25).abs() < 1.0e-4);
+    }
 
     #[test]
     fn bend_gradients_match_finite_differences() {
