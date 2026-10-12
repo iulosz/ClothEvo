@@ -237,3 +237,12 @@ As transformações são gravadas no projeto e no estado de repouso do solver. A
 ### Topologia da malha de tecido
 
 A triangulação CDT preserva os vértices de contorno usados pelas costuras, e os pontos internos agora usam linhas alternadas com deslocamento de meia célula (amostragem triangular). Isso reduz o padrão ortogonal da grade anterior e tende a distribuir melhor os comprimentos das arestas internas. O espaçamento por molde continua configurável em **Distância entre partículas**; valores menores geram malha mais densa e elevam o custo da simulação.
+
+
+### P1 — Integridade dos piques, dobras e pregas
+
+A inserção de um vértice subdivide parametricamente os piques do segmento: os piques anteriores ao corte mantêm o segmento esquerdo, os posteriores migram para o segmento direito, e os índices seguintes são deslocados. A exclusão de uma âncora remapeia os piques para a nova aresta combinada por fração do comprimento de arco dos segmentos antigos; a exclusão da primeira âncora também trata explicitamente o fechamento do contorno. As operações de inserção e exclusão são validadas antes de confirmar a alteração no projeto.
+
+Linhas de dobra do tipo **Vale** e **Montanha** agora mapeiam para arestas internas existentes da malha. Essas arestas recebem rigidez de flexão local e um ângulo diedral-alvo em repouso; linhas do tipo **Decorativa** permanecem apenas visuais. O ângulo inicial de uma dobra física é de 30° e a rigidez inicial é 35% da rigidez de flexão base. Arquivos antigos sem o campo de ângulo usam esse valor padrão.
+
+Uma **prega** gera dois vincos paralelos aproximados em lados opostos do eixo, separados pela profundidade definida e com ângulos-alvo opostos. O mapeamento usa caminhos no grafo de adjacência da malha existente: não insere vértices nem modifica a triangulação CDT. O painel de montagem informa quantas arestas de dobra/prega foram mapeadas; se nenhuma aresta interna puder ser encontrada, é preciso aumentar a resolução do molde ou revisar o traçado.
