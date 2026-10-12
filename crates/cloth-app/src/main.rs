@@ -382,8 +382,18 @@ impl ClothEvoApp {
                 self.workspace = WorkspaceMode::Pattern;
             }
             if ui.selectable_label(self.workspace == WorkspaceMode::Placement, "Posicionamento 3D").clicked() {
-                self.workspace = WorkspaceMode::Placement;
                 self.playing = false;
+                if self.using_pattern_sim && !self.placement_ranges.is_empty() {
+                    self.workspace = WorkspaceMode::Placement;
+                } else if !self.pattern_project.pieces.is_empty() {
+                    if let Err(error) = self.start_pattern_simulation() {
+                        self.pattern_message = error;
+                        self.workspace = WorkspaceMode::Pattern;
+                    }
+                } else {
+                    self.workspace = WorkspaceMode::Pattern;
+                    self.pattern_message = "Crie pelo menos um molde antes de entrar no posicionamento 3D.".into();
+                }
             }
             if ui.selectable_label(self.workspace == WorkspaceMode::Split, "3D + 2D").clicked() {
                 self.workspace = WorkspaceMode::Split;
@@ -2499,7 +2509,8 @@ impl ClothEvoApp {
         // Guia anatômico esquemático em T-pose, desenhado em coordenadas reais (metros).
         // A baixa opacidade deixa os moldes legíveis e permite traçar peças sobre a silhueta.
         if self.show_avatar_guide {
-            let guide = |x: f64, y: f64| to_screen(PatternPoint2::new(x, y));
+            // Centraliza a silhueta no canvas, mantendo a escala do modelo em metros.
+            let guide = |x: f64, y: f64| to_screen(PatternPoint2::new(x, y - 0.80));
             let fill = egui::Color32::from_rgba_unmultiplied(72, 143, 184, 30);
             let outline = egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(115, 184, 218, 115));
             let polygon = |points: &[(f64, f64)]| {
