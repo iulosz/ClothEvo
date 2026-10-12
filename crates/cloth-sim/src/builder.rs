@@ -198,14 +198,38 @@ impl ClothBuilder {
         let ta = edge_arc_params(edge_a, &self.uv);
         let tb = edge_arc_params(edge_b, &self.uv);
         for &(marker_a, marker_b) in notch_markers {
+            if !marker_a.is_finite() || !marker_b.is_finite() { continue; }
             let Some(&a) = edge_a.get(nearest_arc_index(marker_a, &ta)) else { continue; };
             let Some(&b) = edge_b.get(nearest_arc_index(marker_b, &tb)) else { continue; };
-            if a != b {
-                pairs.push((a, b));
-            }
+            // O pique é uma âncora explícita, inclusive nas extremidades da cadeia.
+            pairs.push((a, b));
         }
         pairs.sort_unstable();
         pairs.dedup();
+        self.seams.push(SeamSpec {
+            pairs,
+            edge_a,
+            edge_b,
+            edge_a_paths: vec![edge_a.to_vec()],
+            edge_b_paths: vec![edge_b.to_vec()],
+            ease_meters,
+        });
+    }
+
+    /// Costura cadeias ordenadas M:N por comprimento de arco acumulado.
+    pub fn sew_with_path_chains(
+        &mut self,
+        paths_a: &[Vec<u32>],
+        paths_b: &[Vec<u32>],
+        ease_meters: f32,
+        notch_markers: &[(f32, f32)],
+    ) {
+        if !ease_meters.is_finite() { return; }
+        let (edge_a, ta) = flatten_path_chain(paths_a, &self.uv);
+        let (edge_b, tb) = flatten_path_chain(paths_b, &self.uv);
+        if edge_a.len() < 2 || edge_b.len() < 2 { return; }
+        let pairs = pair_by_arc_between_anchors(&edge_a, &ta, &edge_b, &tb, notch_markers);
+        if pairs.is_empty() { return; }
         self.seams.push(SeamSpec {
             pairs,
             edge_a,
