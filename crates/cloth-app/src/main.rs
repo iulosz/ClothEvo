@@ -703,6 +703,9 @@ impl ClothEvoApp {
             if ui.button("Criar par espelhado").clicked() {
                 self.create_mirrored_pair();
             }
+            if ui.button("Desvincular par").clicked() {
+                self.unlink_selected_symmetry();
+            }
         });
         ui.weak("A edição de vértices e alças é refletida no molde vinculado.");
         ui.horizontal(|ui| {
@@ -1080,6 +1083,9 @@ impl ClothEvoApp {
         let id = self.pattern_project.pieces[self.selected_piece].id;
         self.pattern_project.pieces.remove(self.selected_piece);
         self.pattern_project.seams.retain(|seam| seam.a.piece_id != id && seam.b.piece_id != id);
+        self.pattern_project.symmetry_links.retain(|link| {
+            link.piece_a_id != id && link.piece_b_id != id
+        });
         self.selected_piece = self.selected_piece.min(self.pattern_project.pieces.len().saturating_sub(1));
         self.selected_target = None;
         self.dragging_target = None;
@@ -1374,6 +1380,12 @@ impl ClothEvoApp {
         }
         let source_index = self.selected_piece.min(self.pattern_project.pieces.len() - 1);
         let source = self.pattern_project.pieces[source_index].clone();
+        if self.pattern_project.symmetry_links.iter().any(|link| {
+            link.piece_a_id == source.id || link.piece_b_id == source.id
+        }) {
+            self.pattern_message = "Desvincule o par de simetria antes de executar Cut & Sew. O corte simultâneo dos dois moldes será habilitado após o remapeamento topológico pareado.".into();
+            return;
+        }
         let cut_path = match Curve2D::polyline(&self.draft_points, false) {
             Ok(curve) => curve,
             Err(error) => { self.pattern_message = error; return; }
@@ -1594,6 +1606,17 @@ impl ClothEvoApp {
         painter.line_segment(
             [egui::pos2(origin.x, rect.top()), egui::pos2(origin.x, rect.bottom())],
             egui::Stroke::new(1.0, egui::Color32::from_gray(88)),
+        );
+        let symmetry_screen_x = origin.x + self.pattern_symmetry_axis_x as f32 * scale;
+        painter.line_segment(
+            [egui::pos2(symmetry_screen_x, rect.top()), egui::pos2(symmetry_screen_x, rect.bottom())],
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(154, 111, 72)),
+        );
+        painter.text(
+            egui::pos2(symmetry_screen_x + 4.0, rect.top() + 34.0),
+            egui::Align2::LEFT_TOP, "EIXO SIMETRIA",
+            egui::FontId::proportional(10.0),
+            egui::Color32::from_rgb(198, 153, 108),
         );
 
         let tool_label = if self.pattern_tool == PatternTool::Draw {
