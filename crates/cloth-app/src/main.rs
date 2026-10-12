@@ -17,7 +17,10 @@ use glam::{Quat, Vec2, Vec3};
 use pattern_core::{
     BoundaryCurve, Curve2D, CurveSegment, EdgeRef, PatternPiece, PatternProject, Point2 as PatternPoint2, SeamDefinition,
 };
-use pattern_geom::{offset_polygon, point_in_polygon, sample_curve, sample_curve_with_ranges, validate_simple_polygon};
+use pattern_geom::{
+    offset_polygon, point_in_polygon, rectangle, regular_polygon, sample_curve,
+    sample_curve_with_ranges, validate_simple_polygon,
+};
 use pattern_mesh::triangulate_outline;
 
 const FIXED_DT: f32 = 1.0 / 60.0;
@@ -119,6 +122,7 @@ struct ClothEvoApp {
     pattern_project: PatternProject,
     draft_points: Vec<PatternPoint2>,
     pattern_spacing: f64,
+    pattern_polygon_sides: usize,
     pattern_show_mesh: bool,
     selected_piece: usize,
     seam_a_piece: usize,
@@ -208,6 +212,7 @@ impl ClothEvoApp {
             pattern_project: PatternProject::new("Novo projeto"),
             draft_points: Vec::new(),
             pattern_spacing: 0.08,
+            pattern_polygon_sides: 6,
             pattern_show_mesh: true,
             selected_piece: 0,
             seam_a_piece: 0,
@@ -672,6 +677,17 @@ impl ClothEvoApp {
                 self.pattern_pan = egui::Vec2::ZERO;
             }
         });
+        ui.separator();
+        ui.strong("Geometria vetorial");
+        ui.horizontal(|ui| {
+            if ui.button("Adicionar retângulo").clicked() {
+                self.create_rectangle_primitive();
+            }
+            if ui.button("Adicionar polígono regular").clicked() {
+                self.create_regular_polygon_primitive();
+            }
+        });
+        ui.add(egui::Slider::new(&mut self.pattern_polygon_sides, 3..=12).text("lados do polígono"));
         if ui.button("Fechar peça a partir dos pontos").clicked() {
             self.create_piece_from_draft();
         }
@@ -991,6 +1007,73 @@ impl ClothEvoApp {
         self.dragging_target = None;
         self.pattern_message = "Peça excluída; costuras dependentes também foram removidas.".into();
         self.remember_pattern_change(before);
+    }
+
+    fn primitive_origin(&self) -> (f64, f64) {
+        if self.pattern_project.pieces.is_empty() {
+            return (0.0, 0.0);
+        }
+        let mut max_x = f64::NEG_INFINITY;
+        let mut min_y = f64::INFINITY;
+        for piece in &self.pattern_project.pieces {
+            for point in sample_curve(&piece.outline, 24) {
+                max_x = max_x.max(point.x);
+                min_y = min_y.min(point.y);
+            }
+        }
+        if !max_x.is_finite() || !min_y.is_finite() { (0.0, 0.0) }
+        else { (max_x + 0.10, min_y) }
+    }
+
+    fn create_primitive_piece(&mut self, outline: Curve2D, label: &str) {
+        let points = sample_curve(&outline, 1);
+        if points.len() < 3 {
+            self.pattern_message = "A primitiva gerada não formou um contorno fechado válido.".into();
+            return;
+        }
+        let before = self.editor_snapshot();
+        let next_id = self.pattern_project.pieces.iter()
+            .map(|piece| piece.id).max().unwrap_or(0) + 1;
+        let name = format!("{label} {next_id}");
+        match PatternPiece::from_polygon(next_id, name, &points) {
+            Ok(mut piece) => {
+                // Mantém a curva original em vez de converter os segmentos para uma polilinha.
+                piece.outline = outline;
+                self.pattern_project.pieces.push(piece);
+                self.selected_piece = self.pattern_project.pieces.len() - 1;
+                self.selected_target = None;
+                self.pattern_tool = PatternTool::Select;
+                self.pattern_fit_pending = true;
+                self.pattern_message = format!("{label} criado como molde vetorial editável.");
+                self.remember_pattern_change(before);
+            }
+            Err(error) => self.pattern_message = error,
+        }
+    }
+
+    fn create_rectangle_primitive(&mut self) {
+        let (x, y) = self.primitive_origin();
+        match rectangle(
+            PatternPoint2::new(x, y),
+            PatternPoint2::new(x + 0.40, y + 0.60),
+        ) {
+            Ok(outline) => self.create_primitive_piece(outline, "Retângulo"),
+            Err(error) => self.pattern_message = error.to_string(),
+        }
+    }
+
+    fn create_regular_polygon_primitive(&mut self) {
+        let (x, y) = self.primitive_origin();
+        let sides = self.pattern_polygon_sides.clamp(3, 100);
+        match regular_polygon(
+            PatternPoint2::new(x + 0.20, y + 0.30),
+            0.20,
+            sides,
+            -std::f64::consts::FRAC_PI_2,
+        ) {
+            Ok(outline) => self.create_primitive_piece(outline, "Polígono"),
+            Err(error) => self.pattern_message = error.to_string(),
+        }
     }
 
     fn create_piece_from_draft(&mut self) {
