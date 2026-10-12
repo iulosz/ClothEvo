@@ -3617,17 +3617,22 @@ impl eframe::App for ClothEvoApp {
             if undo { self.undo_pattern_edit(); }
             if redo { self.redo_pattern_edit(); }
         }
-        // Em captura, simula em passos fixos independentemente do tempo real.
+        // Avança depois de processar os controles deste frame. Assim, "Passo único" pausa
+        // antes do solver rodar e nunca recebe um passo automático adicional no mesmo frame.
         let dt = if self.capture.is_some() { FIXED_DT } else { ui.input(|i| i.stable_dt) };
+        let was_simulation_workspace = self.workspace == WorkspaceMode::Simulation;
         let steps_before = self.sim.stats.steps;
-        if self.workspace == WorkspaceMode::Simulation { self.advance(dt); }
-        if self.sim.stats.steps != steps_before {
-            self.last_step_ms = self.sim.stats.step_ms;
-        }
 
         egui::Panel::left("controls").default_size(310.0).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui));
         });
+        if was_simulation_workspace {
+            self.advance(dt);
+        }
+        if self.sim.stats.steps != steps_before {
+            self.last_step_ms = self.sim.stats.step_ms;
+        }
+
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             if self.workspace == WorkspaceMode::Pattern {
                 self.pattern_viewport(ui);
