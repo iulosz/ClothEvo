@@ -973,11 +973,11 @@ impl ClothEvoApp {
         if ui.button("Montar e simular na viewport 3D").clicked() {
             match self.start_pattern_simulation() {
                 Ok(()) => {
-                    self.pattern_message = if self.pattern_project.seams.iter().any(|seam| seam.ease_meters.abs() > 1.0e-6) {
-                        "Moldes simulando em 3D. A folga foi preservada no projeto, mas ainda não é aplicada fisicamente.".into()
-                    } else {
-                        "Moldes enviados à simulação 3D.".into()
-                    };
+                    if self.pattern_project.seams.iter().any(|seam| seam.ease_meters.abs() > 1.0e-6) {
+                        self.pattern_message.push_str(
+                            " A folga foi preservada no projeto, mas ainda não é aplicada como ease diferencial pelo solver."
+                        );
+                    }
                 },
                 Err(e) => self.pattern_message = e,
             }
@@ -2425,8 +2425,12 @@ fn mirror_pattern_piece(
         annotation.position.x = 2.0 * axis_x - annotation.position.x;
         annotation.rotation_degrees = 180.0 - annotation.rotation_degrees;
     }
-    // Segment indexing is stable through reflection, so notches and seam intervals retain
-    // their local indices. Fabric and grading-related physical values are copied unchanged.
+    // Conjugate the 3D transform by reflection across X: translation X and Euler Y/Z change
+    // sign while X rotation remains unchanged. Topology indices stay stable through reflection.
+    piece.assembly.translation_meters[0] = -source.assembly.translation_meters[0];
+    piece.assembly.rotation_degrees[0] = source.assembly.rotation_degrees[0];
+    piece.assembly.rotation_degrees[1] = -source.assembly.rotation_degrees[1];
+    piece.assembly.rotation_degrees[2] = -source.assembly.rotation_degrees[2];
     Ok(piece)
 }
 
