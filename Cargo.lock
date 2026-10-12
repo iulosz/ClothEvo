@@ -306,6 +306,7 @@ dependencies = [
  "cloth-sim",
  "eframe",
  "glam",
+ "image",
  "pattern-core",
  "pattern-geom",
  "pattern-mesh",
