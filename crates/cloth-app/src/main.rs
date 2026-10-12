@@ -68,6 +68,8 @@ struct Capture {
 enum WorkspaceMode {
     Simulation,
     Pattern,
+    /// Posiciona os painéis em 3D antes de liberar a simulação.
+    Placement,
     /// Viewport 3D e editor de moldes 2D visíveis ao mesmo tempo.
     Split,
 }
@@ -77,6 +79,14 @@ impl WorkspaceMode {
     fn runs_simulation(self) -> bool {
         matches!(self, Self::Simulation | Self::Split)
     }
+}
+
+#[derive(Clone, Debug)]
+struct PanelPlacementRange {
+    piece_id: u64,
+    first: usize,
+    end: usize,
+    boundary_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,6 +171,11 @@ struct ClothEvoApp {
     selected_notch_index: usize,
     pattern_message: String,
     using_pattern_sim: bool,
+    placement_ranges: Vec<PanelPlacementRange>,
+    selected_placement_piece: Option<u64>,
+    placement_drag_piece: Option<u64>,
+    placement_drag_before: Option<PatternEditorSnapshot>,
+    show_avatar_guide: bool,
     pattern_tool: PatternTool,
     pattern_zoom: f32,
     pattern_pan: egui::Vec2,
@@ -271,6 +286,11 @@ impl ClothEvoApp {
             selected_notch_index: 0,
             pattern_message: String::new(),
             using_pattern_sim: false,
+            placement_ranges: Vec::new(),
+            selected_placement_piece: None,
+            placement_drag_piece: None,
+            placement_drag_before: None,
+            show_avatar_guide: true,
             pattern_tool: PatternTool::Draw,
             pattern_zoom: PATTERN_PIXELS_PER_METER,
             pattern_pan: egui::Vec2::ZERO,
@@ -361,6 +381,10 @@ impl ClothEvoApp {
             if ui.selectable_label(self.workspace == WorkspaceMode::Pattern, "Moldes 2D").clicked() {
                 self.workspace = WorkspaceMode::Pattern;
             }
+            if ui.selectable_label(self.workspace == WorkspaceMode::Placement, "Posicionamento 3D").clicked() {
+                self.workspace = WorkspaceMode::Placement;
+                self.playing = false;
+            }
             if ui.selectable_label(self.workspace == WorkspaceMode::Split, "3D + 2D").clicked() {
                 self.workspace = WorkspaceMode::Split;
                 // O editor 2D agora ocupa só metade da área; reenquadra os moldes.
@@ -370,6 +394,10 @@ impl ClothEvoApp {
         ui.separator();
         if self.workspace == WorkspaceMode::Pattern {
             self.pattern_controls(ui);
+            return;
+        }
+        if self.workspace == WorkspaceMode::Placement {
+            self.placement_controls(ui);
             return;
         }
         if self.workspace == WorkspaceMode::Split {
@@ -544,6 +572,221 @@ impl ClothEvoApp {
         if let Some((k, r)) = new_scene {
             self.load_scene(k, r);
         }
+    }
+
+
+    fn placement_controls(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Posicionamento 3D");
+        ui.label("Organize os moldes ao redor do manequim antes de iniciar a simulação.");
+        ui.weak("Arraste um painel com o botão esquerdo. Arraste fora dos painéis para orbitar; botão direito/meio move a câmera; roda aproxima.");
+        ui.horizontal(|ui| {
+            if ui.button("Voltar aos moldes 2D").clicked() {
+                self.workspace = WorkspaceMode::Pattern;
+                self.playing = false;
+            }
+            if ui.button("Atualizar prévia").clicked() {
+                if let Err(error) = self.start_pattern_simulation() {
+                    self.pattern_message = error;
+                }
+            }
+        });
+        if ui.button("Iniciar simulação de tecido").clicked() && self.using_pattern_sim {
+            self.sim.reset();
+            self.playing = true;
+            self.workspace = WorkspaceMode::Simulation;
+        }
+
+        if self.pattern_project.pieces.is_empty() {
+            ui.separator();
+            ui.label("Crie pelo menos um molde no Pattern Studio antes de posicionar a roupa.");
+            return;
+        }
+
+        let options: Vec<(u64, String)> = self.pattern_project.pieces.iter()
+            .map(|piece| (piece.id, piece.name.clone())).collect();
+        if self.selected_placement_piece.is_none()
+            || !options.iter().any(|(id, _)| Some(*id) == self.selected_placement_piece)
+        {
+            self.selected_placement_piece = options.first().map(|(id, _)| *id);
+        }
+        egui::ComboBox::from_id_salt("placement_piece")
+            .selected_text(self.selected_placement_piece
+                .and_then(|id| options.iter().find(|(piece_id, _)| *piece_id == id))
+                .map(|(_, name)| name.clone())
+                .unwrap_or_else(|| "Selecionar molde".to_string()))
+            .width(250.0)
+            .show_ui(ui, |ui| {
+                for (id, name) in &options {
+                    ui.selectable_value(&mut self.selected_placement_piece, Some(*id), name);
+                }
+            });
+
+        let selected_transform = self.selected_placement_piece
+            .and_then(|id| self.pattern_project.pieces.iter().find(|piece| piece.id == id))
+            .map(|piece| (piece.name.clone(), piece.assembly.translation_meters, piece.assembly.rotation_degrees));
+        if let Some((name, translation, rotation)) = selected_transform {
+            ui.separator();
+            ui.strong(format!("Transformação: {name}"));
+            ui.label(format!(
+                "Posição adicional: X {:+.1} cm · Y {:+.1} cm · Z {:+.1} cm",
+                translation[0] * 100.0, translation[1] * 100.0, translation[2] * 100.0
+            ));
+            ui.label(format!(
+                "Rotação: X {:+.0}° · Y {:+.0}° · Z {:+.0}°",
+                rotation[0], rotation[1], rotation[2]
+            ));
+            ui.separator();
+            ui.strong("Mover 5 cm");
+            let mut movement: Option<Vec3> = None;
+            ui.horizontal(|ui| {
+                ui.label("X · esquerda/direita");
+                if ui.button("−").clicked() { movement = Some(-Vec3::X * 0.05); }
+                if ui.button("+").clicked() { movement = Some(Vec3::X * 0.05); }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Y · baixo/alto");
+                if ui.button("− ").clicked() { movement = Some(-Vec3::Y * 0.05); }
+                if ui.button("+ ").clicked() { movement = Some(Vec3::Y * 0.05); }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Z · frente/trás");
+                if ui.button("−  ").clicked() { movement = Some(-Vec3::Z * 0.05); }
+                if ui.button("+  ").clicked() { movement = Some(Vec3::Z * 0.05); }
+            });
+            if let Some(delta) = movement {
+                let before = self.editor_snapshot();
+                if let Some(id) = self.selected_placement_piece {
+                    self.apply_placement_translation(id, delta);
+                }
+                self.remember_pattern_change(before);
+            }
+
+            ui.separator();
+            ui.strong("Girar 15°");
+            let mut turn: Option<(usize, f64)> = None;
+            ui.horizontal(|ui| {
+                ui.label("X");
+                if ui.button("−15° X").clicked() { turn = Some((0, -15.0)); }
+                if ui.button("+15° X").clicked() { turn = Some((0, 15.0)); }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Y");
+                if ui.button("−15° Y").clicked() { turn = Some((1, -15.0)); }
+                if ui.button("+15° Y").clicked() { turn = Some((1, 15.0)); }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Z");
+                if ui.button("−15° Z").clicked() { turn = Some((2, -15.0)); }
+                if ui.button("+15° Z").clicked() { turn = Some((2, 15.0)); }
+            });
+            if let Some((axis, degrees)) = turn {
+                self.rotate_selected_placement(axis, degrees);
+            }
+            if ui.button("Restaurar transformação deste molde").clicked() {
+                self.reset_selected_placement_transform();
+            }
+        }
+
+        ui.separator();
+        ui.checkbox(&mut self.style.wireframe, "Mostrar triangulação 3D");
+        ui.checkbox(&mut self.style.seams, "Mostrar costuras");
+        ui.label(format!(
+            "Moldes: {} · costuras: {} · partículas: {}",
+            self.pattern_project.pieces.len(),
+            self.pattern_project.seams.len(),
+            self.sim.particle_count()
+        ));
+        if !self.pattern_message.is_empty() {
+            ui.separator();
+            ui.label(&self.pattern_message);
+        }
+    }
+
+    /// Aplica a translação ao projeto e à pose atual/repouso do solver, para que Reiniciar
+    /// preserve o posicionamento feito antes da simulação.
+    fn apply_placement_translation(&mut self, piece_id: u64, delta: Vec3) {
+        let Some((first, end)) = self.placement_ranges.iter()
+            .find(|range| range.piece_id == piece_id)
+            .map(|range| (range.first, range.end))
+        else { return; };
+        if !self.sim.translate_particles(first, end, delta) {
+            return;
+        }
+        if let Some(piece) = self.pattern_project.pieces.iter_mut().find(|piece| piece.id == piece_id) {
+            piece.assembly.translation_meters[0] += delta.x as f64;
+            piece.assembly.translation_meters[1] += delta.y as f64;
+            piece.assembly.translation_meters[2] += delta.z as f64;
+        }
+    }
+
+    fn translate_placement_by_screen_delta(&mut self, piece_id: u64, dx: f32, dy: f32, viewport_height: f32) {
+        let view = self.camera.view();
+        let right = view.row(0).truncate();
+        let up = view.row(1).truncate();
+        let world_per_pixel = 2.0 * self.camera.distance
+            * (self.camera.fov_y * 0.5).tan() / viewport_height.max(1.0);
+        // Inverte o deslocamento que a câmera usaria ao fazer pan: o painel acompanha o cursor.
+        let delta = (right * dx - up * dy) * world_per_pixel;
+        self.apply_placement_translation(piece_id, delta);
+    }
+
+    fn rotate_selected_placement(&mut self, axis: usize, degrees: f64) {
+        let Some(id) = self.selected_placement_piece else { return; };
+        let before = self.editor_snapshot();
+        let Some(piece) = self.pattern_project.pieces.iter_mut().find(|piece| piece.id == id) else { return; };
+        if axis >= 3 { return; }
+        piece.assembly.rotation_degrees[axis] =
+            (piece.assembly.rotation_degrees[axis] + degrees).rem_euclid(360.0);
+        let selected = self.selected_placement_piece;
+        if let Err(error) = self.start_pattern_simulation() {
+            self.pattern_message = error;
+            return;
+        }
+        self.selected_placement_piece = selected;
+        self.remember_pattern_change(before);
+    }
+
+    fn reset_selected_placement_transform(&mut self) {
+        let Some(id) = self.selected_placement_piece else { return; };
+        let before = self.editor_snapshot();
+        if let Some(piece) = self.pattern_project.pieces.iter_mut().find(|piece| piece.id == id) {
+            piece.assembly.translation_meters = [0.0; 3];
+            piece.assembly.rotation_degrees = [0.0; 3];
+        }
+        let selected = self.selected_placement_piece;
+        if let Err(error) = self.start_pattern_simulation() {
+            self.pattern_message = error;
+            return;
+        }
+        self.selected_placement_piece = selected;
+        self.remember_pattern_change(before);
+    }
+
+    fn hit_test_placement_piece(&self, pointer: egui::Pos2, rect: egui::Rect) -> Option<u64> {
+        let aspect = rect.width() / rect.height().max(1.0);
+        let view_proj = self.camera.view_proj(aspect);
+        let mut best: Option<(f32, u64)> = None;
+        for range in &self.placement_ranges {
+            for triangle in &self.sim.triangles {
+                if triangle.iter().any(|index| {
+                    let index = *index as usize;
+                    index < range.first || index >= range.end
+                }) {
+                    continue;
+                }
+                let projected = triangle.map(|index| project_world_to_screen(
+                    self.sim.pos[index as usize], view_proj, rect,
+                ));
+                let [Some((a, za)), Some((b, zb)), Some((c, zc))] = projected else { continue; };
+                if point_in_triangle(pointer, a, b, c) {
+                    let depth = (za + zb + zc) / 3.0;
+                    if best.map_or(true, |(current, _)| depth < current) {
+                        best = Some((depth, range.piece_id));
+                    }
+                }
+            }
+        }
+        best.map(|(_, id)| id)
     }
 
     fn editor_snapshot(&self) -> PatternEditorSnapshot {
@@ -781,6 +1024,8 @@ impl ClothEvoApp {
             }
         });
         ui.checkbox(&mut self.pattern_snap, "Ajustar à grade (1 cm)");
+        ui.checkbox(&mut self.show_avatar_guide, "Guia anatômico T-Pose");
+        ui.weak("A silhueta é uma referência proporcional de 1,72 m; os moldes continuam sendo editados em metros.");
         ui.horizontal(|ui| {
             if ui.button("Enquadrar todos os moldes").clicked() {
                 self.pattern_fit_pending = true;
@@ -1295,12 +1540,13 @@ impl ClothEvoApp {
         }
 
         ui.separator();
-        if ui.button("Montar e simular na viewport 3D").clicked() {
+        if ui.button("Posicionar moldes na cena 3D").clicked() {
             match self.start_pattern_simulation() {
                 Ok(()) => {},
                 Err(e) => self.pattern_message = e,
             }
         }
+        ui.weak("A prévia permite selecionar e arrastar cada painel ao redor do manequim antes de iniciar a física.");
         if !self.pattern_message.is_empty() {
             ui.separator();
             ui.label(&self.pattern_message);
@@ -2249,6 +2495,55 @@ impl ClothEvoApp {
             [egui::pos2(origin.x, rect.top()), egui::pos2(origin.x, rect.bottom())],
             egui::Stroke::new(1.0, egui::Color32::from_gray(88)),
         );
+
+        // Guia anatômico esquemático em T-pose, desenhado em coordenadas reais (metros).
+        // A baixa opacidade deixa os moldes legíveis e permite traçar peças sobre a silhueta.
+        if self.show_avatar_guide {
+            let guide = |x: f64, y: f64| to_screen(PatternPoint2::new(x, y));
+            let fill = egui::Color32::from_rgba_unmultiplied(72, 143, 184, 30);
+            let outline = egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(115, 184, 218, 115));
+            let polygon = |points: &[(f64, f64)]| {
+                painter.add(egui::Shape::convex_polygon(
+                    points.iter().map(|&(x, y)| guide(x, y)).collect(),
+                    fill,
+                    outline,
+                ));
+            };
+            polygon(&[
+                (-0.19, 1.43), (-0.115, 1.31), (-0.12, 1.00), (-0.16, 0.76),
+                (-0.17, 0.66), (-0.12, 0.59), (0.12, 0.59), (0.17, 0.66),
+                (0.16, 0.76), (0.12, 1.00), (0.115, 1.31), (0.19, 1.43),
+            ]);
+            polygon(&[
+                (-0.18, 1.42), (-0.25, 1.39), (-0.48, 1.385), (-0.72, 1.37),
+                (-0.78, 1.345), (-0.77, 1.30), (-0.70, 1.29), (-0.47, 1.315),
+                (-0.25, 1.32), (-0.17, 1.34),
+            ]);
+            polygon(&[
+                (0.18, 1.42), (0.25, 1.39), (0.48, 1.385), (0.72, 1.37),
+                (0.78, 1.345), (0.77, 1.30), (0.70, 1.29), (0.47, 1.315),
+                (0.25, 1.32), (0.17, 1.34),
+            ]);
+            polygon(&[
+                (-0.12, 0.65), (-0.015, 0.62), (-0.035, 0.35), (-0.075, 0.08),
+                (-0.14, 0.08), (-0.13, 0.32),
+            ]);
+            polygon(&[
+                (0.12, 0.65), (0.015, 0.62), (0.035, 0.35), (0.075, 0.08),
+                (0.14, 0.08), (0.13, 0.32),
+            ]);
+            painter.circle_filled(guide(0.0, 1.60), (0.085 * scale).clamp(5.0, 34.0), fill);
+            painter.circle_stroke(guide(0.0, 1.60), (0.085 * scale).clamp(5.0, 34.0), outline);
+            painter.line_segment([guide(-0.20, 1.41), guide(0.20, 1.41)], outline);
+            painter.text(
+                guide(0.0, 1.79),
+                egui::Align2::CENTER_CENTER,
+                "REFERÊNCIA T-POSE · 1,72 m",
+                egui::FontId::proportional(10.0),
+                egui::Color32::from_rgba_unmultiplied(155, 199, 222, 170),
+            );
+        }
+
         let symmetry_screen_x = origin.x + self.pattern_symmetry_axis_x as f32 * scale;
         painter.line_segment(
             [egui::pos2(symmetry_screen_x, rect.top()), egui::pos2(symmetry_screen_x, rect.bottom())],
@@ -2616,6 +2911,7 @@ impl ClothEvoApp {
     }
 
     fn start_pattern_simulation(&mut self) -> Result<(), String> {
+        let previous_selection = self.selected_placement_piece;
         self.pattern_project.validate()?;
         if self.pattern_project.pieces.is_empty() {
             return Err("O projeto não contém peças.".into());
@@ -2787,23 +3083,31 @@ impl ClothEvoApp {
         // A simulação mantém o espaçamento real de cada molde; o ruído inicial é menor que
         // a folga aplicada contra o corpo para evitar penetração artificial no primeiro frame.
         builder.perturb(PATTERN_SIM_PERTURBATION);
+        self.placement_ranges = infos.iter().map(|info| PanelPlacementRange {
+            piece_id: info.id,
+            first: info.handle.first as usize,
+            end: (info.handle.first + info.handle.count) as usize,
+            boundary_count: info.boundary_count,
+        }).collect();
         self.sim = builder.build(self.sim.params.clone());
         self.seam_pairs = self.sim.seam_pairs();
         self.diverged = false;
         self.accumulator = 0.0;
-        self.playing = true;
+        self.playing = false;
         self.using_pattern_sim = true;
-        // No modo dividido o editor 2D continua visível ao lado da simulação.
-        if self.workspace == WorkspaceMode::Pattern {
-            self.workspace = WorkspaceMode::Simulation;
-        }
+        self.workspace = WorkspaceMode::Placement;
+        self.placement_drag_piece = None;
+        self.placement_drag_before = None;
+        self.selected_placement_piece = previous_selection
+            .filter(|id| self.placement_ranges.iter().any(|range| range.piece_id == *id))
+            .or_else(|| self.placement_ranges.first().map(|range| range.piece_id));
         self.upload_scene();
         let pinned = self.pattern_project.pieces.iter()
             .map(|piece| piece.assembly.pinned_anchors.len())
             .sum::<usize>();
         let body_collider_count = self.sim.colliders.len().saturating_sub(1);
         self.pattern_message = format!(
-            "Montagem 3D pronta: {} moldes, {} costuras, {} âncoras fixadas e manequim com {} volumes de colisão. Avatar: {:.2} m; ombros {:.2} m, cintura {:.2} m e quadril {:.2} m.",
+            "Prévia pronta para posicionamento: {} moldes, {} costuras, {} âncoras fixadas e manequim com {} volumes de colisão. Arraste os painéis em 3D; inicie a simulação quando estiver satisfeito. Avatar: {:.2} m; ombros {:.2} m, cintura {:.2} m e quadril {:.2} m.",
             piece_count, self.pattern_project.seams.len(), pinned, body_collider_count,
             self.pattern_project.avatar.height_meters,
             self.pattern_project.avatar.shoulder_width_meters,
@@ -2850,12 +3154,44 @@ impl ClothEvoApp {
     fn viewport(&mut self, ui: &mut egui::Ui) {
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+        let placement_mode = self.workspace == WorkspaceMode::Placement && self.using_pattern_sim;
 
-        // Câmera
+        // Na prévia de posicionamento, clique/arraste uma superfície para mover somente esse molde.
+        // Arrastar fora de qualquer painel continua orbitando a câmera; botões direito/meio fazem pan.
         let drag = response.drag_delta();
-        if response.dragged_by(egui::PointerButton::Primary) {
+        if placement_mode {
+            if response.drag_started_by(egui::PointerButton::Primary) {
+                if let Some(pointer) = response.interact_pointer_pos() {
+                    self.placement_drag_piece = self.hit_test_placement_piece(pointer, rect);
+                    if let Some(id) = self.placement_drag_piece {
+                        self.selected_placement_piece = Some(id);
+                        self.placement_drag_before = Some(self.editor_snapshot());
+                    }
+                }
+            }
+            if response.dragged_by(egui::PointerButton::Primary) {
+                if let Some(id) = self.placement_drag_piece {
+                    let delta = ui.input(|i| i.pointer.delta());
+                    self.translate_placement_by_screen_delta(id, delta.x, delta.y, rect.height());
+                } else {
+                    self.camera.orbit(drag.x, drag.y);
+                }
+            }
+            if response.clicked() {
+                if let Some(pointer) = response.interact_pointer_pos() {
+                    self.selected_placement_piece = self.hit_test_placement_piece(pointer, rect);
+                }
+            }
+            if response.drag_stopped_by(egui::PointerButton::Primary) {
+                if let Some(before) = self.placement_drag_before.take() {
+                    self.remember_pattern_change(before);
+                }
+                self.placement_drag_piece = None;
+            }
+        } else if response.dragged_by(egui::PointerButton::Primary) {
             self.camera.orbit(drag.x, drag.y);
-        } else if response.dragged_by(egui::PointerButton::Secondary)
+        }
+        if response.dragged_by(egui::PointerButton::Secondary)
             || response.dragged_by(egui::PointerButton::Middle)
         {
             self.camera.pan(drag.x, drag.y, rect.height());
@@ -2878,16 +3214,39 @@ impl ClothEvoApp {
             .collect();
 
         let aspect = rect.width() / rect.height().max(1.0);
+        let view_proj = self.camera.view_proj(aspect);
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
             ViewportCallback {
-                view_proj: self.camera.view_proj(aspect),
+                view_proj,
                 eye: self.camera.eye(),
                 cloth_vertices,
                 warning_seam_pairs: self.sim.seam_warning_pairs(0.015),
                 style: self.style.clone(),
             },
         ));
+
+        // Contorno luminoso do painel selecionado, projetado sobre a viewport.
+        if placement_mode {
+            if let Some(range) = self.selected_placement_piece
+                .and_then(|id| self.placement_ranges.iter().find(|range| range.piece_id == id))
+            {
+                let boundary: Vec<usize> = (range.first..range.first + range.boundary_count).collect();
+                for i in 0..boundary.len() {
+                    let a = self.sim.pos[boundary[i]];
+                    let b = self.sim.pos[boundary[(i + 1) % boundary.len()]];
+                    if let (Some((a, _)), Some((b, _))) = (
+                        project_world_to_screen(a, view_proj, rect),
+                        project_world_to_screen(b, view_proj, rect),
+                    ) {
+                        ui.painter().line_segment(
+                            [a, b],
+                            egui::Stroke::new(2.5, egui::Color32::from_rgb(255, 205, 72)),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Modo de captura: simula N passos, pede um screenshot e salva em PPM.
@@ -3705,7 +4064,7 @@ impl eframe::App for ClothEvoApp {
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             match self.workspace {
                 WorkspaceMode::Pattern => self.pattern_viewport(ui),
-                WorkspaceMode::Simulation => self.viewport(ui),
+                WorkspaceMode::Simulation | WorkspaceMode::Placement => self.viewport(ui),
                 WorkspaceMode::Split => self.split_viewports(ui),
             }
         });
@@ -3721,6 +4080,42 @@ impl eframe::App for ClothEvoApp {
     }
 }
 
+
+
+/// Projeta um ponto 3D para a viewport egui, mantendo a convenção de profundidade [0, 1] do wgpu.
+fn project_world_to_screen(
+    point: Vec3,
+    view_proj: glam::Mat4,
+    rect: egui::Rect,
+) -> Option<(egui::Pos2, f32)> {
+    let clip = view_proj * point.extend(1.0);
+    if !clip.w.is_finite() || clip.w <= 1.0e-6 {
+        return None;
+    }
+    let ndc = clip.truncate() / clip.w;
+    if !ndc.is_finite() || !(0.0..=1.0).contains(&ndc.z) {
+        return None;
+    }
+    Some((
+        egui::pos2(
+            rect.left() + (ndc.x + 1.0) * 0.5 * rect.width(),
+            rect.top() + (1.0 - ndc.y) * 0.5 * rect.height(),
+        ),
+        ndc.z,
+    ))
+}
+
+fn point_in_triangle(point: egui::Pos2, a: egui::Pos2, b: egui::Pos2, c: egui::Pos2) -> bool {
+    let cross = |p1: egui::Pos2, p2: egui::Pos2, p3: egui::Pos2| {
+        (p2.x - p1.x) * (p3.y - p1.y) - (p2.y - p1.y) * (p3.x - p1.x)
+    };
+    let d1 = cross(point, a, b);
+    let d2 = cross(point, b, c);
+    let d3 = cross(point, c, a);
+    let has_negative = d1 < -0.5 || d2 < -0.5 || d3 < -0.5;
+    let has_positive = d1 > 0.5 || d2 > 0.5 || d3 > 0.5;
+    !(has_negative && has_positive)
+}
 
 #[cfg(test)]
 mod pattern_editor_tests {
