@@ -9,14 +9,15 @@ use cloth_render::{
     ViewStyle, ViewportCallback,
 };
 use cloth_sim::{
-    build_scene, ClothBuilder, Collider, FabricPreset, PanelMesh, Placement, SceneKind,
-    Simulation, SimParams,
+    build_scene, ClothBuilder, Collider, FabricPreset, PanelMaterial, PanelMesh, Placement,
+    SceneKind, Simulation, SimParams,
 };
 use eframe::{egui, egui_wgpu};
-use glam::{Quat, Vec2, Vec3};
+use glam::{EulerRot, Quat, Vec2, Vec3};
 use pattern_core::{
-    BoundaryCurve, Curve2D, CurveSegment, EdgeRef, FoldKind, FoldLine, GrainLine, PatternPiece,
-    PatternProject, Pleat, Point2 as PatternPoint2, SeamDefinition, SymmetryLink,
+    AssemblyTransform, BoundaryCurve, Curve2D, CurveSegment, EdgeRef, FabricProperties,
+    FoldKind, FoldLine, GrainLine, PatternPiece, PatternProject, Pleat,
+    Point2 as PatternPoint2, SeamDefinition, SymmetryLink,
 };
 use pattern_geom::{
     cut_closed_outline, mirror_curve_x, offset_polygon, point_in_polygon, rectangle,
@@ -800,6 +801,103 @@ impl ClothEvoApp {
             }
         }
 
+        if !self.pattern_project.pieces.is_empty() {
+            ui.separator();
+            ui.collapsing("Física e montagem 3D por molde", |ui| {
+                let index = self.selected_piece.min(self.pattern_project.pieces.len() - 1);
+                let piece_id = self.pattern_project.pieces[index].id;
+                let before = self.editor_snapshot();
+                let mut changed = false;
+                {
+                    let piece = &mut self.pattern_project.pieces[index];
+                    ui.label(format!("Material: {}", piece.name));
+                    changed |= ui.add(egui::Slider::new(
+                        &mut piece.fabric.density_kg_m2, 0.02..=1.20,
+                    ).text("Densidade (kg/m²)")).changed();
+                    changed |= ui.add(egui::Slider::new(
+                        &mut piece.fabric.stretch_warp_n_m, 100.0..=30000.0,
+                    ).text("Tração no urdume (N/m)")).changed();
+                    changed |= ui.add(egui::Slider::new(
+                        &mut piece.fabric.stretch_weft_n_m, 100.0..=30000.0,
+                    ).text("Tração na trama (N/m)")).changed();
+                    changed |= ui.add(egui::Slider::new(
+                        &mut piece.fabric.shear_n_m, 10.0..=5000.0,
+                    ).text("Cisalhamento (N/m)")).changed();
+                    changed |= ui.add(egui::Slider::new(
+                        &mut piece.fabric.bend_nm, 0.000001..=0.001,
+                    ).logarithmic(true).text("Flexão (N·m)")).changed();
+                    changed |= ui.add(egui::Slider::new(
+                        &mut piece.fabric.thickness_meters, 0.0001..=0.01,
+                    ).text("Espessura (m)")).changed();
+                    changed |= ui.add(egui::Slider::new(
+                        &mut piece.fabric.particle_distance_meters, 0.01..=0.20,
+                    ).text("Distância entre partículas (m)")).changed();
+
+                    ui.separator();
+                    ui.label("Posição 3D (deslocamento relativo ao layout 2D)");
+                    ui.horizontal(|ui| {
+                        changed |= ui.add(egui::DragValue::new(
+                            &mut piece.assembly.translation_meters[0],
+                        ).speed(0.01).prefix("X ")).changed();
+                        changed |= ui.add(egui::DragValue::new(
+                            &mut piece.assembly.translation_meters[1],
+                        ).speed(0.01).prefix("Y ")).changed();
+                        changed |= ui.add(egui::DragValue::new(
+                            &mut piece.assembly.translation_meters[2],
+                        ).speed(0.01).prefix("Z ")).changed();
+                    });
+                    ui.label("Rotação local (graus)");
+                    changed |= ui.add(egui::Slider::new(
+                        &mut piece.assembly.rotation_degrees[0], -180.0..=180.0,
+                    ).text("Rotação X")).changed();
+                    changed |= ui.add(egui::Slider::new(
+                        &mut piece.assembly.rotation_degrees[1], -180.0..=180.0,
+                    ).text("Rotação Y")).changed();
+                    changed |= ui.add(egui::Slider::new(
+                        &mut piece.assembly.rotation_degrees[2], -180.0..=180.0,
+                    ).text("Rotação Z")).changed();
+                }
+                if changed {
+                    self.sync_symmetric_mate(piece_id);
+                    self.remember_pattern_change(before);
+                }
+
+                let selected_anchor = match self.selected_target {
+                    Some(PatternEditTarget::Anchor { piece, index: anchor }) if piece == index => Some(anchor),
+                    _ => None,
+                };
+                if let Some(anchor) = selected_anchor {
+                    let pinned = self.pattern_project.pieces[index].assembly.pinned_anchors.contains(&(anchor as u32));
+                    if ui.button(if pinned {
+                        format!("Desafixar vértice {}", anchor + 1)
+                    } else {
+                        format!("Fixar vértice {} na simulação", anchor + 1)
+                    }).clicked() {
+                        let before = self.editor_snapshot();
+                        let assembly = &mut self.pattern_project.pieces[index].assembly;
+                        if pinned {
+                            assembly.pinned_anchors.retain(|candidate| *candidate != anchor as u32);
+                        } else {
+                            assembly.pinned_anchors.push(anchor as u32);
+                            assembly.pinned_anchors.sort_unstable();
+                            assembly.pinned_anchors.dedup();
+                        }
+                        self.sync_symmetric_mate(piece_id);
+                        self.remember_pattern_change(before);
+                    }
+                } else {
+                    ui.weak("Selecione um vértice do contorno para fixá-lo ou liberá-lo na simulação.");
+                }
+                if !self.pattern_project.pieces[index].assembly.pinned_anchors.is_empty() {
+                    ui.label(format!(
+                        "Vértices fixados: {}",
+                        self.pattern_project.pieces[index].assembly.pinned_anchors.iter()
+                            .map(|id| (id + 1).to_string()).collect::<Vec<_>>().join(", ")
+                    ));
+                }
+            });
+        }
+
         if self.pattern_project.pieces.len() >= 2 {
             ui.separator();
             ui.strong("Costura entre bordas");
@@ -872,7 +970,7 @@ impl ClothEvoApp {
         }
 
         ui.separator();
-        if ui.button("Simular moldes na viewport 3D").clicked() {
+        if ui.button("Montar e simular na viewport 3D").clicked() {
             match self.start_pattern_simulation() {
                 Ok(()) => {
                     self.pattern_message = if self.pattern_project.seams.iter().any(|seam| seam.ease_meters.abs() > 1.0e-6) {
