@@ -166,8 +166,13 @@ pub struct FabricProperties {
     pub shear_n_m: f64,
     pub bend_nm: f64,
     pub thickness_meters: f64,
+    /// Coeficiente de atrito de contato (0 = sem atrito; faixa recomendada 0–1,5).
+    #[serde(default = "default_fabric_friction")]
+    pub friction_coefficient: f64,
     pub particle_distance_meters: f64,
 }
+
+fn default_fabric_friction() -> f64 { 0.4 }
 
 impl Default for FabricProperties {
     fn default() -> Self {
@@ -178,6 +183,7 @@ impl Default for FabricProperties {
             shear_n_m: 1_200.0,
             bend_nm: 0.0001,
             thickness_meters: 0.001,
+            friction_coefficient: 0.4,
             particle_distance_meters: 0.04,
         }
     }
@@ -409,6 +415,11 @@ impl PatternProject {
             ];
             if fabric_values.iter().any(|value| !value.is_finite() || *value <= 0.0) {
                 return Err(format!("As propriedades físicas do molde '{}' precisam ser finitas e positivas.", piece.name));
+            }
+            if !piece.fabric.friction_coefficient.is_finite()
+                || !(0.0..=2.0).contains(&piece.fabric.friction_coefficient)
+            {
+                return Err(format!("O atrito do tecido '{}' deve estar entre 0 e 2.", piece.name));
             }
             if piece.assembly.translation_meters.iter().chain(piece.assembly.rotation_degrees.iter())
                 .any(|value| !value.is_finite())
