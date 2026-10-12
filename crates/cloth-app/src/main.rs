@@ -111,20 +111,30 @@ fn trace_curve_to_mesh_edges(
         neighbors.dedup();
     }
 
-    let nearest_vertex = |point: PatternPoint2| -> usize {
+    let nearest_vertex = |point: PatternPoint2| -> (usize, f64) {
         vertices.iter().enumerate().min_by(|(_, a), (_, b)| {
             let da = (a.x - point.x).powi(2) + (a.y - point.y).powi(2);
             let db = (b.x - point.x).powi(2) + (b.y - point.y).powi(2);
             da.total_cmp(&db)
-        }).map(|(index, _)| index).unwrap_or(0)
+        }).map(|(index, vertex)| {
+            (index, ((vertex.x - point.x).powi(2) + (vertex.y - point.y).powi(2)).sqrt())
+        }).unwrap_or((0, f64::INFINITY))
     };
 
+    // Evita projetar uma dobra em arestas remotas quando a curva sai do molde ou a resolução
+    // da malha não consegue representar o traçado com proximidade razoável.
+    let max_snap_distance = sampling_spacing.max(0.005) * 0.9;
     let stiffness = stiffness.clamp(0.02, 1.0);
     let mut mapped = BTreeMap::<(usize, usize), (f32, f32)>::new();
     for pair in path_points.windows(2) {
-        let source = nearest_vertex(pair[0]);
-        let target = nearest_vertex(pair[1]);
-        if source == target { continue; }
+        let (source, source_distance) = nearest_vertex(pair[0]);
+        let (target, target_distance) = nearest_vertex(pair[1]);
+        if !source_distance.is_finite() || !target_distance.is_finite()
+            || source_distance > max_snap_distance || target_distance > max_snap_distance
+            || source == target
+        {
+            continue;
+        }
 
         // BFS sobre o grafo da malha; o caminho curto mantém a linha física na região mais
         // próxima do traçado sem inventar vértices nem modificar a triangulação CDT.
@@ -234,6 +244,12 @@ fn physical_fold_edges(
         let Some(second_crease) = offset_open_curve(
             &pleat.axis, half_depth, piece.fabric.particle_distance_meters * 0.5,
         ) else { continue; };
+        let outline_polygon = sample_curve(&piece.outline, 32);
+        if !curve_samples_inside_polygon(&first_crease, &outline_polygon, 12)
+            || !curve_samples_inside_polygon(&second_crease, &outline_polygon, 12)
+        {
+            continue;
+        }
         let angle = pleat.angle_radians as f32;
         merge_fold_curve_edges(
             &mut combined, vertices, triangles, &first_crease,
@@ -1241,7 +1257,8 @@ impl ClothEvoApp {
             (piece.assembly.rotation_degrees[axis] + degrees).rem_euclid(360.0);
         let selected = self.selected_placement_piece;
         if let Err(error) = self.start_pattern_simulation() {
-            self.pattern_message = error;
+            self.pattern_project = before.project.clone();
+            self.pattern_message = format!("Rotação cancelada; transformação anterior restaurada: {error}");
             return;
         }
         self.selected_placement_piece = selected;
@@ -1251,14 +1268,16 @@ impl ClothEvoApp {
     fn reset_selected_placement_transform(&mut self) {
         let Some(id) = self.selected_placement_piece else { return; };
         let before = self.editor_snapshot();
-        if let Some(piece) = self.pattern_project.pieces.iter_mut().find(|piece| piece.id == id) {
-            piece.assembly.translation_meters = [0.0; 3];
-            piece.assembly.rotation_degrees = [0.0; 3];
-            piece.assembly.scale = [1.0; 3];
-        }
+        let Some(piece) = self.pattern_project.pieces.iter_mut().find(|piece| piece.id == id) else {
+            return;
+        };
+        piece.assembly.translation_meters = [0.0; 3];
+        piece.assembly.rotation_degrees = [0.0; 3];
+        piece.assembly.scale = [1.0; 3];
         let selected = self.selected_placement_piece;
         if let Err(error) = self.start_pattern_simulation() {
-            self.pattern_message = error;
+            self.pattern_project = before.project.clone();
+            self.pattern_message = format!("Reset cancelado; transformação anterior restaurada: {error}");
             return;
         }
         self.selected_placement_piece = selected;
@@ -3437,6 +3456,24 @@ impl ClothEvoApp {
             &self.pattern_project.seams,
         ).map_err(|error| format!("Falha ao preparar as bordas de costura: {error}"))?;
         for piece in &self.pattern_project.pieces {
+            let outline_polygon = sample_curve(&piece.outline, 32);
+            for curve in &piece.internal_lines {
+                if !curve_samples_inside_polygon(curve, &outline_polygon, 32) {
+                    return Err(format!("Uma linha interna de '{}' sai do contorno ou possui geometria inválida.", piece.name));
+                }
+            }
+            for fold in &piece.fold_lines {
+                if fold.kind != FoldKind::Decorative
+                    && !curve_samples_inside_polygon(&fold.curve, &outline_polygon, 32)
+                {
+                    return Err(format!("A dobra física de '{}' sai do contorno ou possui geometria inválida.", piece.name));
+                }
+            }
+            for pleat in &piece.pleats {
+                if !curve_samples_inside_polygon(&pleat.axis, &outline_polygon, 32) {
+                    return Err(format!("O eixo da prega de '{}' sai do contorno ou possui geometria inválida.", piece.name));
+                }
+            }
             let particle_distance = piece.fabric.particle_distance_meters;
             if !particle_distance.is_finite() || particle_distance <= 0.0 {
                 return Err(format!("Distância entre partículas inválida em '{}'.", piece.name));
@@ -3546,9 +3583,9 @@ impl ClothEvoApp {
             );
             let local_rotation = Quat::from_euler(
                 EulerRot::XYZ,
-                assembly.rotation_degrees[0].to_radians() as f32,
-                assembly.rotation_degrees[1].to_radians() as f32,
-                assembly.rotation_degrees[2].to_radians() as f32,
+                assembly.rotation_degrees[0].rem_euclid(360.0).to_radians() as f32,
+                assembly.rotation_degrees[1].rem_euclid(360.0).to_radians() as f32,
+                assembly.rotation_degrees[2].rem_euclid(360.0).to_radians() as f32,
             );
             let base_rotation = Quat::from_rotation_y(angle);
             let rotation = base_rotation * local_rotation;
@@ -3787,13 +3824,29 @@ impl ClothEvoApp {
                 self.placement_drag_selected_body = false;
                 // Escalar altera comprimentos de repouso e áreas. Reconstrói uma única vez
                 // ao soltar o mouse, e não a cada quadro do arraste.
+                let mut commit_history = true;
                 if stopped_action == Some(GizmoAction::Scale) {
                     if let Err(error) = self.start_pattern_simulation() {
-                        self.pattern_message = error;
+                        commit_history = false;
+                        if let Some(snapshot) = before.as_ref() {
+                            self.pattern_project = snapshot.project.clone();
+                            match self.start_pattern_simulation() {
+                                Ok(()) => self.pattern_message = format!(
+                                    "Escala cancelada e revertida após falha na reconstrução: {error}"
+                                ),
+                                Err(restore_error) => self.pattern_message = format!(
+                                    "Falha ao aplicar a escala ({error}) e ao restaurar a prévia ({restore_error})."
+                                ),
+                            }
+                        } else {
+                            self.pattern_message = error;
+                        }
                     }
                 }
-                if let Some(before) = before {
-                    self.remember_pattern_change(before);
+                if commit_history {
+                    if let Some(before) = before {
+                        self.remember_pattern_change(before);
+                    }
                 }
                 self.placement_drag_piece = None;
             }
@@ -4114,6 +4167,17 @@ fn dense_curve_samples(curve: &Curve2D, steps: usize) -> Vec<PatternPoint2> {
         start = segment.endpoint();
     }
     points
+}
+
+fn curve_samples_inside_polygon(
+    curve: &Curve2D,
+    polygon: &[PatternPoint2],
+    steps: usize,
+) -> bool {
+    !curve.closed
+        && !curve.segments.is_empty()
+        && dense_curve_samples(curve, steps).iter()
+            .all(|point| point_in_polygon(*point, polygon))
 }
 
 fn classify_detail_point(
