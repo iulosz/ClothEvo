@@ -2184,7 +2184,7 @@ impl ClothEvoApp {
         }
         let mut infos: Vec<PieceBuildInfo> = Vec::new();
         let piece_count = prepared.len();
-        let origin_x = (-0.5 * (min_x + max_x)) as f32;
+        let x_span = (max_x - min_x).max(1.0e-6);
         let origin_y = (0.9 - min_y) as f32;
 
         for (piece_index, (id, ranges, mesh, fabric, assembly, grain, name)) in
@@ -2201,18 +2201,28 @@ impl ClothEvoApp {
                 .map(|p| Vec2::new((p.x - center_x) as f32, (p.y - center_y) as f32))
                 .collect();
             let panel_mesh = PanelMesh { uv, triangles: mesh.triangles };
-            let z = pattern_sim_layer_z(piece_index, fabric.thickness_meters as f32);
-            let translation = Vec3::new(
-                origin_x + center_x as f32 + assembly.translation_meters[0] as f32,
-                origin_y + center_y as f32 + assembly.translation_meters[1] as f32,
-                z + assembly.translation_meters[2] as f32,
+            // Distribui o layout 2D pela semicircunferência frontal do colisor corporal:
+            // moldes mais à esquerda/direita começam tangentes às laterais, e costuras os unem.
+            let angle = (((center_x - min_x) / x_span).clamp(0.0, 1.0)
+                * std::f64::consts::PI - std::f64::consts::FRAC_PI_2) as f32;
+            let shell_radius = pattern_sim_layer_z(piece_index, fabric.thickness_meters as f32);
+            let auto_origin = Vec3::new(
+                angle.sin() * shell_radius,
+                origin_y + center_y as f32,
+                angle.cos() * shell_radius,
             );
-            let rotation = Quat::from_euler(
+            let translation = auto_origin + Vec3::new(
+                assembly.translation_meters[0] as f32,
+                assembly.translation_meters[1] as f32,
+                assembly.translation_meters[2] as f32,
+            );
+            let local_rotation = Quat::from_euler(
                 EulerRot::XYZ,
                 assembly.rotation_degrees[0].to_radians() as f32,
                 assembly.rotation_degrees[1].to_radians() as f32,
                 assembly.rotation_degrees[2].to_radians() as f32,
             );
+            let rotation = Quat::from_rotation_y(angle) * local_rotation;
             let material = PanelMaterial {
                 density_kg_m2: fabric.density_kg_m2 as f32,
                 stretch_warp_n_m: fabric.stretch_warp_n_m as f32,
@@ -2287,7 +2297,7 @@ impl ClothEvoApp {
             .map(|piece| piece.assembly.pinned_anchors.len())
             .sum::<usize>();
         self.pattern_message = format!(
-            "Montagem 3D pronta: {} moldes, {} costuras e {} âncoras fixadas. Materiais e resolução aplicados por molde.",
+            "Montagem 3D pronta: {} moldes distribuídos ao redor do colisor corporal, {} costuras e {} âncoras fixadas. Materiais e resolução aplicados por molde.",
             piece_count, self.pattern_project.seams.len(), pinned
         );
         Ok(())
