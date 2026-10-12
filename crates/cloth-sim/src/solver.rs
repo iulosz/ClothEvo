@@ -228,6 +228,8 @@ impl Simulation {
         let g = self.params.gravity;
         let parallel = self.params.parallel;
         self.last_stability_corrections = 0;
+        self.last_self_collision_contacts = 0;
+        self.last_self_collision_penetration = 0.0;
 
         for _ in 0..substeps {
             // 1. Predição de posições.
@@ -358,8 +360,6 @@ impl Simulation {
     /// Auto-colisão por grade espacial. Vértices ligados por uma aresta estrutural ou costura
     /// são excluídos para evitar que a resolução de espessura se oponha à malha local.
     fn collide_self(&mut self) {
-        self.last_self_collision_contacts = 0;
-        self.last_self_collision_penetration = 0.0;
         let n = self.pos.len();
         if n < 2 || !self.params.self_collision { return; }
 
@@ -446,8 +446,8 @@ impl Simulation {
                 }
             }
         }
-        self.last_self_collision_contacts = contacts;
-        self.last_self_collision_penetration = max_penetration;
+        self.last_self_collision_contacts += contacts;
+        self.last_self_collision_penetration = self.last_self_collision_penetration.max(max_penetration);
     }
 
     /// Número de partículas não finitas ou com velocidade próxima do limite de estabilidade.
