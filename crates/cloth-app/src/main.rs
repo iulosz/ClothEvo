@@ -2529,8 +2529,8 @@ impl ClothEvoApp {
             self.seam_sides_b = seam.sides_b;
             self.seam_a_active_path = 0;
             self.seam_b_active_path = 0;
-            if let Some(edge) = self.seam_sides_a.first() { self.load_seam_edge_to_controls(true, edge); }
-            if let Some(edge) = self.seam_sides_b.first() { self.load_seam_edge_to_controls(false, edge); }
+            if let Some(edge) = self.seam_sides_a.first().cloned() { self.load_seam_edge_to_controls(true, &edge); }
+            if let Some(edge) = self.seam_sides_b.first().cloned() { self.load_seam_edge_to_controls(false, &edge); }
             self.seam_name = seam.name;
         }
         self.auto_seam_suggestions.clear();
@@ -3558,7 +3558,7 @@ fn snap_curve_param_to_features(
         consider(CurveParam { segment: segment as u32, t: 1.0 });
     }
     for notch in notches {
-        if notch.segment_index as usize < curve.segments.len() && notch.t.is_finite() {
+        if (notch.segment_index as usize) < curve.segments.len() && notch.t.is_finite() {
             consider(CurveParam {
                 segment: notch.segment_index,
                 t: notch.t.clamp(0.0, 1.0),
