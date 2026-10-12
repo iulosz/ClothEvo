@@ -21,8 +21,9 @@ use pattern_core::{
 };
 use pattern_geom::{
     cut_closed_outline, mirror_curve_x, offset_polygon, point_in_polygon, rectangle,
-    regular_polygon, sample_curve, sample_curve_with_ranges, validate_simple_polygon,
-    CutAndSewResult, SourceSegmentFragment,
+    regular_polygon, sample_curve, sample_curve_with_ranges,
+    sample_pattern_outlines_with_seam_sync, validate_simple_polygon, CutAndSewResult,
+    SourceSegmentFragment,
 };
 use pattern_mesh::triangulate_outline;
 
@@ -3204,12 +3205,17 @@ impl ClothEvoApp {
         // Cada molde usa a sua própria distância entre partículas. As coordenadas da malha
         // são recentradas por peça, para que a transformação 3D gire em torno do centro do painel.
         let mut prepared = Vec::with_capacity(self.pattern_project.pieces.len());
+        let mut synchronized_samples = sample_pattern_outlines_with_seam_sync(
+            &self.pattern_project.pieces,
+            &self.pattern_project.seams,
+        ).map_err(|error| format!("Falha ao preparar as bordas de costura: {error}"))?;
         for piece in &self.pattern_project.pieces {
             let particle_distance = piece.fabric.particle_distance_meters;
             if !particle_distance.is_finite() || particle_distance <= 0.0 {
                 return Err(format!("Distância entre partículas inválida em '{}'.", piece.name));
             }
-            let sampled = sample_curve_with_ranges(&piece.outline, 8);
+            let sampled = synchronized_samples.remove(&piece.id)
+                .ok_or_else(|| format!("A amostragem do molde '{}' não foi gerada.", piece.name))?;
             validate_simple_polygon(&sampled.points)
                 .map_err(|e| format!("Contorno inválido em '{}': {e}", piece.name))?;
             let mesh = triangulate_outline(&sampled.points, particle_distance)
@@ -3371,7 +3377,7 @@ impl ClothEvoApp {
             let globals_a = info_a.handle.globals(&locals_a);
             let globals_b = info_b.handle.globals(&locals_b);
             let notch_markers = paired_notch_markers(&self.pattern_project, &seam.a, &seam.b);
-            builder.sew_with_markers(
+            builder.sew_synchronized_with_markers(
                 &globals_a, &globals_b, seam.ease_meters as f32, &notch_markers,
             );
         }
