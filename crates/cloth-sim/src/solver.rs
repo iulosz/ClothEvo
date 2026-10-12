@@ -13,6 +13,8 @@ use crate::params::{ConstraintKind, SimParams, KIND_COUNT};
 const PAR_MIN: usize = 256;
 /// Limita o custo da auto-colisão quando muitos pontos colapsam na mesma célula.
 const MAX_SELF_COLLISION_CANDIDATES_PER_PARTICLE: usize = 96;
+/// Orçamento agregado para que a lista de pares nunca cresça com N² nem com 96·N sem limite.
+const MAX_SELF_COLLISION_CANDIDATE_PAIRS_TOTAL: usize = 2_000_000;
 
 /// Restrição de distância entre duas partículas (stretch, shear ou costura).
 #[derive(Clone, Copy, Debug)]
@@ -676,9 +678,14 @@ fn bounded_self_collision_candidate_pairs(
             grid.entry(cell_of(*position)).or_default().push(i as u32);
         }
     }
-    let mut pairs = Vec::with_capacity(
-        positions.len().saturating_mul(MAX_SELF_COLLISION_CANDIDATES_PER_PARTICLE),
-    );
+    let per_particle_budget = (MAX_SELF_COLLISION_CANDIDATE_PAIRS_TOTAL / positions.len())
+        .min(MAX_SELF_COLLISION_CANDIDATES_PER_PARTICLE);
+    if per_particle_budget == 0 {
+        return Vec::new();
+    }
+    // Não reserva capacidade proporcional ao número de vértices: malhas sem vizinhos
+    // próximos não devem pagar por pares que nunca serão gerados.
+    let mut pairs = Vec::new();
     for (i, position) in positions.iter().enumerate() {
         if !position.is_finite() { continue; }
         let (cx, cy, cz) = cell_of(*position);
@@ -689,10 +696,10 @@ fn bounded_self_collision_candidate_pairs(
                     let Some(neighbours) = grid.get(&(cx + dx, cy + dy, cz + dz)) else { continue; };
                     let first_after_i = neighbours.partition_point(|&j| (j as usize) <= i);
                     for &j in &neighbours[first_after_i..] {
-                        candidates += 1;
-                        if candidates > MAX_SELF_COLLISION_CANDIDATES_PER_PARTICLE {
+                        if candidates >= per_particle_budget {
                             break 'neighbor_cells;
                         }
+                        candidates += 1;
                         let pair = (i as u32, j);
                         if exclusions.contains(&pair) { continue; }
                         pairs.push(pair);
@@ -717,6 +724,15 @@ mod self_collision_candidate_tests {
         assert!(pairs.iter().all(|&(a, b)| a < b));
         let unique = pairs.iter().copied().collect::<HashSet<_>>();
         assert_eq!(unique.len(), pairs.len());
+    }
+
+    #[test]
+    fn candidate_pairs_obey_global_memory_budget_on_large_collapsed_mesh() {
+        let positions = vec![Vec3::ZERO; 25_000];
+        let pairs = bounded_self_collision_candidate_pairs(&positions, 0.01, &HashSet::new());
+        assert!(!pairs.is_empty());
+        assert!(pairs.len() <= MAX_SELF_COLLISION_CANDIDATE_PAIRS_TOTAL);
+        assert!(pairs.len() < positions.len() * MAX_SELF_COLLISION_CANDIDATES_PER_PARTICLE);
     }
 
     #[test]
