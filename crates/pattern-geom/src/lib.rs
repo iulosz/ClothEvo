@@ -1,6 +1,9 @@
 //! Algoritmos geométricos sem dependência da UI ou do renderizador.
 
-use pattern_core::{Curve2D, CurveSegment, Point2};
+use pattern_core::{
+    BoundaryCurve, Curve2D, CurveSegment, PatternPiece, Point2, SeamDefinition,
+};
+use std::collections::HashMap;
 use std::fmt;
 
 pub mod editor_ops;
@@ -87,6 +90,282 @@ pub fn sample_curve_with_ranges(curve: &Curve2D, cubic_steps: usize) -> SampledC
         }
     }
     SampledCurve { points, segment_vertex_ranges: ranges }
+}
+
+/// Parâmetros t amostrados por segmento da curva original. Cada lista inclui 0 e 1.
+type SegmentParameters = Vec<Vec<f64>>;
+
+fn point_on_segment(curve: &Curve2D, segment_index: usize, t: f64) -> Point2 {
+    let start = if segment_index == 0 {
+        curve.start
+    } else {
+        curve.segments[segment_index - 1].endpoint()
+    };
+    match &curve.segments[segment_index] {
+        CurveSegment::Line { to } => Point2::new(
+            start.x + (to.x - start.x) * t,
+            start.y + (to.y - start.y) * t,
+        ),
+        CurveSegment::CubicBezier { control1, control2, to } => {
+            cubic(start, *control1, *control2, *to, t)
+        }
+    }
+}
+
+fn cubic_parameters(
+    curve: &Curve2D,
+    segment_index: usize,
+    t0: f64,
+    t1: f64,
+    max_spacing: f64,
+    depth: u32,
+    out: &mut Vec<f64>,
+) {
+    let p0 = point_on_segment(curve, segment_index, t0);
+    let p1 = point_on_segment(curve, segment_index, t1);
+    let span = t1 - t0;
+    let q1 = point_on_segment(curve, segment_index, t0 + span * 0.25);
+    let q2 = point_on_segment(curve, segment_index, t0 + span * 0.50);
+    let q3 = point_on_segment(curve, segment_index, t0 + span * 0.75);
+    let polyline_length = p0.distance(q1) + q1.distance(q2)
+        + q2.distance(q3) + q3.distance(p1);
+    let chord_length = p0.distance(p1);
+    let sufficiently_short = polyline_length <= max_spacing;
+    let sufficiently_flat = polyline_length - chord_length <= max_spacing * 0.04;
+
+    if depth >= 18 || (sufficiently_short && sufficiently_flat) {
+        out.push(t1);
+        return;
+    }
+    let mid = (t0 + t1) * 0.5;
+    cubic_parameters(curve, segment_index, t0, mid, max_spacing, depth + 1, out);
+    cubic_parameters(curve, segment_index, mid, t1, max_spacing, depth + 1, out);
+}
+
+fn segment_parameters(curve: &Curve2D, max_spacing: f64) -> Result<SegmentParameters, GeometryError> {
+    if !max_spacing.is_finite() || max_spacing <= 0.0 {
+        return Err(GeometryError::InvalidParameter);
+    }
+    let mut result = Vec::with_capacity(curve.segments.len());
+    for (index, segment) in curve.segments.iter().enumerate() {
+        match segment {
+            CurveSegment::Line { to } => {
+                let start = if index == 0 {
+                    curve.start
+                } else {
+                    curve.segments[index - 1].endpoint()
+                };
+                let length = start.distance(*to);
+                let count = (length / max_spacing).ceil().max(1.0);
+                if !count.is_finite() || count > 1_000_000.0 {
+                    return Err(GeometryError::InvalidParameter);
+                }
+                let count = count as usize;
+                result.push((0..=count).map(|i| i as f64 / count as f64).collect());
+            }
+            CurveSegment::CubicBezier { .. } => {
+                let mut params = vec![0.0];
+                cubic_parameters(curve, index, 0.0, 1.0, max_spacing, 0, &mut params);
+                result.push(params);
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn normalize_parameters(params: &mut [f64]) {
+    params.sort_by(f64::total_cmp);
+    params.dedup_by(|a, b| (*a - *b).abs() <= 1.0e-10);
+    if params.first().is_none_or(|t| *t > 1.0e-10) {
+        params.insert(0, 0.0);
+    } else if let Some(first) = params.first_mut() {
+        *first = 0.0;
+    }
+    if params.last().is_none_or(|t| *t < 1.0 - 1.0e-10) {
+        params.push(1.0);
+    } else if let Some(last) = params.last_mut() {
+        *last = 1.0;
+    }
+}
+
+fn sample_from_parameters(curve: &Curve2D, params: &SegmentParameters) -> SampledCurve {
+    let mut points = vec![curve.start];
+    let mut ranges = Vec::with_capacity(curve.segments.len());
+    for (segment_index, segment_params) in params.iter().enumerate() {
+        let start_index = points.len() - 1;
+        for &t in segment_params.iter().skip(1) {
+            points.push(point_on_segment(curve, segment_index, t));
+        }
+        ranges.push((start_index, points.len() - 1));
+    }
+
+    if curve.closed && points.len() > 1 && points[0].distance(*points.last().unwrap()) <= EPS {
+        let duplicated_index = points.len() - 1;
+        points.pop();
+        for range in &mut ranges {
+            if range.1 == duplicated_index { range.1 = 0; }
+        }
+    }
+    SampledCurve { points, segment_vertex_ranges: ranges }
+}
+
+fn edge_segment_lengths(
+    curve: &Curve2D,
+    params: &SegmentParameters,
+    edge: &pattern_core::EdgeRef,
+) -> Result<Vec<f64>, GeometryError> {
+    let start = edge.segment_start as usize;
+    let end = edge.segment_end as usize;
+    if start >= end || end > curve.segments.len() || params.len() != curve.segments.len() {
+        return Err(GeometryError::InvalidSegment);
+    }
+    Ok((start..end).map(|segment_index| {
+        let ts = &params[segment_index];
+        ts.windows(2).map(|pair| {
+            point_on_segment(curve, segment_index, pair[0])
+                .distance(point_on_segment(curve, segment_index, pair[1]))
+        }).sum::<f64>()
+    }).collect())
+}
+
+/// Frações de comprimento de arco (0..1) para todos os nós existentes na borda.
+fn edge_sample_fractions(
+    curve: &Curve2D,
+    params: &SegmentParameters,
+    edge: &pattern_core::EdgeRef,
+) -> Result<Vec<f64>, GeometryError> {
+    let lengths = edge_segment_lengths(curve, params, edge)?;
+    let total = lengths.iter().sum::<f64>();
+    if !total.is_finite() || total <= EPS {
+        return Err(GeometryError::DegenerateEdge);
+    }
+    let mut fractions = vec![0.0, 1.0];
+    let mut preceding = 0.0;
+    for (offset, length) in lengths.iter().copied().enumerate() {
+        let segment_index = edge.segment_start as usize + offset;
+        let ts = &params[segment_index];
+        let mut local = 0.0;
+        for (sample_index, pair) in ts.windows(2).enumerate() {
+            let a = point_on_segment(curve, segment_index, pair[0]);
+            let b = point_on_segment(curve, segment_index, pair[1]);
+            if sample_index == 0 {
+                let fraction = (preceding / total).clamp(0.0, 1.0);
+                fractions.push(if edge.reversed { 1.0 - fraction } else { fraction });
+            }
+            local += a.distance(b);
+            let fraction = ((preceding + local) / total).clamp(0.0, 1.0);
+            fractions.push(if edge.reversed { 1.0 - fraction } else { fraction });
+        }
+        preceding += length;
+    }
+    Ok(fractions)
+}
+
+/// Converte fração de arco orientada para um parâmetro de segmento usando a amostragem base.
+fn segment_parameter_at_edge_fraction(
+    curve: &Curve2D,
+    params: &SegmentParameters,
+    edge: &pattern_core::EdgeRef,
+    oriented_fraction: f64,
+) -> Result<(usize, f64), GeometryError> {
+    let lengths = edge_segment_lengths(curve, params, edge)?;
+    let total = lengths.iter().sum::<f64>();
+    if !total.is_finite() || total <= EPS {
+        return Err(GeometryError::DegenerateEdge);
+    }
+    let canonical_fraction = if edge.reversed {
+        1.0 - oriented_fraction
+    } else {
+        oriented_fraction
+    }.clamp(0.0, 1.0);
+    let target = canonical_fraction * total;
+    let mut preceding = 0.0;
+
+    for (offset, length) in lengths.iter().copied().enumerate() {
+        let segment_index = edge.segment_start as usize + offset;
+        let ts = &params[segment_index];
+        if target <= preceding + length + 1.0e-10 || offset + 1 == lengths.len() {
+            let local_target = (target - preceding).clamp(0.0, length);
+            let mut local = 0.0;
+            for pair in ts.windows(2) {
+                let a = point_on_segment(curve, segment_index, pair[0]);
+                let b = point_on_segment(curve, segment_index, pair[1]);
+                let span = a.distance(b);
+                if local_target <= local + span + 1.0e-10 {
+                    let alpha = if span <= EPS { 0.0 } else {
+                        ((local_target - local) / span).clamp(0.0, 1.0)
+                    };
+                    return Ok((segment_index, pair[0] + (pair[1] - pair[0]) * alpha));
+                }
+                local += span;
+            }
+            return Ok((segment_index, 1.0));
+        }
+        preceding += length;
+    }
+    Err(GeometryError::InvalidSegment)
+}
+
+/// Amostra os contornos pelo espaçamento de partículas e sincroniza parametricamente
+/// os nós das bordas unidas por costura. Os intervalos continuam referenciando os segmentos
+/// originais, inclusive quando a borda de costura atravessa vários segmentos ou está invertida.
+pub fn sample_pattern_outlines_with_seam_sync(
+    pieces: &[PatternPiece],
+    seams: &[SeamDefinition],
+) -> Result<HashMap<u64, SampledCurve>, GeometryError> {
+    let pieces_by_id: HashMap<_, _> = pieces.iter().map(|piece| (piece.id, piece)).collect();
+    let mut base_params = HashMap::with_capacity(pieces.len());
+    for piece in pieces {
+        base_params.insert(
+            piece.id,
+            segment_parameters(&piece.outline, piece.fabric.particle_distance_meters)?,
+        );
+    }
+    let mut synchronized_params = base_params.clone();
+
+    for seam in seams {
+        if seam.a.curve != BoundaryCurve::Outline || seam.b.curve != BoundaryCurve::Outline {
+            // A simulação atual ainda rejeita costuras de linhas internas; elas não alteram
+            // silenciosamente a amostragem do contorno.
+            continue;
+        }
+        let piece_a = *pieces_by_id.get(&seam.a.piece_id).ok_or(GeometryError::InvalidSegment)?;
+        let piece_b = *pieces_by_id.get(&seam.b.piece_id).ok_or(GeometryError::InvalidSegment)?;
+        let params_a = base_params.get(&piece_a.id).ok_or(GeometryError::InvalidSegment)?;
+        let params_b = base_params.get(&piece_b.id).ok_or(GeometryError::InvalidSegment)?;
+        let mut fractions = edge_sample_fractions(&piece_a.outline, params_a, &seam.a)?;
+        fractions.extend(edge_sample_fractions(&piece_b.outline, params_b, &seam.b)?);
+        fractions.sort_by(f64::total_cmp);
+        fractions.dedup_by(|a, b| (*a - *b).abs() <= 1.0e-8);
+
+        // Todas as frações partem da amostragem base e são mapeadas antes de qualquer mutação.
+        // Assim, múltiplas costuras podem compartilhar uma curva sem depender da ordem do loop.
+        let mapped_a = fractions.iter().map(|&fraction| {
+            segment_parameter_at_edge_fraction(&piece_a.outline, params_a, &seam.a, fraction)
+        }).collect::<Result<Vec<_>, _>>()?;
+        let mapped_b = fractions.iter().map(|&fraction| {
+            segment_parameter_at_edge_fraction(&piece_b.outline, params_b, &seam.b, fraction)
+        }).collect::<Result<Vec<_>, _>>()?;
+
+        for (segment, t) in mapped_a {
+            synchronized_params.get_mut(&piece_a.id).ok_or(GeometryError::InvalidSegment)?
+                .get_mut(segment).ok_or(GeometryError::InvalidSegment)?.push(t);
+        }
+        for (segment, t) in mapped_b {
+            synchronized_params.get_mut(&piece_b.id).ok_or(GeometryError::InvalidSegment)?
+                .get_mut(segment).ok_or(GeometryError::InvalidSegment)?.push(t);
+        }
+    }
+
+    let mut sampled = HashMap::with_capacity(pieces.len());
+    for piece in pieces {
+        let params = synchronized_params.get_mut(&piece.id).ok_or(GeometryError::InvalidSegment)?;
+        for segment in params.iter_mut() {
+            normalize_parameters(segment);
+        }
+        sampled.insert(piece.id, sample_from_parameters(&piece.outline, params));
+    }
+    Ok(sampled)
 }
 
 /// Amostra curvas Bézier cúbicas e segmentos lineares. Em curvas fechadas, remove o ponto
