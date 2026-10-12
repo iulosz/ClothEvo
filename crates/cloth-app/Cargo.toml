@@ -18,3 +18,4 @@ pattern-geom = { path = "../pattern-geom" }
 pattern-mesh = { path = "../pattern-mesh" }
 glam = { workspace = true }
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "x11", "wayland"] }
+rfd = "0.17.2"

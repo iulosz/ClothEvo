@@ -116,3 +116,22 @@ tornariam um intervalo de costura descontínuo são recusadas sem modificar o pr
 
 O editor ainda é uma base de produção inicial: ferramentas de seleção de peça inteira, undo/redo,
 edição de margem por aresta e janelas de diálogo para arquivos estão planejadas para etapas futuras.
+
+
+## ClothEvo 0.3 — histórico, seleção de peças e arquivos
+
+O Pattern Studio agora oferece histórico de edições Undo/Redo (atalhos Ctrl+Z, Ctrl+Y e Ctrl+Shift+Z),
+com limite de 100 estados, incluindo pontos de rascunho e operações em moldes. Peças podem ser
+selecionadas clicando no interior do contorno, movimentadas no canvas e duplicadas com deslocamento
+inicial de 20 cm. A duplicação não cria costuras automaticamente, evitando vínculos incorretos.
+
+Os projetos podem ser criados, abertos e salvos por diálogos nativos. O primeiro salvamento solicita
+um caminho; depois, **Salvar** atualiza esse arquivo, enquanto **Salvar como** permite escolher outro.
+Os formatos .clothevo e .json usam o esquema JSON do projeto. A interface indica quando há alterações
+não salvas. A opção **Enquadrar todos os moldes** calcula zoom e deslocamento para ajustar as peças à
+viewport.
+
+Limitações desta etapa: o histórico cobre as edições de moldes e rascunhos, mas não restaura o caminho
+de arquivo nem os parâmetros transitórios do painel de costura; mover uma peça desloca também linhas
+internas, pences, furos, linha de fio e anotações. Costuras entre peças não são duplicadas junto com
+uma cópia porque é necessário definir explicitamente a nova correspondência.

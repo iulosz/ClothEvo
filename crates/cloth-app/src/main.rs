@@ -17,7 +17,7 @@ use glam::{Quat, Vec2, Vec3};
 use pattern_core::{
     BoundaryCurve, Curve2D, CurveSegment, EdgeRef, PatternPiece, PatternProject, Point2 as PatternPoint2, SeamDefinition,
 };
-use pattern_geom::{offset_polygon, sample_curve, sample_curve_with_ranges, validate_simple_polygon};
+use pattern_geom::{offset_polygon, point_in_polygon, sample_curve, sample_curve_with_ranges, validate_simple_polygon};
 use pattern_mesh::triangulate_outline;
 
 const FIXED_DT: f32 = 1.0 / 60.0;
@@ -63,16 +63,25 @@ enum PatternTool {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum PatternEditTarget {
+    Piece { piece: usize },
     Anchor { piece: usize, index: usize },
     Control1 { piece: usize, segment: usize },
     Control2 { piece: usize, segment: usize },
     Edge { piece: usize, segment: usize, t: f64 },
 }
 
+#[derive(Clone, PartialEq)]
+struct PatternEditorSnapshot {
+    project: PatternProject,
+    draft_points: Vec<PatternPoint2>,
+    selected_piece: usize,
+    selected_target: Option<PatternEditTarget>,
+}
+
 impl PatternEditTarget {
     fn piece(self) -> usize {
         match self {
-            Self::Anchor { piece, .. } | Self::Control1 { piece, .. }
+            Self::Piece { piece } | Self::Anchor { piece, .. } | Self::Control1 { piece, .. }
             | Self::Control2 { piece, .. } | Self::Edge { piece, .. } => piece,
         }
     }
@@ -118,6 +127,13 @@ struct ClothEvoApp {
     pattern_snap: bool,
     selected_target: Option<PatternEditTarget>,
     dragging_target: Option<PatternEditTarget>,
+    dragging_before: Option<PatternEditorSnapshot>,
+    drag_last_world: Option<PatternPoint2>,
+    pattern_undo: Vec<PatternEditorSnapshot>,
+    pattern_redo: Vec<PatternEditorSnapshot>,
+    pattern_saved_path: Option<std::path::PathBuf>,
+    pattern_dirty: bool,
+    pattern_fit_pending: bool,
 }
 
 fn statics_from(colliders: &[Collider]) -> Vec<StaticMeshData> {
@@ -200,6 +216,13 @@ impl ClothEvoApp {
             pattern_snap: false,
             selected_target: None,
             dragging_target: None,
+            dragging_before: None,
+            drag_last_world: None,
+            pattern_undo: Vec::new(),
+            pattern_redo: Vec::new(),
+            pattern_saved_path: None,
+            pattern_dirty: false,
+            pattern_fit_pending: false,
         };
         app.upload_scene();
         app
@@ -396,28 +419,239 @@ impl ClothEvoApp {
         }
     }
 
-    fn pattern_controls(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Pattern Studio");
-        ui.label("Editor 2D · unidades internas em metros");
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.pattern_tool, PatternTool::Draw, "Desenhar");
-            ui.selectable_value(&mut self.pattern_tool, PatternTool::Select, "Editar");
+    fn editor_snapshot(&self) -> PatternEditorSnapshot {
+        PatternEditorSnapshot {
+            project: self.pattern_project.clone(),
+            draft_points: self.draft_points.clone(),
+            selected_piece: self.selected_piece,
+            selected_target: self.selected_target,
+        }
+    }
+
+    fn remember_pattern_change(&mut self, before: PatternEditorSnapshot) {
+        if before == self.editor_snapshot() { return; }
+        self.pattern_undo.push(before);
+        if self.pattern_undo.len() > 100 {
+            self.pattern_undo.remove(0);
+        }
+        self.pattern_redo.clear();
+        self.pattern_dirty = true;
+    }
+
+    fn restore_editor_snapshot(&mut self, snapshot: PatternEditorSnapshot) {
+        self.pattern_project = snapshot.project;
+        self.draft_points = snapshot.draft_points;
+        self.selected_piece = snapshot.selected_piece.min(
+            self.pattern_project.pieces.len().saturating_sub(1)
+        );
+        self.selected_target = snapshot.selected_target.filter(|target| {
+            target.piece() < self.pattern_project.pieces.len()
         });
-        ui.horizontal(|ui| {
-            if ui.button("Desfazer ponto").clicked() { self.draft_points.pop(); }
-            if ui.button("Limpar rascunho").clicked() { self.draft_points.clear(); }
-        });
-        ui.checkbox(&mut self.pattern_snap, "Ajustar a grade (1 cm)");
-        if ui.button("Enquadrar / redefinir zoom").clicked() {
+        self.dragging_target = None;
+        self.dragging_before = None;
+        self.drag_last_world = None;
+        self.pattern_dirty = true;
+    }
+
+    fn undo_pattern_edit(&mut self) {
+        let Some(previous) = self.pattern_undo.pop() else {
+            self.pattern_message = "Nada para desfazer.".into();
+            return;
+        };
+        let current = self.editor_snapshot();
+        self.pattern_redo.push(current);
+        self.restore_editor_snapshot(previous);
+        self.pattern_message = "Última edição desfeita.".into();
+    }
+
+    fn redo_pattern_edit(&mut self) {
+        let Some(next) = self.pattern_redo.pop() else {
+            self.pattern_message = "Nada para refazer.".into();
+            return;
+        };
+        let current = self.editor_snapshot();
+        self.pattern_undo.push(current);
+        self.restore_editor_snapshot(next);
+        self.pattern_message = "Edição refeita.".into();
+    }
+
+    fn new_pattern_project(&mut self) {
+        let before = self.editor_snapshot();
+        self.pattern_project = PatternProject::new("Novo projeto");
+        self.draft_points.clear();
+        self.selected_piece = 0;
+        self.selected_target = None;
+        self.pattern_saved_path = None;
+        self.pattern_message = "Novo projeto criado.".into();
+        self.remember_pattern_change(before);
+    }
+
+    fn open_pattern_project_dialog(&mut self) {
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("Projeto ClothEvo / JSON", &["clothevo", "json"]);
+        if let Some(parent) = self.pattern_saved_path.as_deref().and_then(std::path::Path::parent) {
+            dialog = dialog.set_directory(parent);
+        }
+        let Some(path) = dialog.pick_file() else { return; };
+        let loaded = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Falha ao ler {}: {e}", path.display()))
+            .and_then(|json| PatternProject::from_json(&json));
+        match loaded {
+            Ok(project) => {
+                let before = self.editor_snapshot();
+                self.pattern_project = project;
+                self.draft_points.clear();
+                self.selected_piece = 0;
+                self.selected_target = None;
+                self.pattern_saved_path = Some(path.clone());
+                self.pattern_dirty = false;
+                self.pattern_message = format!("Projeto carregado: {}", path.display());
+                self.remember_pattern_change(before);
+                self.pattern_dirty = false;
+            }
+            Err(error) => self.pattern_message = error,
+        }
+    }
+
+    fn save_pattern_project(&mut self) {
+        if let Some(path) = self.pattern_saved_path.clone() {
+            self.write_pattern_project(path);
+        } else {
+            self.save_pattern_project_as();
+        }
+    }
+
+    fn save_pattern_project_as(&mut self) {
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("Projeto ClothEvo", &["clothevo", "json"])
+            .set_file_name("projeto.clothevo");
+        if let Some(parent) = self.pattern_saved_path.as_deref().and_then(std::path::Path::parent) {
+            dialog = dialog.set_directory(parent);
+        }
+        if let Some(path) = dialog.save_file() {
+            self.write_pattern_project(path);
+        }
+    }
+
+    fn write_pattern_project(&mut self, mut path: std::path::PathBuf) {
+        if path.extension().is_none() {
+            path.set_extension("clothevo");
+        }
+        let result = self.pattern_project.to_json()
+            .and_then(|json| std::fs::write(&path, json)
+                .map_err(|e| format!("Falha ao salvar {}: {e}", path.display())));
+        match result {
+            Ok(()) => {
+                self.pattern_saved_path = Some(path.clone());
+                self.pattern_dirty = false;
+                self.pattern_message = format!("Projeto salvo: {}", path.display());
+            }
+            Err(error) => self.pattern_message = error,
+        }
+    }
+
+    fn fit_pattern_view(&mut self, rect: egui::Rect) {
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        for piece in &self.pattern_project.pieces {
+            let points = sample_curve(&piece.outline, 16);
+            for p in points {
+                min_x = min_x.min(p.x);
+                min_y = min_y.min(p.y);
+                max_x = max_x.max(p.x);
+                max_y = max_y.max(p.y);
+            }
+        }
+        if !min_x.is_finite() {
             self.pattern_zoom = PATTERN_PIXELS_PER_METER;
             self.pattern_pan = egui::Vec2::ZERO;
+            return;
         }
+        let width = (max_x - min_x).max(0.1) as f32;
+        let height = (max_y - min_y).max(0.1) as f32;
+        let available_width = (rect.width() - 120.0).max(120.0);
+        let available_height = (rect.height() - 120.0).max(120.0);
+        self.pattern_zoom = (available_width / width).min(available_height / height).clamp(40.0, 1800.0);
+        let mid_x = ((min_x + max_x) * 0.5) as f32;
+        let mid_y = ((min_y + max_y) * 0.5) as f32;
+        self.pattern_pan = egui::vec2(-mid_x * self.pattern_zoom, mid_y * self.pattern_zoom);
+    }
+
+    fn duplicate_selected_piece(&mut self) {
+        if self.pattern_project.pieces.is_empty() { return; }
+        let index = self.selected_piece.min(self.pattern_project.pieces.len() - 1);
+        let before = self.editor_snapshot();
+        let Some(mut duplicate) = self.pattern_project.pieces.get(index).cloned() else { return; };
+        let new_id = self.pattern_project.pieces.iter().map(|p| p.id).max().unwrap_or(0) + 1;
+        duplicate.id = new_id;
+        duplicate.name = format!("{} (cópia)", duplicate.name);
+        translate_piece(&mut duplicate, 0.20, 0.20);
+        self.pattern_project.pieces.push(duplicate);
+        self.selected_piece = self.pattern_project.pieces.len() - 1;
+        self.selected_target = Some(PatternEditTarget::Piece { piece: self.selected_piece });
+        self.pattern_message = "Peça duplicada e deslocada em 20 cm; as costuras não foram duplicadas.".into();
+        self.remember_pattern_change(before);
+    }
+
+    fn pattern_controls(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Pattern Studio 0.3");
+        ui.label("Editor 2D · medidas internas em metros");
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.pattern_tool, PatternTool::Draw, "Desenhar");
+            ui.selectable_value(&mut self.pattern_tool, PatternTool::Select, "Selecionar / editar");
+        });
+        ui.horizontal(|ui| {
+            if ui.add_enabled(!self.pattern_undo.is_empty(), egui::Button::new("↶ Desfazer")).clicked() {
+                self.undo_pattern_edit();
+            }
+            if ui.add_enabled(!self.pattern_redo.is_empty(), egui::Button::new("↷ Refazer")).clicked() {
+                self.redo_pattern_edit();
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Novo projeto").clicked() { self.new_pattern_project(); }
+            if ui.button("Abrir…").clicked() { self.open_pattern_project_dialog(); }
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Salvar").clicked() { self.save_pattern_project(); }
+            if ui.button("Salvar como…").clicked() { self.save_pattern_project_as(); }
+        });
+        if self.pattern_dirty {
+            ui.colored_label(egui::Color32::from_rgb(240, 180, 75), "● Modificações não salvas");
+        } else if let Some(path) = &self.pattern_saved_path {
+            ui.weak(format!("Arquivo: {}", path.file_name().unwrap_or_default().to_string_lossy()));
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Desfazer ponto").clicked() {
+                let before = self.editor_snapshot();
+                self.draft_points.pop();
+                self.remember_pattern_change(before);
+            }
+            if ui.button("Limpar rascunho").clicked() {
+                let before = self.editor_snapshot();
+                self.draft_points.clear();
+                self.remember_pattern_change(before);
+            }
+        });
+        ui.checkbox(&mut self.pattern_snap, "Ajustar à grade (1 cm)");
+        ui.horizontal(|ui| {
+            if ui.button("Enquadrar todos os moldes").clicked() {
+                self.pattern_fit_pending = true;
+            }
+            if ui.button("Vista padrão").clicked() {
+                self.pattern_zoom = PATTERN_PIXELS_PER_METER;
+                self.pattern_pan = egui::Vec2::ZERO;
+            }
+        });
         if ui.button("Fechar peça a partir dos pontos").clicked() {
             self.create_piece_from_draft();
         }
         ui.label(format!("Pontos no rascunho: {}", self.draft_points.len()));
         if let Some(target) = self.selected_target {
             ui.label(format!("Selecionado: {}", match target {
+                PatternEditTarget::Piece { .. } => "peça inteira".to_string(),
                 PatternEditTarget::Anchor { index, .. } => format!("vértice {}", index + 1),
                 PatternEditTarget::Control1 { segment, .. } => format!("alça 1 · segmento {}", segment + 1),
                 PatternEditTarget::Control2 { segment, .. } => format!("alça 2 · segmento {}", segment + 1),
@@ -443,32 +677,22 @@ impl ClothEvoApp {
             self.delete_selected_piece();
         }
 
+        if !self.pattern_project.pieces.is_empty() {
+            ui.horizontal(|ui| {
+                if ui.button("Duplicar peça selecionada").clicked() {
+                    self.duplicate_selected_piece();
+                }
+                if ui.button("Excluir peça").clicked() {
+                    self.delete_selected_piece();
+                }
+            });
+        }
+
         ui.separator();
         ui.strong("Malha 2D");
         ui.add(egui::Slider::new(&mut self.pattern_spacing, 0.025..=0.20).text("espaçamento (m)"));
         ui.checkbox(&mut self.pattern_show_mesh, "Mostrar triangulação");
-        if ui.button("Salvar projeto JSON").clicked() {
-            match self.pattern_project.to_json().and_then(|json| {
-                std::fs::write("clothevo-pattern.json", json)
-                    .map_err(|e| format!("Falha ao salvar: {e}"))
-            }) {
-                Ok(()) => self.pattern_message = "Projeto salvo em clothevo-pattern.json.".into(),
-                Err(e) => self.pattern_message = e,
-            }
-        }
-        if ui.button("Abrir projeto JSON").clicked() {
-            match std::fs::read_to_string("clothevo-pattern.json")
-                .map_err(|e| format!("Falha ao abrir arquivo: {e}"))
-                .and_then(|json| PatternProject::from_json(&json))
-            {
-                Ok(project) => {
-                    self.pattern_project = project;
-                    self.draft_points.clear();
-                    self.pattern_message = "Projeto carregado.".into();
-                }
-                Err(e) => self.pattern_message = e,
-            }
-        }
+        ui.label("Os projetos são armazenados em JSON no formato nativo .clothevo.");
 
         ui.separator();
         ui.strong(format!("Peças ({})", self.pattern_project.pieces.len()));
@@ -486,10 +710,14 @@ impl ClothEvoApp {
                         ui.selectable_value(&mut self.selected_piece, index, name);
                     }
                 });
-            ui.add(egui::Slider::new(
+            let allowance_before = self.editor_snapshot();
+            let allowance_response = ui.add(egui::Slider::new(
                 &mut self.pattern_project.pieces[self.selected_piece].seam_allowance_meters,
                 0.0..=0.05,
             ).text("margem (m)"));
+            if allowance_response.changed() {
+                self.remember_pattern_change(allowance_before);
+            }
         }
 
         if self.pattern_project.pieces.len() >= 2 {
@@ -622,7 +850,19 @@ impl ClothEvoApp {
                 }
             }
         }
-        best_edge.map(|(_, target)| target)
+        if let Some((_, target)) = best_edge { return Some(target); }
+
+        let world = PatternPoint2::new(
+            (pointer.x - origin.x) as f64 / scale as f64,
+            (origin.y - pointer.y) as f64 / scale as f64,
+        );
+        for (piece_index, piece) in self.pattern_project.pieces.iter().enumerate().rev() {
+            let polygon = sample_curve(&piece.outline, 16);
+            if point_in_polygon(world, &polygon) {
+                return Some(PatternEditTarget::Piece { piece: piece_index });
+            }
+        }
+        None
     }
 
     fn move_pattern_target(&mut self, target: PatternEditTarget, point: PatternPoint2) {
@@ -641,7 +881,7 @@ impl ClothEvoApp {
                     *control2 = point;
                 }
             }
-            PatternEditTarget::Edge { .. } => {}
+            PatternEditTarget::Piece { .. } | PatternEditTarget::Edge { .. } => {}
         }
     }
 
@@ -652,10 +892,12 @@ impl ClothEvoApp {
         };
         let Some(piece_data) = self.pattern_project.pieces.get(piece) else { return; };
         let id = piece_data.id;
+        let before = self.editor_snapshot();
         match split_project_segment(&mut self.pattern_project, id, segment, t) {
             Ok(new_anchor) => {
                 self.selected_target = Some(PatternEditTarget::Anchor { piece, index: new_anchor });
                 self.pattern_message = "Vértice inserido; a curva mantém sua forma original.".into();
+                self.remember_pattern_change(before);
             }
             Err(e) => self.pattern_message = e,
         }
@@ -668,10 +910,12 @@ impl ClothEvoApp {
         };
         let Some(piece_data) = self.pattern_project.pieces.get(piece) else { return; };
         let id = piece_data.id;
+        let before = self.editor_snapshot();
         match convert_project_segment_to_bezier(&mut self.pattern_project, id, segment) {
             Ok(()) => {
                 self.selected_target = Some(PatternEditTarget::Control1 { piece, segment });
                 self.pattern_message = "Segmento convertido. Arraste as alças roxas para editar a curva.".into();
+                self.remember_pattern_change(before);
             }
             Err(e) => self.pattern_message = e,
         }
@@ -681,11 +925,13 @@ impl ClothEvoApp {
         let Some(PatternEditTarget::Anchor { piece, index }) = self.selected_target else { return; };
         let Some(piece_data) = self.pattern_project.pieces.get(piece) else { return; };
         let id = piece_data.id;
+        let before = self.editor_snapshot();
         match delete_project_anchor(&mut self.pattern_project, id, index) {
             Ok(()) => {
                 self.selected_target = None;
                 self.dragging_target = None;
                 self.pattern_message = "Vértice removido.".into();
+                self.remember_pattern_change(before);
             }
             Err(e) => self.pattern_message = e,
         }
@@ -693,6 +939,7 @@ impl ClothEvoApp {
 
     fn delete_selected_piece(&mut self) {
         if self.pattern_project.pieces.is_empty() { return; }
+        let before = self.editor_snapshot();
         self.selected_piece = self.selected_piece.min(self.pattern_project.pieces.len() - 1);
         let id = self.pattern_project.pieces[self.selected_piece].id;
         self.pattern_project.pieces.remove(self.selected_piece);
@@ -701,6 +948,7 @@ impl ClothEvoApp {
         self.selected_target = None;
         self.dragging_target = None;
         self.pattern_message = "Peça excluída; costuras dependentes também foram removidas.".into();
+        self.remember_pattern_change(before);
     }
 
     fn create_piece_from_draft(&mut self) {
@@ -708,6 +956,7 @@ impl ClothEvoApp {
             self.pattern_message = "Uma peça precisa de pelo menos 3 pontos.".into();
             return;
         }
+        let before = self.editor_snapshot();
         let next_id = self.pattern_project.pieces.iter().map(|piece| piece.id).max().unwrap_or(0) + 1;
         let piece_name = format!("Peça {next_id}");
         match PatternPiece::from_polygon(next_id, piece_name, &self.draft_points) {
@@ -717,7 +966,8 @@ impl ClothEvoApp {
                 self.selected_target = None;
                 self.draft_points.clear();
                 self.pattern_tool = PatternTool::Select;
-                self.pattern_message = "Peça criada. Use Editar para mover vértices e alças Bézier.".into();
+                self.pattern_message = "Peça criada. Use Selecionar/editar para mover a peça, vértices e alças.".into();
+                self.remember_pattern_change(before);
             }
             Err(e) => self.pattern_message = e,
         }
@@ -744,17 +994,23 @@ impl ClothEvoApp {
             b: edge_b,
             ease_meters: self.seam_ease_m,
         };
+        let before = self.editor_snapshot();
         self.pattern_project.seams.push(seam);
         if let Err(e) = self.pattern_project.validate() {
             self.pattern_project.seams.pop();
             self.pattern_message = e;
         } else {
             self.pattern_message = "Costura adicionada ao projeto.".into();
+            self.remember_pattern_change(before);
         }
     }
 
     fn pattern_viewport(&mut self, ui: &mut egui::Ui) {
         let rect = ui.available_rect_before_wrap();
+        if self.pattern_fit_pending {
+            self.fit_pattern_view(rect);
+            self.pattern_fit_pending = false;
+        }
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         let center = rect.center();
@@ -818,7 +1074,8 @@ impl ClothEvoApp {
             let sampled = sample_curve_with_ranges(&piece.outline, 12);
             let points = &sampled.points;
             if points.len() < 3 { continue; }
-            let selected_piece = self.selected_target.map(|t| t.piece()) == Some(piece_index);
+            let selected_piece = self.selected_piece == piece_index
+                || self.selected_target.map(|t| t.piece()) == Some(piece_index);
             let outline_color = if selected_piece {
                 egui::Color32::from_rgb(108, 205, 255)
             } else {
@@ -954,8 +1211,12 @@ impl ClothEvoApp {
                     if let Some(target) = self.selected_target {
                         self.selected_piece = target.piece().min(self.pattern_project.pieces.len().saturating_sub(1));
                         self.dragging_target = if target.is_movable() { Some(target) } else { None };
+                        self.dragging_before = self.dragging_target.map(|_| self.editor_snapshot());
+                        self.drag_last_world = Some(to_world(pointer));
                     } else {
                         self.dragging_target = None;
+                        self.dragging_before = None;
+                        self.drag_last_world = None;
                     }
                 }
             }
@@ -966,11 +1227,31 @@ impl ClothEvoApp {
                         world.x = (world.x * 100.0).round() / 100.0;
                         world.y = (world.y * 100.0).round() / 100.0;
                     }
-                    self.move_pattern_target(target, world);
+                    if let PatternEditTarget::Piece { piece } = target {
+                        if let (Some(previous), Some(piece_data)) = (
+                            self.drag_last_world,
+                            self.pattern_project.pieces.get(piece),
+                        ) {
+                            let id = piece_data.id;
+                            translate_project_piece(
+                                &mut self.pattern_project,
+                                id,
+                                world.x - previous.x,
+                                world.y - previous.y,
+                            );
+                        }
+                    } else {
+                        self.move_pattern_target(target, world);
+                    }
+                    self.drag_last_world = Some(world);
                 }
             }
             if response.drag_stopped_by(egui::PointerButton::Primary) {
+                if let Some(before) = self.dragging_before.take() {
+                    self.remember_pattern_change(before);
+                }
                 self.dragging_target = None;
+                self.drag_last_world = None;
             }
             if response.clicked() && self.dragging_target.is_none() {
                 if let Some(pointer) = response.interact_pointer_pos() {
@@ -981,16 +1262,22 @@ impl ClothEvoApp {
                 }
             }
             if response.hovered() && ui.input(|i| i.key_pressed(egui::Key::Delete)) {
-                self.delete_selected_vertex();
+                match self.selected_target {
+                    Some(PatternEditTarget::Piece { .. }) => self.delete_selected_piece(),
+                    Some(PatternEditTarget::Anchor { .. }) => self.delete_selected_vertex(),
+                    _ => {}
+                }
             }
         } else if response.clicked() {
             if let Some(pos) = response.interact_pointer_pos() {
+                let before = self.editor_snapshot();
                 let mut world = to_world(pos);
                 if self.pattern_snap {
                     world.x = (world.x * 100.0).round() / 100.0;
                     world.y = (world.y * 100.0).round() / 100.0;
                 }
                 self.draft_points.push(world);
+                self.remember_pattern_change(before);
             }
         }
     }
@@ -1167,6 +1454,51 @@ impl ClothEvoApp {
             }
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
+    }
+}
+
+fn translate_curve(curve: &mut Curve2D, dx: f64, dy: f64) {
+    let shift = |p: &mut PatternPoint2| {
+        p.x += dx;
+        p.y += dy;
+    };
+    shift(&mut curve.start);
+    for segment in &mut curve.segments {
+        match segment {
+            CurveSegment::Line { to } => shift(to),
+            CurveSegment::CubicBezier { control1, control2, to } => {
+                shift(control1);
+                shift(control2);
+                shift(to);
+            }
+        }
+    }
+}
+
+fn translate_piece(piece: &mut PatternPiece, dx: f64, dy: f64) {
+    translate_curve(&mut piece.outline, dx, dy);
+    if let Some(curve) = &mut piece.sewing_line { translate_curve(curve, dx, dy); }
+    for curve in &mut piece.internal_lines { translate_curve(curve, dx, dy); }
+    if let Some(grain) = &mut piece.grain_line {
+        grain.start.x += dx; grain.start.y += dy;
+        grain.end.x += dx; grain.end.y += dy;
+    }
+    for dart in &mut piece.darts {
+        dart.apex.x += dx; dart.apex.y += dy;
+        dart.leg_a.x += dx; dart.leg_a.y += dy;
+        dart.leg_b.x += dx; dart.leg_b.y += dy;
+    }
+    for hole in &mut piece.holes {
+        hole.center.x += dx; hole.center.y += dy;
+    }
+    for annotation in &mut piece.annotations {
+        annotation.position.x += dx; annotation.position.y += dy;
+    }
+}
+
+fn translate_project_piece(project: &mut PatternProject, piece_id: u64, dx: f64, dy: f64) {
+    if let Some(piece) = project.pieces.iter_mut().find(|p| p.id == piece_id) {
+        translate_piece(piece, dx, dy);
     }
 }
 
@@ -1423,6 +1755,15 @@ fn sampled_edge_indices(
 
 impl eframe::App for ClothEvoApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.workspace == WorkspaceMode::Pattern {
+            let (undo, redo) = ui.input(|i| (
+                i.modifiers.ctrl && i.key_pressed(egui::Key::Z) && !i.modifiers.shift,
+                (i.modifiers.ctrl && i.key_pressed(egui::Key::Y))
+                    || (i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Z)),
+            ));
+            if undo { self.undo_pattern_edit(); }
+            if redo { self.redo_pattern_edit(); }
+        }
         // Em captura, simula em passos fixos independentemente do tempo real.
         let dt = if self.capture.is_some() { FIXED_DT } else { ui.input(|i| i.stable_dt) };
         let steps_before = self.sim.stats.steps;
@@ -1481,6 +1822,33 @@ mod pattern_editor_tests {
             ease_meters: 0.0,
         });
         project
+    }
+
+    #[test]
+    fn translating_piece_moves_every_curve_point_without_changing_seam_ids() {
+        let mut project = square_project();
+        let before = project.pieces[0].clone();
+        translate_project_piece(&mut project, 1, 2.0, -0.5);
+        let moved = &project.pieces[0];
+        assert_eq!(moved.outline.start, PatternPoint2::new(before.outline.start.x + 2.0, before.outline.start.y - 0.5));
+        assert_eq!(moved.id, before.id);
+        assert_eq!(project.seams[0].a.piece_id, 1);
+        assert!((pattern_geom::curve_length(&moved.outline, 32) - pattern_geom::curve_length(&before.outline, 32)).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn editor_snapshot_compares_project_and_draft_for_history() {
+        let project = square_project();
+        let a = PatternEditorSnapshot {
+            project: project.clone(),
+            draft_points: vec![PatternPoint2::new(0.0, 0.0)],
+            selected_piece: 0,
+            selected_target: None,
+        };
+        let mut b = a.clone();
+        assert_eq!(a, b);
+        b.draft_points.push(PatternPoint2::new(1.0, 0.0));
+        assert_ne!(a, b);
     }
 
     #[test]
