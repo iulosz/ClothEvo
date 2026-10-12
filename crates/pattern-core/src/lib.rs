@@ -2,7 +2,7 @@
 //! Esta crate não depende de UI, renderização, geometria computacional ou física.
 //! As medidas lineares internas são armazenadas em metros.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashSet;
 
 pub type PieceId = u64;
@@ -124,15 +124,104 @@ pub fn polyline_length_meters(points: &[Point2]) -> f64 {
     points.windows(2).map(|pair| pair[0].distance(pair[1])).sum()
 }
 
-/// Duas bordas costuradas. A folga é armazenada em metros; sua aplicação física fica a cargo
-/// do sistema de costura, não do formato de dados.
+/// Parâmetro de uma curva. t pertence ao segmento indexado e está no intervalo [0, 1].
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CurveParam {
+    pub segment: u32,
+    pub t: f64,
+}
+
+/// Caminho parcial ou completo ao longo de uma curva de contorno/linha de costura.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EdgePath {
+    pub piece_id: PieceId,
+    pub curve: BoundaryCurve,
+    pub start: CurveParam,
+    pub end: CurveParam,
+    #[serde(default)]
+    pub reversed: bool,
+}
+
+impl From<EdgeRef> for EdgePath {
+    fn from(edge: EdgeRef) -> Self {
+        Self {
+            piece_id: edge.piece_id,
+            curve: edge.curve,
+            start: CurveParam { segment: edge.segment_start, t: 0.0 },
+            end: CurveParam { segment: edge.segment_end.saturating_sub(1), t: 1.0 },
+            reversed: edge.reversed,
+        }
+    }
+}
+
+impl EdgePath {
+    pub fn from_segments(
+        piece_id: PieceId,
+        curve: BoundaryCurve,
+        segment_start: u32,
+        segment_end: u32,
+        reversed: bool,
+    ) -> Self {
+        EdgeRef { piece_id, curve, segment_start, segment_end, reversed }.into()
+    }
+
+    pub fn start_position(&self) -> f64 { self.start.segment as f64 + self.start.t }
+    pub fn end_position(&self) -> f64 { self.end.segment as f64 + self.end.t }
+
+    pub fn to_edge_ref_if_full_segments(&self) -> Option<EdgeRef> {
+        if self.start.t.abs() > 1.0e-9 || (self.end.t - 1.0).abs() > 1.0e-9 {
+            return None;
+        }
+        Some(EdgeRef {
+            piece_id: self.piece_id,
+            curve: self.curve,
+            segment_start: self.start.segment,
+            segment_end: self.end.segment.checked_add(1)?,
+            reversed: self.reversed,
+        })
+    }
+}
+
+/// Duas bordas costuradas. O desserializador migra o antigo EdgeRef automaticamente.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SeamDefinition {
     pub id: SeamId,
     pub name: String,
-    pub a: EdgeRef,
-    pub b: EdgeRef,
+    pub a: EdgePath,
+    pub b: EdgePath,
     pub ease_meters: f64,
+}
+
+impl<'de> Deserialize<'de> for SeamDefinition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: Deserializer<'de> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum LegacyOrPath {
+            Path(EdgePath),
+            Legacy(EdgeRef),
+        }
+        #[derive(Deserialize)]
+        struct RawSeam {
+            id: SeamId,
+            name: String,
+            a: LegacyOrPath,
+            b: LegacyOrPath,
+            ease_meters: f64,
+        }
+        let raw = RawSeam::deserialize(deserializer)?;
+        let convert = |edge| match edge {
+            LegacyOrPath::Path(path) => path,
+            LegacyOrPath::Legacy(edge) => edge.into(),
+        };
+        Ok(Self {
+            id: raw.id,
+            name: raw.name,
+            a: convert(raw.a),
+            b: convert(raw.b),
+            ease_meters: raw.ease_meters,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -373,41 +462,49 @@ impl PatternProject {
         }
     }
 
-    /// Comprimento aproximado de uma borda, amostrando cada segmento em 32 intervalos.
-    /// A amostragem também contempla curvas Bézier e é compartilhada com a medição do canvas.
-    pub fn edge_length_meters(&self, edge: &EdgeRef) -> Option<f64> {
+    /// Comprimento de arco aproximado do EdgePath. Cada Bézier é amostrada em 24 partes.
+    pub fn edge_length_meters(&self, edge: &EdgePath) -> Option<f64> {
         let piece = self.pieces.iter().find(|piece| piece.id == edge.piece_id)?;
         let curve = match edge.curve {
             BoundaryCurve::Outline => Some(&piece.outline),
             BoundaryCurve::SewingLine => piece.sewing_line.as_ref(),
         }?;
-        let start = edge.segment_start as usize;
-        let end = (edge.segment_end as usize).min(curve.segments.len());
-        if start >= end { return Some(0.0); }
+        let scalar_start = edge.start_position();
+        let scalar_end = edge.end_position();
+        if !scalar_start.is_finite() || !scalar_end.is_finite() || scalar_end <= scalar_start {
+            return Some(0.0);
+        }
+        let first = edge.start.segment as usize;
+        let last = edge.end.segment as usize;
+        if last >= curve.segments.len() { return None; }
 
-        let mut points = Vec::with_capacity((end - start) * 24 + 1);
-        points.push(if start == 0 { curve.start } else { curve.segments[start - 1].endpoint() });
-        for index in start..end {
-            let segment_start = if index == 0 { curve.start } else { curve.segments[index - 1].endpoint() };
+        let mut points = Vec::new();
+        for index in first..=last {
+            let t0 = if index == first { edge.start.t.clamp(0.0, 1.0) } else { 0.0 };
+            let t1 = if index == last { edge.end.t.clamp(0.0, 1.0) } else { 1.0 };
+            if t1 < t0 { return Some(0.0); }
+            let p0 = if index == 0 { curve.start } else { curve.segments[index - 1].endpoint() };
             let segment = &curve.segments[index];
+            let eval = |t: f64| match segment {
+                CurveSegment::Line { to } => Point2::new(
+                    p0.x + (to.x - p0.x) * t,
+                    p0.y + (to.y - p0.y) * t,
+                ),
+                CurveSegment::CubicBezier { control1, control2, to } => {
+                    let u = 1.0 - t;
+                    Point2::new(
+                        u*u*u*p0.x + 3.0*u*u*t*control1.x + 3.0*u*t*t*control2.x + t*t*t*to.x,
+                        u*u*u*p0.y + 3.0*u*u*t*control1.y + 3.0*u*t*t*control2.y + t*t*t*to.y,
+                    )
+                }
+            };
+            if points.is_empty() { points.push(eval(t0)); }
             for step in 1..=24 {
-                let t = step as f64 / 24.0;
-                let point = match segment {
-                    CurveSegment::Line { to } => Point2::new(
-                        segment_start.x + (to.x - segment_start.x) * t,
-                        segment_start.y + (to.y - segment_start.y) * t,
-                    ),
-                    CurveSegment::CubicBezier { control1, control2, to } => {
-                        let u = 1.0 - t;
-                        Point2::new(
-                            u*u*u*segment_start.x + 3.0*u*u*t*control1.x + 3.0*u*t*t*control2.x + t*t*t*to.x,
-                            u*u*u*segment_start.y + 3.0*u*u*t*control1.y + 3.0*u*t*t*control2.y + t*t*t*to.y,
-                        )
-                    }
-                };
-                points.push(point);
+                let t = t0 + (t1 - t0) * step as f64 / 24.0;
+                points.push(eval(t));
             }
         }
+        if edge.reversed { points.reverse(); }
         Some(polyline_length_meters(&points))
     }
 
@@ -545,7 +642,7 @@ impl PatternProject {
         }
 
         let mut seam_ids = HashSet::new();
-        let mut occupied_segments: HashSet<(PieceId, BoundaryCurve, u32)> = HashSet::new();
+        let mut occupied_paths: Vec<(PieceId, BoundaryCurve, f64, f64, SeamId)> = Vec::new();
         for seam in &self.seams {
             if !seam_ids.insert(seam.id) {
                 return Err(format!("ID de costura duplicado: {}.", seam.id));
@@ -561,8 +658,11 @@ impl PatternProject {
                     BoundaryCurve::Outline => Some(&piece.outline),
                     BoundaryCurve::SewingLine => piece.sewing_line.as_ref(),
                 }.ok_or_else(|| format!("A costura '{}' referencia uma linha de costura inexistente.", seam.name))?;
-                if edge.segment_start >= edge.segment_end
-                    || edge.segment_end as usize > curve.segments.len()
+                if !edge.start.t.is_finite() || !edge.end.t.is_finite()
+                    || !(0.0..=1.0).contains(&edge.start.t) || !(0.0..=1.0).contains(&edge.end.t)
+                    || edge.start.segment as usize >= curve.segments.len()
+                    || edge.end.segment as usize >= curve.segments.len()
+                    || edge.start_position() >= edge.end_position()
                 {
                     return Err(format!("Intervalo de borda inválido na costura '{}'.", seam.name));
                 }
@@ -571,7 +671,8 @@ impl PatternProject {
             let a = edges[0];
             let b = edges[1];
             if a.piece_id == b.piece_id && a.curve == b.curve
-                && a.segment_start < b.segment_end && b.segment_start < a.segment_end
+                && a.start_position() < b.end_position()
+                && b.start_position() < a.end_position()
             {
                 return Err(format!(
                     "A e B da costura '{}' apontam para segmentos sobrepostos da mesma peça.",
@@ -580,14 +681,18 @@ impl PatternProject {
             }
 
             for edge in edges {
-                for segment in edge.segment_start..edge.segment_end {
-                    if !occupied_segments.insert((edge.piece_id, edge.curve, segment)) {
-                        return Err(format!(
-                            "A borda da peça {} (segmento {}) já está vinculada a outra costura; remova a sobreposição antes de continuar.",
-                            edge.piece_id, segment + 1
-                        ));
-                    }
+                let start = edge.start_position();
+                let end = edge.end_position();
+                if let Some((_, _, _, _, previous)) = occupied_paths.iter().find(|(piece_id, curve, lo, hi, _)| {
+                    *piece_id == edge.piece_id && *curve == edge.curve
+                        && start < *hi - 1.0e-9 && *lo < end - 1.0e-9
+                }) {
+                    return Err(format!(
+                        "A borda da peça {} já está vinculada à costura {}; remova a sobreposição antes de continuar.",
+                        edge.piece_id, previous
+                    ));
                 }
+                occupied_paths.push((edge.piece_id, edge.curve, start, end, seam.id));
             }
         }
         Ok(())
