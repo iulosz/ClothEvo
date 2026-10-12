@@ -4698,10 +4698,10 @@ mod pattern_editor_tests {
         let after = pattern_geom::curve_length(&project.pieces[0].outline, 32);
         assert!((before - after).abs() < 1.0e-6);
         assert_eq!(project.pieces[0].outline.segments.len(), 5);
-        assert_eq!(project.seams[0].a.start.segment, 1);
-        assert_eq!(project.seams[0].a.end.segment, 2);
-        assert_eq!(project.seams[0].b.start.segment, 3);
-        assert_eq!(project.seams[0].b.end.segment, 3);
+        assert_eq!(project.seams[0].sides_a[0].start.segment, 1);
+        assert_eq!(project.seams[0].sides_a[0].end.segment, 2);
+        assert_eq!(project.seams[0].sides_b[0].start.segment, 3);
+        assert_eq!(project.seams[0].sides_b[0].end.segment, 3);
         project.validate().unwrap();
     }
 
@@ -4710,8 +4710,8 @@ mod pattern_editor_tests {
         let mut project = square_project();
         delete_project_anchor(&mut project, 1, 1).unwrap();
         assert_eq!(project.pieces[0].outline.segments.len(), 3);
-        assert_eq!(project.seams[0].a.start.segment, 0);
-        assert_eq!(project.seams[0].a.end.segment, 0);
+        assert_eq!(project.seams[0].sides_a[0].start.segment, 0);
+        assert_eq!(project.seams[0].sides_a[0].end.segment, 0);
         project.validate().unwrap();
     }
 
@@ -4721,8 +4721,8 @@ mod pattern_editor_tests {
         convert_project_segment_to_bezier(&mut project, 1, 1).unwrap();
         let segment = &project.pieces[0].outline.segments[1];
         assert!(matches!(segment, CurveSegment::CubicBezier { .. }));
-        assert_eq!(project.seams[0].a.start.segment, 1);
-        assert_eq!(project.seams[0].a.end.segment, 1);
+        assert_eq!(project.seams[0].sides_a[0].start.segment, 1);
+        assert_eq!(project.seams[0].sides_a[0].end.segment, 1);
         assert!((pattern_geom::curve_length(&project.pieces[0].outline, 64) - 4.0).abs() < 1.0e-4);
         project.validate().unwrap();
     }
