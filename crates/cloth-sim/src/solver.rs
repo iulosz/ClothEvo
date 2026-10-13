@@ -486,27 +486,41 @@ impl Simulation {
             let thickness = self.params.thickness * self.thickness_scale[i].max(1.0e-4);
             let mut p = self.pos[i];
             let mut q = self.prev[i];
-            for c in &self.colliders {
-                let d = c.sdf(p) - thickness;
-                if d < 0.0 {
-                    let n = c.normal(p);
-                    p -= n * d; // empurra para fora
 
-                    // A projeção de uma penetração é uma correção geométrica, não um impulso.
-                    // Ajusta a posição anterior na direção normal para não converter uma correção
-                    // grande (por exemplo, no primeiro frame) em velocidade artificial explosiva.
-                    let normal_delta = (p - q).dot(n);
-                    q += n * normal_delta;
+            // Colisores se sobrepõem nas juntas (ombro/braço, pelve/coxa). Sair de um
+            // pode levar a partícula para dentro de outro que já foi processado; repetir
+            // a passada estabiliza essas junções sem um custo grande por partícula.
+            for _pass in 0..3 {
+                let mut touched = false;
+                for collider in &self.colliders {
+                    let d = collider.sdf(p) - thickness;
+                    if d < 0.0 {
+                        touched = true;
+                        let n = collider.normal(p);
+                        p -= n * d; // empurra para fora
 
-                    // Atrito de Coulomb em posição: limita o deslocamento tangencial por μ·penetração.
-                    let dx = p - q;
-                    let t = dx - n * dx.dot(n);
-                    let tl = t.length();
-                    if tl > 1e-9 {
-                        let max_friction = mu * (-d);
-                        let friction_scale = if tl <= max_friction { 1.0 } else { max_friction / tl };
-                        p -= t * friction_scale;
+                        // A projeção geométrica não deve converter a correção numa velocidade
+                        // artificial explosiva. Ajusta a posição anterior na direção normal.
+                        let normal_delta = (p - q).dot(n);
+                        q += n * normal_delta;
+
+                        // Atrito de Coulomb em posição.
+                        let dx = p - q;
+                        let tangent = dx - n * dx.dot(n);
+                        let tangent_length = tangent.length();
+                        if tangent_length > 1e-9 {
+                            let max_friction = mu * (-d);
+                            let friction_scale = if tangent_length <= max_friction {
+                                1.0
+                            } else {
+                                max_friction / tangent_length
+                            };
+                            p -= tangent * friction_scale;
+                        }
                     }
+                }
+                if !touched {
+                    break;
                 }
             }
             self.pos[i] = p;
