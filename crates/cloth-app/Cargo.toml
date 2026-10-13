@@ -20,3 +20,4 @@ glam = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "x11", "wayland"] }
 rfd = "0.17.2"
+ufbx = "0.11.5"
