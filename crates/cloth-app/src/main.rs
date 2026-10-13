@@ -4020,6 +4020,8 @@ impl ClothEvoApp {
                         for pair in screen_path.windows(2) {
                             painter.line_segment([pair[0], pair[1]], egui::Stroke::new(3.0, color));
                         }
+                        // Direction arrows make a reversed/twisted edge visible before simulation.
+                        draw_path_direction_arrow(&painter, &screen_path, color);
                         if path_index != index { continue; }
                         if let Some(curve) = edge_curve(&self.pattern_project, edge) {
                             for (is_start, param) in [(true, edge.start), (false, edge.end)] {
@@ -4039,8 +4041,8 @@ impl ClothEvoApp {
 
                 // Correspondência visual aproximada por progresso do arco acumulado.
                 if self.seam_canvas_pick_used && !sides[0].is_empty() && !sides[1].is_empty() {
-                    for step in 0..=6 {
-                        let progress = step as f32 / 6.0;
+                    for step in 0..=4 {
+                        let progress = step as f32 / 4.0;
                         if let (Some(point_a), Some(point_b)) = (
                             point_on_edge_chain_at_progress(&self.pattern_project, &sides[0], progress),
                             point_on_edge_chain_at_progress(&self.pattern_project, &sides[1], progress),
@@ -4053,6 +4055,24 @@ impl ClothEvoApp {
                             );
                             painter.circle_filled(screen_a, 2.5, egui::Color32::from_rgb(255, 235, 185));
                             painter.circle_filled(screen_b, 2.5, egui::Color32::from_rgb(170, 250, 240));
+                        }
+                    }
+                    // Piquer correspondences are stronger anchors than uniform arc progress.
+                    for (progress_a, progress_b) in paired_chain_notch_markers(
+                        &self.pattern_project, &sides[0], &sides[1],
+                    ) {
+                        if let (Some(point_a), Some(point_b)) = (
+                            point_on_edge_chain_at_progress(&self.pattern_project, &sides[0], progress_a),
+                            point_on_edge_chain_at_progress(&self.pattern_project, &sides[1], progress_b),
+                        ) {
+                            let screen_a = to_screen(point_a);
+                            let screen_b = to_screen(point_b);
+                            painter.line_segment(
+                                [screen_a, screen_b],
+                                egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 145, 92)),
+                            );
+                            painter.circle_filled(screen_a, 4.0, egui::Color32::from_rgb(255, 145, 92));
+                            painter.circle_filled(screen_b, 4.0, egui::Color32::from_rgb(255, 145, 92));
                         }
                     }
                 }
