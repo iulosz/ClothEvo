@@ -141,6 +141,12 @@ struct ClothEvoApp {
     seam_ease_m: f64,
     seam_name: String,
     selected_seam_id: Option<u64>,
+    /// Atalho contextual: Shift + botão esquerdo para criar uma costura entre duas bordas.
+    direct_sewing_mode: bool,
+    direct_sewing_start: Option<(usize, usize)>,
+    direct_sewing_press_edge: Option<(usize, usize)>,
+    direct_sewing_preview: Option<(usize, usize)>,
+    direct_sewing_dragging: bool,
     notch_segment: usize,
     notch_t: f64,
     notch_depth_m: f64,
@@ -249,6 +255,11 @@ impl ClothEvoApp {
             seam_ease_m: 0.0,
             seam_name: String::new(),
             selected_seam_id: None,
+            direct_sewing_mode: false,
+            direct_sewing_start: None,
+            direct_sewing_press_edge: None,
+            direct_sewing_preview: None,
+            direct_sewing_dragging: false,
             notch_segment: 0,
             notch_t: 0.5,
             notch_depth_m: 0.008,
@@ -979,9 +990,53 @@ impl ClothEvoApp {
             });
         }
 
+        ui.separator();
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.strong("Costura direta");
+                if ui.selectable_label(
+                    self.direct_sewing_mode,
+                    if self.direct_sewing_mode { "✓ Ativa" } else { "Ativar" },
+                ).clicked() {
+                    self.direct_sewing_mode = !self.direct_sewing_mode;
+                    self.direct_sewing_start = None;
+                    self.direct_sewing_press_edge = None;
+                    self.direct_sewing_preview = None;
+                    self.direct_sewing_dragging = false;
+                    self.pattern_message = if self.direct_sewing_mode {
+                        "Costura direta ativa. Use Shift + botão esquerdo em duas bordas de peças diferentes.".into()
+                    } else {
+                        "Modo de costura direta desativado.".into()
+                    };
+                }
+            });
+
+            if self.direct_sewing_mode {
+                ui.colored_label(
+                    egui::Color32::from_rgb(100, 225, 190),
+                    "ATIVA · Shift + LMB: selecione ou arraste entre duas bordas",
+                );
+            } else {
+                ui.weak("Ative para unir bordas diretamente na viewport.");
+            }
+
+            if let Some((piece_index, segment)) = self.direct_sewing_start {
+                if let Some(piece) = self.pattern_project.pieces.get(piece_index) {
+                    ui.label(format!("Borda A: {} · segmento {}", piece.name, segment + 1));
+                    ui.small("Clique ou arraste até uma borda de outra peça. Esc cancela.");
+                }
+            } else {
+                ui.label("Selecione a primeira borda e depois a segunda.");
+            }
+            ui.label(format!("{} costura(s) no projeto", self.pattern_project.seams.len()));
+
+            if self.pattern_project.pieces.len() < 2 {
+                ui.weak("Crie pelo menos duas peças para costurá-las.");
+            }
+        });
+
         if self.pattern_project.pieces.len() >= 2 {
-            ui.separator();
-            ui.strong("Sistema avançado de costura");
+            ui.collapsing("Ajustes avançados", |ui| {
 
             let mut requested_seam = self.selected_seam_id;
             egui::ComboBox::from_id_salt("selected_seam")
@@ -1180,9 +1235,9 @@ impl ClothEvoApp {
                 }
             });
             ui.label(format!("Costuras no projeto: {}", self.pattern_project.seams.len()));
-        } else {
-            ui.weak("Crie ao menos duas peças para configurar uma costura.");
+            });
         }
+
 
         if !self.pattern_project.pieces.is_empty() {
             ui.separator();
@@ -1276,6 +1331,40 @@ impl ClothEvoApp {
         }
         ui.separator();
         ui.weak("Canvas: clique para adicionar pontos; as peças fechadas aparecem com contorno azul.");
+    }
+
+    fn hit_test_sewing_edge(&self, pointer: egui::Pos2, center: egui::Pos2) -> Option<(usize, usize)> {
+        let origin = center + self.pattern_pan;
+        let scale = self.pattern_zoom.max(1.0);
+        let to_screen = |p: PatternPoint2| {
+            egui::pos2(origin.x + p.x as f32 * scale, origin.y - p.y as f32 * scale)
+        };
+        let mut best: Option<(f32, usize, usize)> = None;
+
+        for (piece_index, piece) in self.pattern_project.pieces.iter().enumerate() {
+            let sampled = sample_curve_with_ranges(&piece.outline, 16);
+            let count = sampled.points.len();
+            if count < 2 { continue; }
+            for (segment_index, &(start, end)) in sampled.segment_vertex_ranges.iter().enumerate() {
+                if count == 0 { continue; }
+                let sample_count = if end >= start { end - start } else { count - start };
+                for step in 0..sample_count {
+                    let ia = (start + step) % count;
+                    let ib = (ia + 1) % count;
+                    let (distance, _) = closest_segment_parameter(
+                        pointer,
+                        to_screen(sampled.points[ia]),
+                        to_screen(sampled.points[ib]),
+                    );
+                    if distance <= 10.0
+                        && best.map(|candidate| distance < candidate.0).unwrap_or(true)
+                    {
+                        best = Some((distance, piece_index, segment_index));
+                    }
+                }
+            }
+        }
+        best.map(|(_, piece, segment)| (piece, segment))
     }
 
     fn hit_test_pattern(&self, pointer: egui::Pos2, center: egui::Pos2) -> Option<PatternEditTarget> {
@@ -2072,6 +2161,77 @@ impl ClothEvoApp {
         self.remember_pattern_change(before);
     }
 
+    /// Cria uma costura de um único segmento por borda, preservando a validação transacional.
+    fn add_direct_seam(&mut self, a: (usize, usize), b: (usize, usize)) -> bool {
+        if a.0 == b.0 {
+            self.pattern_message = "Escolha bordas de duas peças diferentes.".into();
+            return false;
+        }
+        let Some(piece_a) = self.pattern_project.pieces.get(a.0) else {
+            self.pattern_message = "A primeira peça da costura não existe mais.".into();
+            return false;
+        };
+        let Some(piece_b) = self.pattern_project.pieces.get(b.0) else {
+            self.pattern_message = "A segunda peça da costura não existe mais.".into();
+            return false;
+        };
+        if a.1 >= piece_a.outline.segment_count() || b.1 >= piece_b.outline.segment_count() {
+            self.pattern_message = "A borda selecionada não é mais válida.".into();
+            return false;
+        }
+
+        let edge_a = EdgeRef {
+            piece_id: piece_a.id,
+            curve: BoundaryCurve::Outline,
+            segment_start: a.1 as u32,
+            segment_end: (a.1 + 1) as u32,
+            reversed: false,
+        };
+        let edge_b = EdgeRef {
+            piece_id: piece_b.id,
+            curve: BoundaryCurve::Outline,
+            segment_start: b.1 as u32,
+            segment_end: (b.1 + 1) as u32,
+            reversed: false,
+        };
+        let next_id = self.pattern_project.seams.iter()
+            .map(|seam| seam.id).max().unwrap_or(0) + 1;
+        let name = format!("Costura {next_id}");
+        let seam = SeamDefinition {
+            id: next_id,
+            name: name.clone(),
+            a: edge_a,
+            b: edge_b,
+            ease_meters: 0.0,
+        };
+
+        let before = self.editor_snapshot();
+        let mut staged = self.pattern_project.clone();
+        staged.seams.push(seam);
+        if let Err(error) = staged.validate() {
+            self.pattern_message = format!("Costura não criada: {error}");
+            return false;
+        }
+
+        self.pattern_project = staged;
+        self.selected_seam_id = Some(next_id);
+        self.seam_a_piece = a.0;
+        self.seam_b_piece = b.0;
+        self.seam_a_segment = a.1;
+        self.seam_a_segment_end = a.1 + 1;
+        self.seam_b_segment = b.1;
+        self.seam_b_segment_end = b.1 + 1;
+        self.seam_a_reversed = false;
+        self.seam_b_reversed = false;
+        self.seam_ease_m = 0.0;
+        self.seam_name = name.clone();
+        self.pattern_message = format!(
+            "{name} criada. A e B foram vinculadas e a costura entrou no histórico de edição."
+        );
+        self.remember_pattern_change(before);
+        true
+    }
+
     fn update_selected_seam_from_controls(&mut self) {
         let Some(id) = self.selected_seam_id else {
             self.add_seam_from_controls();
@@ -2230,7 +2390,15 @@ impl ClothEvoApp {
             egui::Color32::from_rgb(198, 153, 108),
         );
 
-        let tool_label = if self.pattern_tool == PatternTool::Draw {
+        let tool_label = if self.direct_sewing_mode {
+            if shift_down {
+                "COSTURA DIRETA · Shift + LMB · arraste até outra borda"
+            } else if self.direct_sewing_start.is_some() {
+                "COSTURA DIRETA · borda A selecionada · Shift + clique na borda B"
+            } else {
+                "COSTURA DIRETA ATIVA · Shift + clique/arraste entre duas bordas"
+            }
+        } else if self.pattern_tool == PatternTool::Draw {
             "DESENHAR · clique para adicionar pontos"
         } else {
             "EDITAR · arraste vértices/alças · botão direito/meio move a vista"
@@ -2479,6 +2647,78 @@ impl ClothEvoApp {
             }
         }
 
+        if let Some((piece_index, segment)) = self.direct_sewing_start {
+            if let Some(piece) = self.pattern_project.pieces.get(piece_index) {
+                let edge = EdgeRef {
+                    piece_id: piece.id,
+                    curve: BoundaryCurve::Outline,
+                    segment_start: segment as u32,
+                    segment_end: (segment + 1) as u32,
+                    reversed: false,
+                };
+                let path = edge_path_points(&self.pattern_project, &edge, 16);
+                for pair in path.windows(2) {
+                    painter.line_segment(
+                        [to_screen(pair[0]), to_screen(pair[1])],
+                        egui::Stroke::new(5.0, egui::Color32::from_rgb(65, 210, 245)),
+                    );
+                }
+                if let Some(mid) = path.get(path.len() / 2) {
+                    painter.text(
+                        to_screen(*mid),
+                        egui::Align2::CENTER_BOTTOM,
+                        "A",
+                        egui::FontId::proportional(13.0),
+                        egui::Color32::from_rgb(95, 225, 255),
+                    );
+                    if self.direct_sewing_mode && shift_down && response.hovered() {
+                        if let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) {
+                            painter.line_segment(
+                                [to_screen(*mid), pointer],
+                                egui::Stroke::new(2.0, egui::Color32::from_rgb(95, 225, 255)),
+                            );
+                            if let Some((target_piece, target_segment)) =
+                                self.hit_test_sewing_edge(pointer, center)
+                            {
+                                if target_piece != piece_index {
+                                    if let Some(target) = self.pattern_project.pieces.get(target_piece) {
+                                        let target_edge = EdgeRef {
+                                            piece_id: target.id,
+                                            curve: BoundaryCurve::Outline,
+                                            segment_start: target_segment as u32,
+                                            segment_end: (target_segment + 1) as u32,
+                                            reversed: false,
+                                        };
+                                        let target_path = edge_path_points(
+                                            &self.pattern_project, &target_edge, 16
+                                        );
+                                        for pair in target_path.windows(2) {
+                                            painter.line_segment(
+                                                [to_screen(pair[0]), to_screen(pair[1])],
+                                                egui::Stroke::new(
+                                                    5.0,
+                                                    egui::Color32::from_rgb(105, 235, 155),
+                                                ),
+                                            );
+                                        }
+                                        if let Some(target_mid) = target_path.get(target_path.len() / 2) {
+                                            painter.text(
+                                                to_screen(*target_mid),
+                                                egui::Align2::CENTER_BOTTOM,
+                                                "B",
+                                                egui::FontId::proportional(13.0),
+                                                egui::Color32::from_rgb(105, 235, 155),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if self.draft_points.len() >= 2 {
             let polyline = self.draft_points.iter().copied().map(to_screen).collect::<Vec<_>>();
             painter.add(egui::Shape::line(
@@ -2507,7 +2747,98 @@ impl ClothEvoApp {
             }
         }
 
-        if self.pattern_tool == PatternTool::Select {
+        let (primary_pressed, primary_down, escape_pressed) = ui.input(|i| (
+            i.pointer.button_pressed(egui::PointerButton::Primary),
+            i.pointer.button_down(egui::PointerButton::Primary),
+            i.key_pressed(egui::Key::Escape),
+        ));
+        if escape_pressed && (
+            self.direct_sewing_mode
+                || self.direct_sewing_start.is_some()
+                || self.direct_sewing_dragging
+        ) {
+            self.direct_sewing_mode = false;
+            self.direct_sewing_start = None;
+            self.direct_sewing_press_edge = None;
+            self.direct_sewing_preview = None;
+            self.direct_sewing_dragging = false;
+            self.pattern_message = "Costura direta cancelada.".into();
+        }
+
+        let direct_interaction = self.direct_sewing_mode
+            && (shift_down || self.direct_sewing_dragging);
+        if direct_interaction {
+            if primary_pressed && shift_down {
+                self.direct_sewing_press_edge = response.interact_pointer_pos()
+                    .and_then(|pointer| self.hit_test_sewing_edge(pointer, center));
+                self.direct_sewing_preview = None;
+            }
+
+            if response.dragged_by(egui::PointerButton::Primary)
+                && (shift_down || self.direct_sewing_press_edge.is_some())
+                && primary_down
+            {
+                if !self.direct_sewing_dragging {
+                    self.direct_sewing_dragging = true;
+                    if self.direct_sewing_start.is_none() {
+                        self.direct_sewing_start = self.direct_sewing_press_edge;
+                        if self.direct_sewing_start.is_some() {
+                            self.pattern_message = "Borda A selecionada; arraste até uma borda de outra peça.".into();
+                        }
+                    }
+                }
+                self.direct_sewing_preview = response.interact_pointer_pos()
+                    .and_then(|pointer| self.hit_test_sewing_edge(pointer, center));
+            }
+
+            if response.drag_stopped_by(egui::PointerButton::Primary) && self.direct_sewing_dragging {
+                let start = self.direct_sewing_start;
+                let end = self.direct_sewing_preview.or_else(|| {
+                    response.interact_pointer_pos()
+                        .and_then(|pointer| self.hit_test_sewing_edge(pointer, center))
+                });
+                if let (Some(a), Some(b)) = (start, end) {
+                    if a != b && self.add_direct_seam(a, b) {
+                        self.direct_sewing_start = None;
+                    } else if a.0 == b.0 {
+                        self.pattern_message = "A segunda borda precisa pertencer a outra peça.".into();
+                    }
+                } else if start.is_some() {
+                    self.pattern_message = "Borda A mantida. Solte sobre uma borda válida de outra peça.".into();
+                }
+                self.direct_sewing_dragging = false;
+                self.direct_sewing_press_edge = None;
+                self.direct_sewing_preview = None;
+            }
+
+            if response.clicked() && !self.direct_sewing_dragging {
+                let clicked_edge = self.direct_sewing_press_edge.or_else(|| {
+                    response.interact_pointer_pos()
+                        .and_then(|pointer| self.hit_test_sewing_edge(pointer, center))
+                });
+                if let Some(edge) = clicked_edge {
+                    if let Some(start) = self.direct_sewing_start {
+                        if start != edge && self.add_direct_seam(start, edge) {
+                            self.direct_sewing_start = None;
+                            self.direct_sewing_preview = None;
+                        } else if start.0 == edge.0 {
+                            self.pattern_message = "Escolha uma borda de outra peça.".into();
+                        }
+                    } else {
+                        self.direct_sewing_start = Some(edge);
+                        let piece_name = self.pattern_project.pieces.get(edge.0)
+                            .map(|piece| piece.name.as_str()).unwrap_or("Peça");
+                        self.pattern_message = format!(
+                            "Borda A selecionada: {piece_name}, segmento {}. Selecione a borda B.",
+                            edge.1 + 1
+                        );
+                    }
+                } else {
+                    self.pattern_message = "Clique diretamente sobre uma aresta do contorno.".into();
+                }
+                self.direct_sewing_press_edge = None;
+            }
+        } else if self.pattern_tool == PatternTool::Select {
             if response.drag_started_by(egui::PointerButton::Primary) {
                 if let Some(pointer) = response.interact_pointer_pos() {
                     self.selected_target = self.hit_test_pattern(pointer, center);
