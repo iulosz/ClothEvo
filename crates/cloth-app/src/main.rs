@@ -2390,14 +2390,16 @@ impl ClothEvoApp {
             egui::Color32::from_rgb(198, 153, 108),
         );
 
-        let tool_label = if self.direct_sewing_mode {
+        let tool_label = if self.direct_sewing_mode || shift_down {
             if shift_down {
                 "COSTURA DIRETA · Shift + LMB · arraste até outra borda"
             } else if self.direct_sewing_start.is_some() {
-                "COSTURA DIRETA · borda A selecionada · Shift + clique na borda B"
+                "COSTURA DIRETA · borda A selecionada · clique na borda B"
             } else {
-                "COSTURA DIRETA ATIVA · Shift + clique/arraste entre duas bordas"
+                "COSTURA DIRETA ATIVA · clique/arraste entre duas bordas"
             }
+        } else if self.direct_sewing_start.is_some() {
+            "COSTURA DIRETA · borda A selecionada · Shift + clique na borda B"
         } else if self.pattern_tool == PatternTool::Draw {
             "DESENHAR · clique para adicionar pontos"
         } else {
@@ -2671,7 +2673,7 @@ impl ClothEvoApp {
                         egui::FontId::proportional(13.0),
                         egui::Color32::from_rgb(95, 225, 255),
                     );
-                    if self.direct_sewing_mode && shift_down && response.hovered() {
+                    if (self.direct_sewing_mode || shift_down) && response.hovered() {
                         if let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) {
                             painter.line_segment(
                                 [to_screen(*mid), pointer],
@@ -2747,9 +2749,8 @@ impl ClothEvoApp {
             }
         }
 
-        let (primary_pressed, primary_down, escape_pressed) = ui.input(|i| (
+        let (primary_pressed, escape_pressed) = ui.input(|i| (
             i.pointer.button_pressed(egui::PointerButton::Primary),
-            i.pointer.button_down(egui::PointerButton::Primary),
             i.key_pressed(egui::Key::Escape),
         ));
         if escape_pressed && (
@@ -2765,18 +2766,17 @@ impl ClothEvoApp {
             self.pattern_message = "Costura direta cancelada.".into();
         }
 
-        let direct_interaction = self.direct_sewing_mode
-            && (shift_down || self.direct_sewing_dragging);
+        // Shift+LMB sempre ativa o atalho; o botão do painel deixa a ferramenta em modo persistente.
+        let direct_interaction = shift_down || self.direct_sewing_mode || self.direct_sewing_dragging;
         if direct_interaction {
-            if primary_pressed && shift_down {
+            if primary_pressed && (shift_down || self.direct_sewing_mode) {
                 self.direct_sewing_press_edge = response.interact_pointer_pos()
                     .and_then(|pointer| self.hit_test_sewing_edge(pointer, center));
                 self.direct_sewing_preview = None;
             }
 
             if response.dragged_by(egui::PointerButton::Primary)
-                && (shift_down || self.direct_sewing_press_edge.is_some())
-                && primary_down
+                && (shift_down || self.direct_sewing_mode || self.direct_sewing_press_edge.is_some())
             {
                 if !self.direct_sewing_dragging {
                     self.direct_sewing_dragging = true;
@@ -2793,10 +2793,10 @@ impl ClothEvoApp {
 
             if response.drag_stopped_by(egui::PointerButton::Primary) && self.direct_sewing_dragging {
                 let start = self.direct_sewing_start;
-                let end = self.direct_sewing_preview.or_else(|| {
-                    response.interact_pointer_pos()
-                        .and_then(|pointer| self.hit_test_sewing_edge(pointer, center))
-                });
+                // Usa a posição final real; não costura numa borda antiga só porque ela foi
+                // o último alvo válido durante o arraste.
+                let end = response.interact_pointer_pos()
+                    .and_then(|pointer| self.hit_test_sewing_edge(pointer, center));
                 if let (Some(a), Some(b)) = (start, end) {
                     if a != b && self.add_direct_seam(a, b) {
                         self.direct_sewing_start = None;
