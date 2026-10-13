@@ -504,6 +504,7 @@ struct ClothEvoApp {
     gizmo_mode: GizmoMode,
     avatar_guide_texture: Option<egui::TextureHandle>,
     show_avatar_guide: bool,
+    avatar_guide_backdrop: f32,
     /// Mesh visual do avatar importado; os colisores físicos permanecem analíticos.
     avatar_mesh: Option<StaticMeshData>,
     /// Campo de colisão estático gerado da própria geometria importada.
@@ -656,6 +657,7 @@ impl ClothEvoApp {
             gizmo_mode: GizmoMode::Move,
             avatar_guide_texture: None,
             show_avatar_guide: true,
+            avatar_guide_backdrop: 0.25,
             avatar_mesh: None,
             avatar_sdf: None,
             avatar_mesh_name: None,
@@ -937,7 +939,9 @@ impl ClothEvoApp {
 
         // ----- Tecido
         ui.separator();
-        ui.strong("Tecido");
+        egui::CollapsingHeader::new(egui::RichText::new("Tecido").strong())
+            .default_open(true)
+            .show(ui, |ui| {
         egui::ComboBox::from_id_salt("preset")
             .selected_text(self.preset.name())
             .width(240.0)
@@ -950,30 +954,46 @@ impl ClothEvoApp {
                 }
             });
         let p = &mut self.sim.params;
-        ui.add(egui::Slider::new(&mut p.density, 0.02..=1.0).logarithmic(true).text("densidade kg/m²"));
-        ui.add(egui::Slider::new(&mut p.stretch_warp, 50.0..=100_000.0).logarithmic(true).text("stretch urdume N/m"));
-        ui.add(egui::Slider::new(&mut p.stretch_weft, 50.0..=100_000.0).logarithmic(true).text("stretch trama N/m"));
-        ui.add(egui::Slider::new(&mut p.shear, 5.0..=20_000.0).logarithmic(true).text("cisalhamento N/m"));
-        ui.add(egui::Slider::new(&mut p.bend, 1e-7..=1e-2).logarithmic(true).text("flexão N·m"));
-        ui.add(egui::Slider::new(&mut p.seam, 100.0..=100_000.0).logarithmic(true).text("costura N/m"));
-        ui.add(egui::Slider::new(&mut p.damping, 0.0..=5.0).text("amortecimento 1/s"));
-        ui.add(egui::Slider::new(&mut p.friction, 0.0..=1.5).text("atrito"));
-        ui.add(egui::Slider::new(&mut p.thickness, 0.0..=0.03).text("espessura m"));
+        ui.add(egui::Slider::new(&mut p.density, 0.02..=1.0).logarithmic(true).text("densidade kg/m²"))
+            .on_hover_text("Massa por área do tecido. Tecidos mais pesados caem mais rápido e dobram menos.");
+        ui.add(egui::Slider::new(&mut p.stretch_warp, 50.0..=100_000.0).logarithmic(true).text("stretch urdume N/m"))
+            .on_hover_text("Rigidez ao esticar na direção do urdume (fios longitudinais).");
+        ui.add(egui::Slider::new(&mut p.stretch_weft, 50.0..=100_000.0).logarithmic(true).text("stretch trama N/m"))
+            .on_hover_text("Rigidez ao esticar na direção da trama (fios transversais).");
+        ui.add(egui::Slider::new(&mut p.shear, 5.0..=20_000.0).logarithmic(true).text("cisalhamento N/m"))
+            .on_hover_text("Resistência do tecido a se deformar em losango (diagonais).");
+        ui.add(egui::Slider::new(&mut p.bend, 1e-7..=1e-2).logarithmic(true).text("flexão N·m"))
+            .on_hover_text("Rigidez à dobra. Valores baixos dão caimento solto (seda); altos, tecido encorpado (jeans).");
+        ui.add(egui::Slider::new(&mut p.seam, 100.0..=100_000.0).logarithmic(true).text("costura N/m"))
+            .on_hover_text("Rigidez das costuras. Valores altos fecham a costura com mais firmeza.");
+        ui.add(egui::Slider::new(&mut p.damping, 0.0..=5.0).text("amortecimento 1/s"))
+            .on_hover_text("Perda de velocidade ao longo do tempo. Mais amortecimento assenta o tecido mais rápido.");
+        ui.add(egui::Slider::new(&mut p.friction, 0.0..=1.5).text("atrito"))
+            .on_hover_text("Atrito do tecido com o corpo e com ele mesmo.");
+        ui.add(egui::Slider::new(&mut p.thickness, 0.0..=0.03).text("espessura m"))
+            .on_hover_text("Espessura de colisão: distância mínima mantida entre o tecido e o corpo.");
+            });
 
         // ----- Solver
         ui.separator();
-        ui.strong("Solver e estabilidade");
-        ui.add(egui::Slider::new(&mut p.substeps, 1..=80).text("substeps por quadro"));
-        ui.add(egui::Slider::new(&mut p.iterations, 1..=12).text("iterações por substep"));
+        egui::CollapsingHeader::new(egui::RichText::new("Solver e estabilidade").strong())
+            .default_open(true)
+            .show(ui, |ui| {
+        let p = &mut self.sim.params;
+        ui.add(egui::Slider::new(&mut p.substeps, 1..=80).text("substeps por quadro"))
+            .on_hover_text("Mais substeps estabilizam movimentos rápidos, com custo proporcional.");
+        ui.add(egui::Slider::new(&mut p.iterations, 1..=12).text("iterações por substep"))
+            .on_hover_text("Mais iterações melhoram a convergência das restrições, com custo adicional.");
         ui.add(egui::Slider::new(&mut p.max_particle_speed, 2.0..=60.0)
-            .text("limite de velocidade (m/s)"));
+            .text("limite de velocidade (m/s)"))
+            .on_hover_text("Salvaguarda contra deslocamentos extremos de partículas.");
         ui.horizontal(|ui| {
-            if ui.button("Equilibrado").clicked() {
+            if ui.button("Equilibrado").on_hover_text("20 substeps · 2 iterações").clicked() {
                 p.substeps = 20;
                 p.iterations = 2;
                 p.max_particle_speed = 20.0;
             }
-            if ui.button("Mais estável").clicked() {
+            if ui.button("Mais estável").on_hover_text("40 substeps · 4 iterações").clicked() {
                 p.substeps = 40;
                 p.iterations = 4;
                 p.max_particle_speed = 12.0;
@@ -982,16 +1002,22 @@ impl ClothEvoApp {
         ui.checkbox(&mut p.self_collision, "Auto-colisão (mais custo)");
         ui.weak("A auto-colisão usa hash espacial vértice-vértice; vértices vizinhos e costuras são excluídos.");
         ui.checkbox(&mut p.parallel, "paralelo (rayon)");
+            });
 
         // ----- Visualização
         ui.separator();
-        ui.strong("Visualização");
-        ui.checkbox(&mut self.style.wireframe, "malha (wireframe)");
-        ui.checkbox(&mut self.style.seams, "costuras");
+        egui::CollapsingHeader::new(egui::RichText::new("Visualização").strong())
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.checkbox(&mut self.style.wireframe, "malha (wireframe)");
+                ui.checkbox(&mut self.style.seams, "costuras");
+            });
 
         // ----- Métricas
         ui.separator();
-        ui.strong("Métricas");
+        egui::CollapsingHeader::new(egui::RichText::new("Métricas").strong())
+            .default_open(true)
+            .show(ui, |ui| {
         let sim = &self.sim;
         ui.label(format!("partículas: {}", sim.particle_count()));
         ui.label(format!(
@@ -1049,6 +1075,7 @@ impl ClothEvoApp {
         } else if !self.seam_pairs.is_empty() {
             ui.colored_label(egui::Color32::LIGHT_GREEN, "Costuras sem abertura crítica (> 15 mm)");
         }
+            });
 
         ui.separator();
         ui.weak("Arraste: orbitar · botão direito/meio: mover · roda: zoom");
@@ -1720,10 +1747,10 @@ impl ClothEvoApp {
             ui.selectable_value(&mut self.pattern_tool, PatternTool::Select, "Selecionar / editar");
         });
         ui.horizontal(|ui| {
-            if ui.add_enabled(!self.pattern_undo.is_empty(), egui::Button::new("↶ Desfazer")).clicked() {
+            if ui.add_enabled(!self.pattern_undo.is_empty(), egui::Button::new("Desfazer")).clicked() {
                 self.undo_pattern_edit();
             }
-            if ui.add_enabled(!self.pattern_redo.is_empty(), egui::Button::new("↷ Refazer")).clicked() {
+            if ui.add_enabled(!self.pattern_redo.is_empty(), egui::Button::new("Refazer")).clicked() {
                 self.redo_pattern_edit();
             }
         });
@@ -1736,7 +1763,7 @@ impl ClothEvoApp {
             if ui.button("Salvar como…").clicked() { self.save_pattern_project_as(); }
         });
         if self.pattern_dirty {
-            ui.colored_label(egui::Color32::from_rgb(240, 180, 75), "● Modificações não salvas");
+            ui.colored_label(egui::Color32::from_rgb(240, 180, 75), "Modificações não salvas");
         } else if let Some(path) = &self.pattern_saved_path {
             ui.weak(format!("Arquivo: {}", path.file_name().unwrap_or_default().to_string_lossy()));
         }
@@ -1754,6 +1781,11 @@ impl ClothEvoApp {
         });
         ui.checkbox(&mut self.pattern_snap, "Ajustar à grade (1 cm)");
         ui.checkbox(&mut self.show_avatar_guide, "Guia anatômico T-Pose");
+        ui.add_enabled(
+            self.show_avatar_guide,
+            egui::Slider::new(&mut self.avatar_guide_backdrop, 0.0..=0.6).text("fundo do guia"),
+        )
+        .on_hover_text("Opacidade do fundo claro atrás da silhueta (0 = sem fundo).");
         ui.weak("A silhueta é uma referência proporcional de 1,72 m; os moldes continuam sendo editados em metros.");
         ui.horizontal(|ui| {
             if ui.button("Enquadrar todos os moldes").clicked() {
@@ -1765,60 +1797,70 @@ impl ClothEvoApp {
             }
         });
         ui.separator();
-        ui.strong("Geometria vetorial");
-        ui.horizontal(|ui| {
-            if ui.button("Adicionar retângulo").clicked() {
-                self.create_rectangle_primitive();
-            }
-            if ui.button("Adicionar polígono regular").clicked() {
-                self.create_regular_polygon_primitive();
-            }
-        });
-        ui.add(egui::Slider::new(&mut self.pattern_polygon_sides, 3..=12).text("lados do polígono"));
+        egui::CollapsingHeader::new(egui::RichText::new("Geometria vetorial").strong())
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Adicionar retângulo").clicked() {
+                        self.create_rectangle_primitive();
+                    }
+                    if ui.button("Adicionar polígono regular").clicked() {
+                        self.create_regular_polygon_primitive();
+                    }
+                });
+                ui.add(egui::Slider::new(&mut self.pattern_polygon_sides, 3..=12).text("lados do polígono"));
+            });
         ui.separator();
-        ui.strong("Simetria vinculada");
-        ui.add(egui::DragValue::new(&mut self.pattern_symmetry_axis_x)
-            .speed(0.005).prefix("Eixo X (m) "));
-        ui.horizontal(|ui| {
-            if ui.button("Usar X mínimo do molde").clicked() {
-                self.set_symmetry_axis_to_min_x();
-            }
-            if ui.button("Criar par espelhado").clicked() {
-                self.create_mirrored_pair();
-            }
-            if ui.button("Desvincular par").clicked() {
-                self.unlink_selected_symmetry();
-            }
-        });
-        ui.weak("A edição de vértices e alças é refletida no molde vinculado.");
-        ui.horizontal(|ui| {
-            if ui.button("Fechar peça a partir dos pontos").clicked() {
-                self.create_piece_from_draft();
-            }
-            if ui.button("Adicionar linha interna").clicked() {
-                self.create_internal_line_from_draft();
-            }
-            if ui.button("Cut & Sew").clicked() {
-                self.cut_and_sew_from_draft();
-            }
-        });
-        ui.weak("Cut & Sew: desenhe um caminho dentro do molde, começando e terminando no contorno.");
-        ui.horizontal(|ui| {
-            if ui.button("Criar dobra (vale)").clicked() {
-                self.create_fold_line_from_draft();
-            }
-            if ui.button("Criar dobra (montanha)").clicked() {
-                self.create_mountain_fold_line_from_draft();
-            }
-            if ui.button("Criar prega").clicked() {
-                self.create_pleat_from_draft();
-            }
-            if ui.button("Definir linha de fio").clicked() {
-                self.create_grainline_from_draft();
-            }
-        });
-        ui.weak("Linha interna simples é visual. Dobras Vale/Montanha e pregas geram restrições físicas quando encontram arestas internas da malha.");
-        ui.label(format!("Pontos no rascunho: {}", self.draft_points.len()));
+        egui::CollapsingHeader::new(egui::RichText::new("Simetria vinculada").strong())
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.add(egui::DragValue::new(&mut self.pattern_symmetry_axis_x)
+                    .speed(0.005).prefix("Eixo X (m) "));
+                ui.horizontal(|ui| {
+                    if ui.button("Usar X mínimo do molde").clicked() {
+                        self.set_symmetry_axis_to_min_x();
+                    }
+                    if ui.button("Criar par espelhado").clicked() {
+                        self.create_mirrored_pair();
+                    }
+                    if ui.button("Desvincular par").clicked() {
+                        self.unlink_selected_symmetry();
+                    }
+                });
+                ui.weak("A edição de vértices e alças é refletida no molde vinculado.");
+            });
+        egui::CollapsingHeader::new(egui::RichText::new("Ferramentas de desenho").strong())
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Fechar peça a partir dos pontos").clicked() {
+                        self.create_piece_from_draft();
+                    }
+                    if ui.button("Adicionar linha interna").clicked() {
+                        self.create_internal_line_from_draft();
+                    }
+                    if ui.button("Cut & Sew").clicked() {
+                        self.cut_and_sew_from_draft();
+                    }
+                });
+                ui.weak("Cut & Sew: desenhe um caminho dentro do molde, começando e terminando no contorno.");
+                ui.horizontal(|ui| {
+                    if ui.button("Criar dobra (vale)").clicked() {
+                        self.create_fold_line_from_draft();
+                    }
+                    if ui.button("Criar dobra (montanha)").clicked() {
+                        self.create_mountain_fold_line_from_draft();
+                    }
+                    if ui.button("Criar prega").clicked() {
+                        self.create_pleat_from_draft();
+                    }
+                    if ui.button("Definir linha de fio").clicked() {
+                        self.create_grainline_from_draft();
+                    }
+                });
+                ui.weak("Linha interna simples é visual. Dobras Vale/Montanha e pregas geram restrições físicas quando encontram arestas internas da malha.");
+                ui.label(format!("Pontos no rascunho: {}", self.draft_points.len()));
+            });
         if let Some(target) = self.selected_target {
             ui.label(format!("Selecionado: {}", match target {
                 PatternEditTarget::Piece { .. } => "peça inteira".to_string(),
@@ -1854,11 +1896,14 @@ impl ClothEvoApp {
         }
 
         ui.separator();
-        ui.strong("Pré-visualização da malha 2D");
-        ui.add(egui::Slider::new(&mut self.pattern_spacing, 0.025..=0.20).text("espaçamento visual (m)"));
-        ui.checkbox(&mut self.pattern_show_mesh, "Mostrar triangulação");
-        ui.weak("A resolução da simulação 3D é definida separadamente em Física e montagem 3D por molde.");
-        ui.label("Os projetos são armazenados em JSON no formato nativo .clothevo.");
+        egui::CollapsingHeader::new(egui::RichText::new("Pré-visualização da malha 2D").strong())
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.add(egui::Slider::new(&mut self.pattern_spacing, 0.025..=0.20).text("espaçamento visual (m)"));
+                ui.checkbox(&mut self.pattern_show_mesh, "Mostrar triangulação");
+                ui.weak("A resolução da simulação 3D é definida separadamente em Física e montagem 3D por molde.");
+                ui.label("Os projetos são armazenados em JSON no formato nativo .clothevo.");
+            });
 
         ui.separator();
         ui.strong(format!("Peças ({})", self.pattern_project.pieces.len()));
@@ -3898,7 +3943,8 @@ impl ClothEvoApp {
 
                 // O fundo translúcido é separado do PNG: ele só melhora o contraste sobre a grade.
                 // A textura é desenhada com tint branca, mantendo as cores e o alpha originais.
-                painter.rect_filled(image_rect, 0.0, egui::Color32::from_white_alpha(100));
+                let backdrop_alpha = (self.avatar_guide_backdrop.clamp(0.0, 0.6) * 255.0).round() as u8;
+                painter.rect_filled(image_rect, 6.0, egui::Color32::from_white_alpha(backdrop_alpha));
                 painter.image(
                     texture.id(),
                     image_rect,
@@ -3931,7 +3977,7 @@ impl ClothEvoApp {
         let tool_label = if self.direct_sewing_dragging || self.direct_sewing_start.is_some() {
             "COSTURA DIRETA · arraste até outra borda · Esc cancela"
         } else if shift_down {
-            "COSTURA DIRETA · Shift + LMB · clique A/B ou arraste A → B"
+            "COSTURA DIRETA · Shift + LMB · clique A/B ou arraste de A até B"
         } else if self.seam_pick_mode && self.seam_pick_pair_mode {
             "COSTURA · selecione A e B no contorno"
         } else if self.pattern_tool == PatternTool::Draw {
@@ -5160,6 +5206,8 @@ impl ClothEvoApp {
             .map(|(p, n)| Vertex { pos: p.to_array(), normal: n.to_array() })
             .collect();
 
+        // Fundo neutro atrás da cena (o chão desenhado pelo renderer cobre a parte de baixo).
+        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(52, 60, 74));
         let view_proj = self.camera.view_proj(aspect);
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
