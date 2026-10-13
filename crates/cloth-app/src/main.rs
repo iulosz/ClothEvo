@@ -12,11 +12,12 @@ use cloth_render::{
 };
 use cloth_sim::{
     build_avatar_colliders, build_scene, AvatarConfig, ClothBuilder, Collider, FabricPreset,
-    PanelMaterial, PanelMesh, Placement, SceneKind, Simulation, SimParams,
+    PanelMaterial, PanelMesh, Placement, SceneKind, SignedDistanceField, Simulation, SimParams,
 };
 use eframe::{egui, egui_wgpu};
 use glam::{EulerRot, Quat, Vec2, Vec3};
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::Arc;
 use pattern_core::{
     BoundaryCurve, Curve2D, CurveParam, CurveSegment, EdgePath, EdgeRef, FoldKind, FoldLine, GrainLine,
     suggest_seams, Notch, PatternPiece, PatternProject, Pleat, SeamDefinition, SeamSuggestion,
@@ -504,6 +505,8 @@ struct ClothEvoApp {
     show_avatar_guide: bool,
     /// Mesh visual do avatar importado; os colisores físicos permanecem analíticos.
     avatar_mesh: Option<StaticMeshData>,
+    /// Campo de colisão estático gerado da própria geometria importada.
+    avatar_sdf: Option<Arc<SignedDistanceField>>,
     avatar_mesh_name: Option<String>,
     avatar_mesh_path: Option<std::path::PathBuf>,
     pattern_tool: PatternTool,
@@ -544,6 +547,8 @@ fn statics_from(colliders: &[Collider]) -> Vec<StaticMeshData> {
             Collider::Cylinder { a, b, radius } => {
                 out.push(primitives::cylinder(a, b, radius, 48, [0.70, 0.76, 0.70]));
             }
+            // O avatar importado é renderizado pela malha visual separada, não pelo colisor.
+            Collider::TriangleMeshSdf { .. } => {}
         }
     }
     out
@@ -651,6 +656,7 @@ impl ClothEvoApp {
             avatar_guide_texture: None,
             show_avatar_guide: true,
             avatar_mesh: None,
+            avatar_sdf: None,
             avatar_mesh_name: None,
             avatar_mesh_path: None,
             pattern_tool: PatternTool::Draw,
@@ -677,13 +683,23 @@ impl ClothEvoApp {
             path,
             self.pattern_project.avatar.height_meters as f32,
         )?;
+        let display_name = imported.display_name.clone();
+        let has_sdf = imported.collision_sdf.is_some();
         self.avatar_mesh = Some(imported.mesh);
-        self.avatar_mesh_name = Some(imported.display_name.clone());
+        self.avatar_sdf = imported.collision_sdf;
+        self.avatar_mesh_name = Some(display_name.clone());
         self.avatar_mesh_path = Some(path.to_path_buf());
-        self.pattern_message = format!(
-            "Avatar '{}' importado. A malha visual substitui o boneco; a colisão física continua usando volumes analíticos aproximados.",
-            imported.display_name
-        );
+        self.pattern_message = if has_sdf {
+            format!(
+                "Avatar '{}' importado. SDF de colisão gerado a partir da malha; o solver usa a superfície 3D do avatar.",
+                display_name
+            )
+        } else {
+            format!(
+                "Avatar '{}' importado para visualização. A malha não permitiu gerar o SDF; a física usará os colisores analíticos aproximados.",
+                display_name
+            )
+        };
         if refresh_viewport {
             self.upload_scene();
         }
@@ -2501,6 +2517,7 @@ impl ClothEvoApp {
                 }
                 if self.avatar_mesh.is_some() && ui.small_button("Remover modelo").clicked() {
                     self.avatar_mesh = None;
+                    self.avatar_sdf = None;
                     self.avatar_mesh_name = None;
                     self.avatar_mesh_path = None;
                     self.pattern_message = "Modelo visual removido; o manequim procedural voltou a ser exibido.".into();
@@ -4751,11 +4768,19 @@ impl ClothEvoApp {
             waist_width_m: self.pattern_project.avatar.waist_width_meters as f32,
             hip_width_m: self.pattern_project.avatar.hip_width_meters as f32,
         };
-        let body_colliders = build_avatar_colliders(&avatar)?;
+        let body_colliders = if self.avatar_sdf.is_none() {
+            Some(build_avatar_colliders(&avatar)?)
+        } else {
+            None
+        };
         let mut builder = ClothBuilder::new();
         builder.add_collider(Collider::ground());
-        for collider in body_colliders {
-            builder.add_collider(collider);
+        if let Some(field) = self.avatar_sdf.as_ref() {
+            builder.add_collider(Collider::TriangleMeshSdf { field: Arc::clone(field) });
+        } else if let Some(colliders) = body_colliders {
+            for collider in colliders {
+                builder.add_collider(collider);
+            }
         }
 
         struct PieceBuildInfo {
@@ -4929,8 +4954,13 @@ impl ClothEvoApp {
             .map(|piece| piece.assembly.pinned_anchors.len())
             .sum::<usize>();
         let body_collider_count = self.sim.colliders.len().saturating_sub(1);
+        let collision_label = if self.avatar_sdf.is_some() {
+            "SDF da malha importada"
+        } else {
+            "volumes analíticos"
+        };
         self.pattern_message = format!(
-            "Prévia pronta: {} moldes, {} costuras, {} âncoras fixadas, {} arestas de dobra/prega mapeadas e {} volumes de colisão corporal. Arraste os painéis em 3D; inicie a simulação quando estiver satisfeito. Avatar: {:.2} m; ombros {:.2} m, cintura {:.2} m e quadril {:.2} m.",
+            "Prévia pronta: {} moldes, {} costuras, {} âncoras fixadas, {} arestas de dobra/prega mapeadas e {} colisor(es) corporal(is) ({collision_label}). Arraste os painéis em 3D; inicie a simulação quando estiver satisfeito. Avatar: {:.2} m; ombros {:.2} m, cintura {:.2} m e quadril {:.2} m.",
             piece_count, self.pattern_project.seams.len(), pinned, physical_fold_edge_count, body_collider_count,
             self.pattern_project.avatar.height_meters,
             self.pattern_project.avatar.shoulder_width_meters,
