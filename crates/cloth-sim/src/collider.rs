@@ -76,14 +76,29 @@ impl Collider {
             Collider::Ellipsoid { center, radii } => {
                 let q = p - *center;
                 Vec3::new(q.x / (radii.x * radii.x), q.y / (radii.y * radii.y), q.z / (radii.z * radii.z))
-                    .try_normalize().unwrap_or(Vec3::Y)
+                    .try_normalize().unwrap_or_else(|| {
+                        // No centro o gradiente é nulo. Sair pelo eixo mais curto evita um
+                        // empurrão arbitrário para cima, que pode injetar energia no tecido.
+                        if radii.x <= radii.y && radii.x <= radii.z {
+                            Vec3::X
+                        } else if radii.z <= radii.y {
+                            Vec3::Z
+                        } else {
+                            Vec3::Y
+                        }
+                    })
             }
             Collider::Capsule { a, b, .. } => {
                 let ab = *b - *a;
                 let t = if ab.length_squared() > 1e-12 {
                     ((p - *a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0)
                 } else { 0.0 };
-                (p - (*a + ab * t)).try_normalize().unwrap_or(Vec3::X)
+                (p - (*a + ab * t)).try_normalize().unwrap_or_else(|| {
+                    // No eixo da cápsula, escolhe uma direção perpendicular ao eixo.
+                    let axis = ab.try_normalize().unwrap_or(Vec3::Y);
+                    let helper = if axis.x.abs() < 0.9 { Vec3::X } else { Vec3::Z };
+                    axis.cross(helper).try_normalize().unwrap_or(Vec3::X)
+                })
             }
             Collider::Cylinder { a, b, .. } => {
                 const E: f32 = 1e-3;
