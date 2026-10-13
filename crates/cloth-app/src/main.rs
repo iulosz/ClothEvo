@@ -467,6 +467,8 @@ struct ClothEvoApp {
     seam_pick_pair_mode: bool,
     /// Estado transitório do atalho Shift+LMB para costura direta entre duas arestas.
     direct_sewing_start: Option<(usize, usize)>,
+    /// Aresta selecionada por clique normal, caso o próximo gesto use Shift+clique na borda B.
+    direct_sewing_preselected: Option<(usize, usize)>,
     direct_sewing_press_edge: Option<(usize, usize)>,
     direct_sewing_preview: Option<(usize, usize)>,
     direct_sewing_dragging: bool,
@@ -611,6 +613,7 @@ impl ClothEvoApp {
             seam_pick_mode: false,
             seam_pick_pair_mode: false,
             direct_sewing_start: None,
+            direct_sewing_preselected: None,
             direct_sewing_press_edge: None,
             direct_sewing_preview: None,
             direct_sewing_dragging: false,
@@ -3313,6 +3316,7 @@ impl ClothEvoApp {
         self.dragging_seam_handle = None;
         self.seam_drag_before = None;
         self.direct_sewing_start = None;
+        self.direct_sewing_preselected = None;
         self.direct_sewing_press_edge = None;
         self.direct_sewing_preview = None;
         self.direct_sewing_dragging = false;
@@ -4232,7 +4236,7 @@ impl ClothEvoApp {
                         egui::FontId::proportional(13.0),
                         egui::Color32::from_rgb(95, 225, 255),
                     );
-                    if shift_down && response.hovered() {
+                    if (shift_down || self.direct_sewing_dragging) && response.hovered() {
                         if let Some(pointer) = ui.input(|input| input.pointer.hover_pos()) {
                             painter.line_segment(
                                 [to_screen(*mid_a), pointer],
@@ -4310,6 +4314,7 @@ impl ClothEvoApp {
                 || (self.seam_pick_mode && self.seam_pick_pair_mode)
         ) {
             self.direct_sewing_start = None;
+            self.direct_sewing_preselected = None;
             self.direct_sewing_press_edge = None;
             self.direct_sewing_preview = None;
             self.direct_sewing_dragging = false;
@@ -4330,6 +4335,10 @@ impl ClothEvoApp {
             if primary_pressed && direct_shortcut {
                 self.direct_sewing_press_edge = response.interact_pointer_pos()
                     .and_then(|pointer| self.hit_test_sewing_edge(pointer, center));
+                self.direct_sewing_preselected = match self.selected_target {
+                    Some(PatternEditTarget::Edge { piece, segment, .. }) => Some((piece, segment)),
+                    _ => None,
+                };
                 self.direct_sewing_preview = None;
             }
 
@@ -4362,6 +4371,7 @@ impl ClothEvoApp {
                     self.pattern_message = "Inicie o arraste sobre uma borda do contorno.".into();
                 }
                 self.direct_sewing_dragging = false;
+                self.direct_sewing_preselected = None;
                 self.direct_sewing_press_edge = None;
                 self.direct_sewing_preview = None;
             }
@@ -4379,8 +4389,20 @@ impl ClothEvoApp {
                         } else if start.0 == edge.0 {
                             self.pattern_message = "Escolha uma borda de outra peça.".into();
                         }
+                    } else if let Some(start) = self.direct_sewing_preselected
+                        .filter(|candidate| *candidate != edge)
+                    {
+                        if start.0 != edge.0 && self.create_direct_seam_from_edges(start, edge) {
+                            self.direct_sewing_start = None;
+                            self.direct_sewing_preview = None;
+                        } else {
+                            self.pattern_message = "A segunda borda precisa pertencer a outra peça.".into();
+                        }
                     } else {
                         self.direct_sewing_start = Some(edge);
+                        self.selected_target = Some(PatternEditTarget::Edge {
+                            piece: edge.0, segment: edge.1, t: 0.5,
+                        });
                         let piece_name = self.pattern_project.pieces.get(edge.0)
                             .map(|piece| piece.name.as_str()).unwrap_or("Peça");
                         self.pattern_message = format!(
