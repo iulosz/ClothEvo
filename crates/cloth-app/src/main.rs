@@ -526,26 +526,26 @@ struct ClothEvoApp {
 
 fn statics_from(colliders: &[Collider]) -> Vec<StaticMeshData> {
     let mut out = Vec::new();
-    for c in colliders {
-        match *c {
+    for collider in colliders {
+        match collider {
             Collider::Plane { normal, offset } => {
                 if normal.dot(Vec3::Y) > 0.99 {
-                    out.push(primitives::ground_quad(offset, 8.0, [0.62, 0.64, 0.66]));
+                    out.push(primitives::ground_quad(*offset, 8.0, [0.62, 0.64, 0.66]));
                 }
             }
             Collider::Sphere { center, radius } => {
-                out.push(primitives::uv_sphere(center, radius, 48, 24, [0.78, 0.78, 0.80]));
+                out.push(primitives::uv_sphere(*center, *radius, 48, 24, [0.78, 0.78, 0.80]));
             }
             Collider::Ellipsoid { center, radii } => {
-                out.push(primitives::ellipsoid(center, radii, 40, 20, [0.69, 0.73, 0.77]));
+                out.push(primitives::ellipsoid(*center, *radii, 40, 20, [0.69, 0.73, 0.77]));
             }
             Collider::Capsule { a, b, radius } => {
-                out.push(primitives::cylinder(a, b, radius, 32, [0.69, 0.73, 0.77]));
-                out.push(primitives::uv_sphere(a, radius, 24, 12, [0.69, 0.73, 0.77]));
-                out.push(primitives::uv_sphere(b, radius, 24, 12, [0.69, 0.73, 0.77]));
+                out.push(primitives::cylinder(*a, *b, *radius, 32, [0.69, 0.73, 0.77]));
+                out.push(primitives::uv_sphere(*a, *radius, 24, 12, [0.69, 0.73, 0.77]));
+                out.push(primitives::uv_sphere(*b, *radius, 24, 12, [0.69, 0.73, 0.77]));
             }
             Collider::Cylinder { a, b, radius } => {
-                out.push(primitives::cylinder(a, b, radius, 48, [0.70, 0.76, 0.70]));
+                out.push(primitives::cylinder(*a, *b, *radius, 48, [0.70, 0.76, 0.70]));
             }
             // O avatar importado é renderizado pela malha visual separada, não pelo colisor.
             Collider::TriangleMeshSdf { .. } => {}
