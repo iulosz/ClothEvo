@@ -1,6 +1,7 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use glam::{Vec2, Vec3};
+use pattern_core::{polyline_length_meters, Point2};
 
 use crate::collider::Collider;
 use crate::coloring::{greedy_coloring, group_by_color};
@@ -31,8 +32,18 @@ struct SeamSpec {
     pairs: Vec<(u32, u32)>,
     edge_a: Vec<u32>,
     edge_b: Vec<u32>,
+    edge_a_paths: Vec<Vec<u32>>,
+    edge_b_paths: Vec<Vec<u32>>,
     /// Diferença-alvo de comprimento A − B, em metros. Positivo significa A mais longa.
     ease_meters: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FoldEdgeSpec {
+    /// Fração da rigidez de flexão local, normalizada em [0.02, 1].
+    stiffness: f32,
+    /// Ângulo diedral de repouso, já orientado pelo sentido da aresta.
+    rest_angle: f32,
 }
 
 /// Monta uma [`Simulation`] a partir de painéis 2D, costuras, pinos e colisores.
@@ -45,6 +56,8 @@ pub struct ClothBuilder {
     triangles: Vec<[u32; 3]>,
     pinned: Vec<u32>,
     seams: Vec<SeamSpec>,
+    /// Dobradiças físicas por aresta de malha (índices globais ordenados).
+    fold_edges: BTreeMap<(u32, u32), FoldEdgeSpec>,
     colliders: Vec<Collider>,
     /// Uma entrada por painel adicionado. None preserva os parâmetros globais para cenas antigas.
     panel_materials: Vec<Option<PanelMaterial>>,
@@ -148,18 +161,48 @@ impl ClothBuilder {
         ease_meters: f32,
         notch_markers: &[(f32, f32)],
     ) {
+        self.sew_internal(edge_a, edge_b, ease_meters, notch_markers, false);
+    }
+
+    /// Variante para contornos reamostrados por uma lista comum de frações de comprimento
+    /// de arco. Quando os lados possuem a mesma quantidade de nós, o vínculo é índice a índice:
+    /// não se usa vizinho mais próximo, evitando muitos-para-um e pares cruzados.
+    pub fn sew_synchronized_with_markers(
+        &mut self,
+        edge_a: &[u32],
+        edge_b: &[u32],
+        ease_meters: f32,
+        notch_markers: &[(f32, f32)],
+    ) {
+        self.sew_internal(edge_a, edge_b, ease_meters, notch_markers, true);
+    }
+
+    fn sew_internal(
+        &mut self,
+        edge_a: &[u32],
+        edge_b: &[u32],
+        ease_meters: f32,
+        notch_markers: &[(f32, f32)],
+        synchronized: bool,
+    ) {
         if edge_a.len() < 2 || edge_b.len() < 2 || !ease_meters.is_finite() {
             return;
         }
-        let mut pairs = pair_by_arc_length(edge_a, edge_b, &self.uv);
+        let mut pairs = if synchronized && edge_a.len() == edge_b.len() {
+            edge_a.iter().copied().zip(edge_b.iter().copied()).collect()
+        } else {
+            // Fallback compatível com callers externos que não passaram pelo sincronizador
+            // do Pattern Studio.
+            pair_by_arc_length(edge_a, edge_b, &self.uv)
+        };
         let ta = edge_arc_params(edge_a, &self.uv);
         let tb = edge_arc_params(edge_b, &self.uv);
         for &(marker_a, marker_b) in notch_markers {
+            if !marker_a.is_finite() || !marker_b.is_finite() { continue; }
             let Some(&a) = edge_a.get(nearest_arc_index(marker_a, &ta)) else { continue; };
             let Some(&b) = edge_b.get(nearest_arc_index(marker_b, &tb)) else { continue; };
-            if a != b {
-                pairs.push((a, b));
-            }
+            // O pique é uma âncora explícita, inclusive nas extremidades da cadeia.
+            pairs.push((a, b));
         }
         pairs.sort_unstable();
         pairs.dedup();
@@ -167,8 +210,68 @@ impl ClothBuilder {
             pairs,
             edge_a: edge_a.to_vec(),
             edge_b: edge_b.to_vec(),
+            edge_a_paths: vec![edge_a.to_vec()],
+            edge_b_paths: vec![edge_b.to_vec()],
             ease_meters,
         });
+    }
+
+    /// Costura cadeias ordenadas M:N por comprimento de arco acumulado.
+    pub fn sew_with_path_chains(
+        &mut self,
+        paths_a: &[Vec<u32>],
+        paths_b: &[Vec<u32>],
+        ease_meters: f32,
+        notch_markers: &[(f32, f32)],
+    ) {
+        if !ease_meters.is_finite() { return; }
+        let (edge_a, ta) = flatten_path_chain(paths_a, &self.uv);
+        let (edge_b, tb) = flatten_path_chain(paths_b, &self.uv);
+        if edge_a.len() < 2 || edge_b.len() < 2 { return; }
+        let pairs = pair_by_arc_between_anchors(&edge_a, &ta, &edge_b, &tb, notch_markers);
+        if pairs.is_empty() { return; }
+        self.seams.push(SeamSpec {
+            pairs,
+            edge_a,
+            edge_b,
+            edge_a_paths: paths_a.to_vec(),
+            edge_b_paths: paths_b.to_vec(),
+            ease_meters,
+        });
+    }
+
+    /// Associa uma aresta interna à dobra física. A linha deve ter sido mapeada para
+    /// arestas existentes da malha; arestas de contorno sem duas faces não geram dobradiça.
+    /// stiffness é a fração da rigidez de flexão base; rest_angle é em radianos.
+    pub fn add_fold_edge(
+        &mut self,
+        handle: PanelHandle,
+        local_a: u32,
+        local_b: u32,
+        stiffness: f32,
+        rest_angle: f32,
+    ) {
+        if local_a >= handle.count || local_b >= handle.count || local_a == local_b
+            || !stiffness.is_finite() || !rest_angle.is_finite()
+        {
+            return;
+        }
+        let global_a = handle.global(local_a);
+        let global_b = handle.global(local_b);
+        let key = if global_a < global_b { (global_a, global_b) } else { (global_b, global_a) };
+        let spec = FoldEdgeSpec {
+            stiffness: stiffness.clamp(0.02, 1.0),
+            rest_angle: rest_angle.clamp(-std::f32::consts::PI, std::f32::consts::PI),
+        };
+        self.fold_edges.entry(key)
+            .and_modify(|existing| {
+                // Linhas de dobra coincidentes combinam seus alvos; preserva a menor rigidez.
+                existing.stiffness = existing.stiffness.min(spec.stiffness);
+                existing.rest_angle =
+                    ((existing.rest_angle + spec.rest_angle) * 0.5)
+                        .clamp(-std::f32::consts::PI, std::f32::consts::PI);
+            })
+            .or_insert(spec);
     }
 
     pub fn particle_count(&self) -> usize {
@@ -273,18 +376,31 @@ impl ClothBuilder {
                 scale: geometric_scale * material_scale,
                 kind,
             });
-            edge_constraint_indices.insert((i, j), distance.len() - 1);
+            let boundary_key = if i < j { (i, j) } else { (j, i) };
+            edge_constraint_indices.insert(boundary_key, distance.len() - 1);
 
-            if let [Some(p3), Some(p4)] = e.opposite {
-                // k_flexão = 3 B l² / (A1 + A2)  →  α = (A / (3 l²)) / B
+            if let [Some(mut p3), Some(mut p4)] = e.opposite {
+                // Canonicaliza os vértices opostos: p3 sempre fica à esquerda da aresta
+                // orientada i→j e p4 à direita. Isso torna o sinal de rest_angle estável
+                // mesmo que a ordem dos triângulos na CDT varie.
+                let edge = self.uv[j as usize] - self.uv[i as usize];
+                let side3 = edge.perp_dot(self.uv[p3 as usize] - self.uv[i as usize]);
+                let side4 = edge.perp_dot(self.uv[p4 as usize] - self.uv[i as usize]);
+                if side3 < side4 { std::mem::swap(&mut p3, &mut p4); }
+
+                // k_flexão = 3 B l² / (A1 + A2) → α = (A / (3 l²)) / B.
+                // Uma dobra com rigidez fracionária s usa compliance 1/s e seu próprio
+                // ângulo diedral de repouso; as demais arestas mantêm exatamente o alvo plano.
                 let geometric_scale = (e.area / (3.0 * rest * rest)).max(1e-6);
                 let material_scale = self.panel_materials[self.panel_of[i as usize] as usize]
                     .map(|material| global_bend / material.bend_nm.max(1.0e-9))
                     .unwrap_or(1.0);
+                let fold = self.fold_edges.get(&(i, j));
+                let fold_compliance = fold.map(|spec| 1.0 / spec.stiffness.clamp(0.02, 1.0)).unwrap_or(1.0);
                 bending.push(BendConstraint {
                     p: [i, j, p3, p4],
-                    rest_angle: 0.0, // painéis são planos no repouso
-                    scale: geometric_scale * material_scale,
+                    rest_angle: fold.map(|spec| spec.rest_angle).unwrap_or(0.0),
+                    scale: geometric_scale * material_scale * fold_compliance,
                 });
             }
         }
@@ -292,15 +408,21 @@ impl ClothBuilder {
         // Aplica a folga/franzido como diferença-alvo de comprimento A − B.
         // As restrições de borda são escaladas proporcionalmente; as costuras continuam
         // fazendo a correspondência por comprimento de arco entre vértices de ambas as malhas.
-        let mut adjusted_boundary_edges = HashSet::new();
+        // Cada costura contribui com um fator para cada segmento de contorno. Fatores que
+        // incidem na mesma aresta são combinados geometricamente e aplicados uma única vez,
+        // sem depender de qual costura aparece primeiro na lista.
+        let mut ease_votes: HashMap<(u32, u32), Vec<f32>> = HashMap::new();
         for seam in &self.seams {
-            adjust_seam_ease(
-                &mut distance,
-                &edge_constraint_indices,
-                &self.uv,
-                seam,
-                &mut adjusted_boundary_edges,
-            );
+            for (key, factor) in seam_ease_adjustment_factors(seam, &self.uv) {
+                ease_votes.entry(key).or_default().push(factor);
+            }
+        }
+        for (key, votes) in ease_votes {
+            let Some(&index) = edge_constraint_indices.get(&key) else { continue; };
+            if votes.is_empty() { continue; }
+            let mean_log = votes.iter().map(|factor| factor.ln()).sum::<f32>() / votes.len() as f32;
+            let factor = mean_log.exp();
+            distance[index].rest = (distance[index].rest * factor).max(1.0e-6);
         }
 
         for seam in &self.seams {
@@ -366,6 +488,99 @@ impl ClothBuilder {
 }
 
 /// Parâmetros de arco normalizados para uma cadeia de vértices da borda.
+fn flatten_path_chain(paths: &[Vec<u32>], uv: &[Vec2]) -> (Vec<u32>, Vec<f32>) {
+    let total = paths.iter().map(|path| chain_length(path, uv)).sum::<f32>();
+    if total <= 1.0e-8 { return (Vec::new(), Vec::new()); }
+    let mut edge = Vec::new();
+    let mut progress = Vec::new();
+    let mut prefix = 0.0_f32;
+    for path in paths {
+        let length = chain_length(path, uv);
+        if path.len() < 2 || length <= 1.0e-8 { continue; }
+        let local = edge_arc_params(path, uv);
+        for (&index, &t) in path.iter().zip(local.iter()) {
+            let global_t = ((prefix + t * length) / total).clamp(0.0, 1.0);
+            if edge.last().copied() == Some(index) {
+                if let Some(last) = progress.last_mut() { *last = global_t; }
+            } else {
+                edge.push(index);
+                progress.push(global_t);
+            }
+        }
+        prefix += length;
+    }
+    (edge, progress)
+}
+
+fn pair_by_arc_between_anchors(
+    a: &[u32],
+    ta: &[f32],
+    b: &[u32],
+    tb: &[f32],
+    notch_markers: &[(f32, f32)],
+) -> Vec<(u32, u32)> {
+    if a.len() < 2 || b.len() < 2 || ta.len() != a.len() || tb.len() != b.len() {
+        return Vec::new();
+    }
+    let mut anchors = vec![(0.0_f32, 0.0_f32)];
+    anchors.extend(notch_markers.iter().copied()
+        .filter(|(pa, pb)| pa.is_finite() && pb.is_finite()
+            && *pa > 0.0 && *pa < 1.0 && *pb > 0.0 && *pb < 1.0));
+    anchors.push((1.0, 1.0));
+    anchors.sort_by(|left, right| left.0.partial_cmp(&right.0)
+        .unwrap_or(std::cmp::Ordering::Equal));
+    anchors.dedup_by(|left, right| (left.0-right.0).abs() <= 1.0e-6
+        && (left.1-right.1).abs() <= 1.0e-6);
+
+    let mut pairs = Vec::new();
+    for &(pa, pb) in &anchors {
+        pairs.push((a[nearest_arc_index(pa, ta)], b[nearest_arc_index(pb, tb)]));
+    }
+    // Os piques são pares fixos, mesmo quando coincidem com uma extremidade (0 ou 1).
+    // Acrescentá-los explicitamente preserva a correspondência exata indicada pelo molde.
+    for &(pa, pb) in notch_markers {
+        if pa.is_finite() && pb.is_finite() {
+            pairs.push((a[nearest_arc_index(pa, ta)], b[nearest_arc_index(pb, tb)]));
+        }
+    }
+    for window in anchors.windows(2) {
+        let (a0, b0) = window[0];
+        let (a1, b1) = window[1];
+        if a1 - a0 <= 1.0e-7 || b1 - b0 <= 1.0e-7 { continue; }
+        for (i, &progress_a) in ta.iter().enumerate() {
+            if progress_a < a0 - 1.0e-6 || progress_a > a1 + 1.0e-6 { continue; }
+            let t = ((progress_a - a0) / (a1 - a0)).clamp(0.0, 1.0);
+            let progress_b = b0 + (b1 - b0) * t;
+            pairs.push((a[i], b[nearest_arc_index(progress_b, tb)]));
+        }
+        for (i, &progress_b) in tb.iter().enumerate() {
+            if progress_b < b0 - 1.0e-6 || progress_b > b1 + 1.0e-6 { continue; }
+            let t = ((progress_b - b0) / (b1 - b0)).clamp(0.0, 1.0);
+            let progress_a = a0 + (a1 - a0) * t;
+            pairs.push((a[nearest_arc_index(progress_a, ta)], b[i]));
+        }
+    }
+    pairs.sort_unstable();
+    pairs.dedup();
+    pairs
+}
+
+fn pair_by_arc_progress(a: &[u32], ta: &[f32], b: &[u32], tb: &[f32]) -> Vec<(u32, u32)> {
+    if a.len() < 2 || b.len() < 2 || ta.len() != a.len() || tb.len() != b.len() {
+        return Vec::new();
+    }
+    let mut pairs = Vec::with_capacity(a.len() + b.len());
+    for (index, &t) in ta.iter().enumerate() {
+        pairs.push((a[index], b[nearest_arc_index(t, tb)]));
+    }
+    for (index, &t) in tb.iter().enumerate() {
+        pairs.push((a[nearest_arc_index(t, ta)], b[index]));
+    }
+    pairs.sort_unstable();
+    pairs.dedup();
+    pairs
+}
+
 fn edge_arc_params(edge: &[u32], uv: &[Vec2]) -> Vec<f32> {
     let mut t = vec![0.0f32; edge.len()];
     for k in 1..edge.len() {
@@ -409,9 +624,45 @@ fn pair_by_arc_length(a: &[u32], b: &[u32], uv: &[Vec2]) -> Vec<(u32, u32)> {
 }
 
 fn chain_length(edge: &[u32], uv: &[Vec2]) -> f32 {
-    edge.windows(2)
-        .map(|pair| (uv[pair[1] as usize] - uv[pair[0] as usize]).length())
-        .sum()
+    let points = edge.iter().map(|&index| {
+        let point = uv[index as usize];
+        Point2::new(point.x as f64, point.y as f64)
+    }).collect::<Vec<_>>();
+    polyline_length_meters(&points) as f32
+}
+
+fn seam_paths_length(paths: &[Vec<u32>], fallback: &[u32], uv: &[Vec2]) -> f32 {
+    if paths.is_empty() { chain_length(fallback, uv) }
+    else { paths.iter().map(|path| chain_length(path, uv)).sum() }
+}
+
+fn seam_ease_adjustment_factors(seam: &SeamSpec, uv: &[Vec2]) -> Vec<((u32, u32), f32)> {
+    let len_a = seam_paths_length(&seam.edge_a_paths, &seam.edge_a, uv);
+    let len_b = seam_paths_length(&seam.edge_b_paths, &seam.edge_b, uv);
+    if len_a <= 1.0e-8 || len_b <= 1.0e-8 { return Vec::new(); }
+    let ease = seam.ease_meters;
+    let (target_a, target_b) = if len_a - len_b > ease {
+        ((len_b + ease).max(1.0e-6), len_b)
+    } else {
+        (len_a, (len_a - ease).max(1.0e-6))
+    };
+    let factors = [
+        (if seam.edge_a_paths.is_empty() { vec![seam.edge_a.clone()] } else { seam.edge_a_paths.clone() },
+            (target_a / len_a).clamp(0.05, 20.0)),
+        (if seam.edge_b_paths.is_empty() { vec![seam.edge_b.clone()] } else { seam.edge_b_paths.clone() },
+            (target_b / len_b).clamp(0.05, 20.0)),
+    ];
+    let mut out = Vec::new();
+    for (paths, factor) in factors {
+        if (factor - 1.0).abs() < 1.0e-5 { continue; }
+        for edge in paths {
+            for pair in edge.windows(2) {
+                let key = if pair[0] < pair[1] { (pair[0], pair[1]) } else { (pair[1], pair[0]) };
+                out.push((key, factor));
+            }
+        }
+    }
+    out
 }
 
 /// Ajusta os comprimentos de repouso da borda excedente para obter a diferença assinada desejada.
@@ -422,29 +673,10 @@ fn adjust_seam_ease(
     seam: &SeamSpec,
     adjusted: &mut HashSet<(u32, u32)>,
 ) {
-    let len_a = chain_length(&seam.edge_a, uv);
-    let len_b = chain_length(&seam.edge_b, uv);
-    if len_a <= 1e-8 || len_b <= 1e-8 {
-        return;
-    }
-
-    let ease = seam.ease_meters;
-    let (target_a, target_b) = if ease >= 0.0 {
-        (len_b + ease, len_b)
-    } else {
-        (len_a, len_a - ease)
-    };
-    let scale_a = (target_a / len_a).clamp(0.05, 20.0);
-    let scale_b = (target_b / len_b).clamp(0.05, 20.0);
-
-    for (edge, factor) in [(&seam.edge_a, scale_a), (&seam.edge_b, scale_b)] {
-        if (factor - 1.0).abs() < 1e-5 { continue; }
-        for pair in edge.windows(2) {
-            let key = if pair[0] < pair[1] { (pair[0], pair[1]) } else { (pair[1], pair[0]) };
-            if !adjusted.insert(key) { continue; }
-            if let Some(&index) = edge_constraint_indices.get(&key) {
-                distance[index].rest = (distance[index].rest * factor).max(1e-6);
-            }
+    for (key, factor) in seam_ease_adjustment_factors(seam, uv) {
+        if !adjusted.insert(key) { continue; }
+        if let Some(&index) = edge_constraint_indices.get(&key) {
+            distance[index].rest = (distance[index].rest * factor).max(1.0e-6);
         }
     }
 }
@@ -452,6 +684,37 @@ fn adjust_seam_ease(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn physical_fold_edge_sets_rest_angle_and_local_bending_compliance() {
+        let mesh = PanelMesh {
+            uv: vec![
+                Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.0),
+                Vec2::new(1.0, 1.0), Vec2::new(0.0, 1.0),
+            ],
+            triangles: vec![[0, 1, 2], [0, 2, 3]],
+        };
+        let mut flat_builder = ClothBuilder::new();
+        flat_builder.add_panel(&mesh, Placement::at(Vec3::ZERO));
+        let flat = flat_builder.build(SimParams::default());
+
+        let mut folded_builder = ClothBuilder::new();
+        let handle = folded_builder.add_panel(&mesh, Placement::at(Vec3::ZERO));
+        folded_builder.add_fold_edge(handle, 0, 2, 0.5, 0.4);
+        let folded = folded_builder.build(SimParams::default());
+
+        let hinge_values = |sim: &Simulation| {
+            let bend = sim.bending_constraints().iter().find(|bend| {
+                bend.p.contains(&0) && bend.p.contains(&2)
+            }).unwrap();
+            (bend.rest_angle, bend.scale)
+        };
+        let (flat_rest_angle, flat_scale) = hinge_values(&flat);
+        let (fold_rest_angle, fold_scale) = hinge_values(&folded);
+        assert_eq!(flat_rest_angle, 0.0);
+        assert!((fold_rest_angle - 0.4).abs() < 1e-6);
+        assert!((fold_scale / flat_scale - 2.0).abs() < 1e-5);
+    }
 
     #[test]
     fn seam_ease_adjusts_rest_length_to_requested_signed_difference() {
@@ -468,15 +731,40 @@ mod tests {
             pairs: vec![(0, 2), (1, 3)],
             edge_a: vec![0, 1],
             edge_b: vec![2, 3],
+            // Omit path chains to exercise the backwards-compatible single-edge fallback.
+            edge_a_paths: Vec::new(),
+            edge_b_paths: Vec::new(),
             ease_meters: 0.5,
         };
         adjust_seam_ease(&mut distance, &indices, &uv, &seam, &mut HashSet::new());
         assert!((distance[0].rest - 1.0).abs() < 1e-6);
         assert!((distance[1].rest - 0.5).abs() < 1e-6);
 
-        let zero_ease = SeamSpec { ease_meters: 0.0, ..seam };
+        let zero_ease = SeamSpec { ease_meters: 0.0, ..seam.clone() };
         adjust_seam_ease(&mut distance, &indices, &uv, &zero_ease, &mut HashSet::new());
         assert!((distance[0].rest - 0.5).abs() < 1e-6);
+        assert!((distance[1].rest - 0.5).abs() < 1e-6);
+
+        // Folga negativa também reduz A quando A é a borda excedente.
+        distance[0].rest = 1.0;
+        distance[1].rest = 0.5;
+        let negative_ease = SeamSpec { ease_meters: -0.25, ..seam.clone() };
+        adjust_seam_ease(&mut distance, &indices, &uv, &negative_ease, &mut HashSet::new());
+        assert!((distance[0].rest - 0.25).abs() < 1e-6);
+        assert!((distance[1].rest - 0.5).abs() < 1e-6);
+
+        // Quando B excede a relação desejada, B é reduzida mesmo com folga positiva.
+        // A geometria UV também deve refletir esse caso: A = 0,5 m, B = 1,0 m.
+        distance[0].rest = 0.5;
+        distance[1].rest = 1.0;
+        let uv_b_longer = vec![
+            Vec2::new(0.0, 0.0), Vec2::new(0.0, 0.5),
+            Vec2::new(1.0, 0.0), Vec2::new(1.0, 1.0),
+        ];
+        let positive_ease = SeamSpec { ease_meters: 0.25, ..seam };
+        adjust_seam_ease(&mut distance, &indices, &uv_b_longer, &positive_ease, &mut HashSet::new());
+        assert!((distance[0].rest - 0.5).abs() < 1e-6);
+        assert!((distance[1].rest - 0.25).abs() < 1e-6);
     }
 
     #[test]
@@ -491,6 +779,20 @@ mod tests {
         let b = [3u32, 4, 5];
         builder.sew_with_markers(&a, &b, 0.0, &[(1.0, 0.0)]);
         assert!(builder.seams[0].pairs.contains(&(2, 3)));
+    }
+
+    #[test]
+    fn synchronized_sewing_uses_paired_indices_not_nearest_arc_neighbours() {
+        let uv = vec![
+            Vec2::new(0.0, 0.0), Vec2::new(0.0, 0.25), Vec2::new(0.0, 1.0),
+            Vec2::new(1.0, 0.0), Vec2::new(1.0, 0.75), Vec2::new(1.0, 1.0),
+        ];
+        let mut builder = ClothBuilder::new();
+        builder.uv = uv;
+        let a = [0u32, 1, 2];
+        let b = [3u32, 4, 5];
+        builder.sew_synchronized_with_markers(&a, &b, 0.0, &[]);
+        assert_eq!(builder.seams[0].pairs, vec![(0, 3), (1, 4), (2, 5)]);
     }
 
     #[test]

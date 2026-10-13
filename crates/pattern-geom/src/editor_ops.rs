@@ -375,18 +375,9 @@ fn path_with_snapped_endpoints(path: &Curve2D, start: Point2, end: Point2) -> Cu
     snapped
 }
 
-fn orientation(a: Point2, b: Point2, c: Point2) -> f64 {
-    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
-}
-
 fn segment_intersects(a: Point2, b: Point2, c: Point2, d: Point2) -> bool {
-    let cross1 = orientation(a, b, c);
-    let cross2 = orientation(a, b, d);
-    let cross3 = orientation(c, d, a);
-    let cross4 = orientation(c, d, b);
-    let eps = 1.0e-9;
-    ((cross1 > eps && cross2 < -eps) || (cross1 < -eps && cross2 > eps))
-        && ((cross3 > eps && cross4 < -eps) || (cross3 < -eps && cross4 > eps))
+    // Inclui tangências e trechos colineares, além de cruzamentos estritos.
+    crate::segments_intersect(a, b, c, d)
 }
 
 fn validate_cut_path(outline: &Curve2D, path: &Curve2D) -> Result<(), GeometryError> {
@@ -401,6 +392,13 @@ fn validate_cut_path(outline: &Curve2D, path: &Curve2D) -> Result<(), GeometryEr
             }
         })
     {
+        return Err(GeometryError::InvalidParameter);
+    }
+
+    // Validate the maximum sampling/ intersection-check workload before allocating it.
+    // Each cut segment is sampled at 24 intervals below, and self-intersection checks are O(n²).
+    let estimated_samples = path.segments.len().saturating_mul(24).saturating_add(1);
+    if estimated_samples > crate::MAX_CURVE_SAMPLES {
         return Err(GeometryError::InvalidParameter);
     }
 
@@ -532,6 +530,8 @@ pub fn cut_closed_outline(
     endpoint_tolerance: f64,
 ) -> Result<CutAndSewResult, GeometryError> {
     if !outline.closed || outline.segments.len() < 3
+        || outline.segments.len() > crate::MAX_CURVE_SAMPLES
+        || cut_path.segments.len() > crate::MAX_CURVE_SAMPLES
         || !endpoint_tolerance.is_finite() || endpoint_tolerance <= 0.0
     {
         return Err(GeometryError::InvalidParameter);
@@ -614,4 +614,55 @@ pub fn cut_closed_outline(
         second_cut_segment_range: (second_cut_start, second_cut_end),
         source_segment_fragments: source_map,
     })
+}
+
+
+#[cfg(test)]
+mod cut_path_intersection_tests {
+    use super::*;
+
+    #[test]
+    fn cut_path_sampling_budget_is_checked_before_quadratic_intersection() {
+        let outline = Curve2D::polyline(&[
+            Point2::new(0.0, 0.0), Point2::new(2.0, 0.0),
+            Point2::new(2.0, 2.0), Point2::new(0.0, 2.0),
+        ], true).unwrap();
+        let mut points = Vec::new();
+        for index in 0..=200 {
+            points.push(Point2::new(0.2 + index as f64 * 0.001, 1.0));
+        }
+        let path = Curve2D::polyline(&points, false).unwrap();
+        assert_eq!(
+            cut_closed_outline(&outline, &path, 0.1),
+            Err(GeometryError::InvalidParameter)
+        );
+    }
+
+    #[test]
+    fn cut_and_sew_rejects_extreme_segment_counts_before_sampling() {
+        let outline = Curve2D {
+            start: Point2::new(0.0, 0.0),
+            segments: vec![
+                CurveSegment::Line { to: Point2::new(1.0, 0.0) };
+                crate::MAX_CURVE_SAMPLES + 1
+            ],
+            closed: true,
+        };
+        let cut = Curve2D::polyline(&[
+            Point2::new(0.5, 0.0), Point2::new(0.5, 1.0)
+        ], false).unwrap();
+        assert_eq!(
+            cut_closed_outline(&outline, &cut, 0.1),
+            Err(GeometryError::InvalidParameter)
+        );
+    }
+
+    #[test]
+    fn cut_path_intersection_detects_tangency_and_collinear_overlap() {
+        let a = Point2::new(0.0, 0.0);
+        let b = Point2::new(1.0, 0.0);
+        assert!(segment_intersects(a, b, Point2::new(1.0, 0.0), Point2::new(1.0, 1.0)));
+        assert!(segment_intersects(a, b, Point2::new(0.25, 0.0), Point2::new(0.75, 0.0)));
+        assert!(!segment_intersects(a, b, Point2::new(0.0, 1.0), Point2::new(1.0, 1.0)));
+    }
 }
