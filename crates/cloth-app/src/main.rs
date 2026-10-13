@@ -463,6 +463,8 @@ struct ClothEvoApp {
     seam_free_mode: bool,
     /// Captura direta de arestas no canvas para construir uma costura sem navegar por combos.
     seam_pick_mode: bool,
+    /// No modo rápido, o primeiro clique seleciona A e o segundo conecta B automaticamente.
+    seam_pick_pair_mode: bool,
     /// Mantém cadeias capturadas como a fonte da costura, mesmo depois de sair do modo de seleção.
     seam_canvas_pick_used: bool,
     seam_snap_tolerance_px: f32,
@@ -602,6 +604,7 @@ impl ClothEvoApp {
             seam_b_end_t: 1.0,
             seam_free_mode: false,
             seam_pick_mode: false,
+            seam_pick_pair_mode: false,
             seam_canvas_pick_used: false,
             seam_snap_tolerance_px: 10.0,
             dragging_seam_handle: None,
@@ -1890,22 +1893,37 @@ impl ClothEvoApp {
 
             // Ferramenta de seleção direta: seleciona bordas no canvas sem navegar por combos.
             ui.horizontal(|ui| {
-                let label = if self.seam_pick_mode {
-                    "Concluir seleção no canvas"
+                if ui.button("Costurar 2 arestas").clicked() {
+                    self.reset_seam_controls();
+                    self.seam_pick_mode = true;
+                    self.seam_pick_pair_mode = true;
+                    self.seam_canvas_pick_used = true;
+                    self.pattern_tool = PatternTool::Select;
+                    self.seam_active_side_a = true;
+                    self.pattern_message = "Costura rápida: clique na primeira aresta (A) e depois na correspondente (B). A costura será criada automaticamente.".into();
+                }
+                let chain_label = if self.seam_pick_mode && !self.seam_pick_pair_mode {
+                    "Concluir cadeia M:N"
                 } else {
-                    "Selecionar arestas no canvas"
+                    "Costura livre / cadeia M:N"
                 };
-                if ui.button(label).clicked() {
-                    self.seam_pick_mode = !self.seam_pick_mode;
-                    if self.seam_pick_mode {
-                        self.pattern_tool = PatternTool::Select;
+                if ui.button(chain_label).clicked() {
+                    if self.seam_pick_mode && !self.seam_pick_pair_mode {
+                        self.seam_pick_mode = false;
+                        self.seam_pick_pair_mode = false;
+                        self.pattern_message = "Seleção de cadeia pausada. Revise os lados e crie/salve a costura.".into();
+                    } else {
+                        if self.seam_pick_pair_mode {
+                            self.reset_seam_controls();
+                        }
+                        self.seam_pick_mode = true;
+                        self.seam_pick_pair_mode = false;
                         self.seam_canvas_pick_used = true;
+                        self.pattern_tool = PatternTool::Select;
                         self.pattern_message = format!(
-                            "Seleção de costura ativa: clique nas arestas do lado {}. Troque para o outro lado e selecione as bordas correspondentes.",
+                            "Costura livre: selecione as bordas do lado {}. Alterne A/B para construir a outra cadeia.",
                             if self.seam_active_side_a { "A" } else { "B" }
                         );
-                    } else {
-                        self.pattern_message = "Seleção no canvas pausada. Revise os dois lados e crie/salve a costura.".into();
                     }
                 }
                 ui.selectable_value(&mut self.seam_active_side_a, true, "Lado A");
@@ -1927,9 +1945,18 @@ impl ClothEvoApp {
                     self.pattern_message = "Lado B limpo. Selecione novamente as arestas no canvas.".into();
                 }
             });
-            if self.seam_pick_mode {
+            if self.seam_pick_mode && self.seam_pick_pair_mode {
+                ui.strong(if self.seam_sides_a.is_empty() {
+                    "COSTURA RÁPIDA · Clique na aresta A"
+                } else if self.seam_sides_b.is_empty() {
+                    "COSTURA RÁPIDA · Clique na aresta B correspondente"
+                } else {
+                    "COSTURA RÁPIDA · Validando costura"
+                });
+                ui.weak("Dois cliques no contorno: primeiro A, depois B. Para costurar vários segmentos ou trechos parciais, use Costura livre / cadeia M:N.");
+            } else if self.seam_pick_mode {
                 ui.strong(format!(
-                    "MODO COSTURA · Lado {} ativo",
+                    "MODO COSTURA LIVRE · Lado {} ativo",
                     if self.seam_active_side_a { "A" } else { "B" }
                 ));
                 ui.weak("Clique nas bordas no canvas 2D para adicioná-las à cadeia. Alterne A/B para montar o outro lado; as correspondências são distribuídas pelo comprimento acumulado.");
@@ -1955,6 +1982,7 @@ impl ClothEvoApp {
                 });
             if requested_seam != self.selected_seam_id {
                 self.seam_pick_mode = false;
+                self.seam_pick_pair_mode = false;
                 self.seam_canvas_pick_used = false;
                 self.selected_seam_id = requested_seam;
                 if let Some(id) = requested_seam {
@@ -2228,9 +2256,11 @@ impl ClothEvoApp {
                 if ui.button("Nova costura").clicked() {
                     self.reset_seam_controls();
                     self.seam_pick_mode = true;
+                    self.seam_pick_pair_mode = true;
                     self.seam_canvas_pick_used = true;
                     self.pattern_tool = PatternTool::Select;
-                    self.pattern_message = "Nova costura: selecione as arestas do lado A, troque para B e selecione as correspondentes.".into();
+                    self.seam_active_side_a = true;
+                    self.pattern_message = "Nova costura: clique na aresta A e depois na correspondente B. A costura será criada automaticamente.".into();
                 }
             });
             ui.label(format!("Costuras no projeto: {}", self.pattern_project.seams.len()));
@@ -3154,6 +3184,7 @@ impl ClothEvoApp {
         self.seam_b_end_t = 1.0;
         self.seam_free_mode = false;
         self.seam_pick_mode = false;
+        self.seam_pick_pair_mode = false;
         self.seam_canvas_pick_used = false;
         self.dragging_seam_handle = None;
         self.seam_drag_before = None;
@@ -3389,6 +3420,7 @@ impl ClothEvoApp {
         self.selected_seam_id = Some(next_id);
         self.seam_name = name;
         self.seam_pick_mode = false;
+        self.seam_pick_pair_mode = false;
         self.seam_canvas_pick_used = false;
         self.pattern_message = "Costura adicionada. A/B permanecem visíveis; as correspondências são distribuídas pelo arco acumulado e pelos piques.".into();
         self.remember_pattern_change(before);
@@ -3422,6 +3454,7 @@ impl ClothEvoApp {
         }
         self.pattern_project = staged;
         self.seam_pick_mode = false;
+        self.seam_pick_pair_mode = false;
         self.seam_canvas_pick_used = false;
         self.pattern_message = format!("Costura '{id}' atualizada.");
         self.remember_pattern_change(before);
@@ -4126,8 +4159,24 @@ impl ClothEvoApp {
                                     data.id, BoundaryCurve::Outline,
                                     segment as u32, segment as u32 + 1, false,
                                 );
-                                self.seam_canvas_pick_used |= self.seam_pick_mode;
-                                self.add_draft_edge_to_side(self.seam_active_side_a, edge);
+                                if self.seam_pick_mode && self.seam_pick_pair_mode {
+                                    self.seam_canvas_pick_used = true;
+                                    if self.seam_sides_a.is_empty() {
+                                        self.add_draft_edge_to_side(true, edge);
+                                        self.seam_active_side_a = false;
+                                        self.pattern_message = "Lado A selecionado. Clique agora na aresta correspondente do lado B.".into();
+                                    } else if self.seam_sides_b.is_empty() {
+                                        self.add_draft_edge_to_side(false, edge);
+                                        if !self.seam_sides_b.is_empty() {
+                                            self.add_seam_from_controls();
+                                        }
+                                    } else {
+                                        self.pattern_message = "O par já foi selecionado. Inicie outra costura ou use cadeia M:N para acrescentar segmentos.".into();
+                                    }
+                                } else {
+                                    self.seam_canvas_pick_used |= self.seam_pick_mode;
+                                    self.add_draft_edge_to_side(self.seam_active_side_a, edge);
+                                }
                             }
                         } else if self.seam_pick_mode {
                             self.pattern_message = "Clique diretamente em uma aresta do contorno do molde; a área interna não é uma aresta.".into();
