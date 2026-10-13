@@ -11,7 +11,8 @@ use cloth_render::{
     ViewStyle, ViewportCallback,
 };
 use cloth_sim::{
-    build_avatar_colliders, build_scene, AvatarConfig, ClothBuilder, Collider, FabricPreset,
+    build_avatar_colliders, build_scene, clear_shell_radius, AvatarConfig, ClothBuilder, Collider,
+    FabricPreset,
     PanelMaterial, PanelMesh, Placement, SceneKind, SignedDistanceField, Simulation, SimParams,
 };
 use eframe::{egui, egui_wgpu};
@@ -4768,19 +4769,17 @@ impl ClothEvoApp {
             waist_width_m: self.pattern_project.avatar.waist_width_meters as f32,
             hip_width_m: self.pattern_project.avatar.hip_width_meters as f32,
         };
-        let body_colliders = if self.avatar_sdf.is_none() {
-            Some(build_avatar_colliders(&avatar)?)
+        // A mesma geometria corporal define o ponto inicial dos moldes e a colisão do solver.
+        // Prioriza o SDF do avatar importado; usa as formas analíticas apenas como fallback.
+        let body_colliders: Vec<Collider> = if let Some(field) = self.avatar_sdf.as_ref() {
+            vec![Collider::TriangleMeshSdf { field: Arc::clone(field) }]
         } else {
-            None
+            build_avatar_colliders(&avatar)?
         };
         let mut builder = ClothBuilder::new();
         builder.add_collider(Collider::ground());
-        if let Some(field) = self.avatar_sdf.as_ref() {
-            builder.add_collider(Collider::TriangleMeshSdf { field: Arc::clone(field) });
-        } else if let Some(colliders) = body_colliders {
-            for collider in colliders {
-                builder.add_collider(collider);
-            }
+        for collider in &body_colliders {
+            builder.add_collider(collider.clone());
         }
 
         struct PieceBuildInfo {
@@ -4795,7 +4794,8 @@ impl ClothEvoApp {
         let mut physical_fold_edge_count = 0usize;
         let piece_count = prepared.len();
         let x_span = (max_x - min_x).max(1.0e-6);
-        let origin_y = (0.9 - min_y) as f32;
+        // A altura-base acompanha a altura do avatar; 1,72 m preserva o layout anterior.
+        let origin_y = (0.9 * f64::from(avatar.height_m) / 1.72 - min_y) as f32;
 
         for (piece_index, (id, sample, mesh, fabric, assembly, grain, name)) in
             prepared.into_iter().enumerate()
@@ -4829,7 +4829,23 @@ impl ClothEvoApp {
             // moldes mais à esquerda/direita começam tangentes às laterais, e costuras os unem.
             let angle = (((center_x - min_x) / x_span).clamp(0.0, 1.0)
                 * std::f64::consts::PI - std::f64::consts::FRAC_PI_2) as f32;
-            let shell_radius = pattern_sim_shell_radius(piece_index, fabric.thickness_meters as f32);
+            let piece_thickness = fabric.thickness_meters as f32;
+            // Usa a geometria efetiva da colisão para que a casca dos moldes não nasça
+            // dentro de quadris, tórax ou braços. A largura tangencial ainda é aproximada.
+            let body_clear_radius = clear_shell_radius(
+                &body_colliders,
+                angle,
+                origin_y + mesh_min_y as f32,
+                origin_y + mesh_max_y as f32,
+                0.0,
+                PATTERN_SIM_BODY_RADIUS,
+            );
+            let shell_radius = pattern_sim_shell_radius(piece_index, piece_thickness).max(
+                body_clear_radius
+                    + piece_thickness
+                    + PATTERN_SIM_PERTURBATION
+                    + piece_index as f32 * PATTERN_SIM_LAYER_SPACING,
+            );
             let auto_origin = Vec3::new(
                 angle.sin() * shell_radius,
                 origin_y + center_y as f32,
