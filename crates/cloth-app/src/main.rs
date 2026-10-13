@@ -4342,9 +4342,14 @@ impl ClothEvoApp {
             if primary_pressed && direct_shortcut {
                 self.direct_sewing_press_edge = response.interact_pointer_pos()
                     .and_then(|pointer| self.hit_test_sewing_edge(pointer, center));
-                self.direct_sewing_preselected = match self.selected_target {
-                    Some(PatternEditTarget::Edge { piece, segment, .. }) => Some((piece, segment)),
-                    _ => None,
+                self.direct_sewing_preselected = if self.seam_pick_mode && self.seam_pick_pair_mode {
+                    // Em uma costura nova, nunca reutilize uma borda selecionada antes de abrir a ferramenta.
+                    None
+                } else {
+                    match self.selected_target {
+                        Some(PatternEditTarget::Edge { piece, segment, .. }) => Some((piece, segment)),
+                        _ => None,
+                    }
                 };
                 self.direct_sewing_preview = None;
             }
