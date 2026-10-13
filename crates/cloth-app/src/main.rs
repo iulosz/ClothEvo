@@ -3260,9 +3260,20 @@ impl ClothEvoApp {
         let edge_a = EdgePath::from_segments(
             piece_a_id, BoundaryCurve::Outline, a.1 as u32, (a.1 + 1) as u32, false,
         );
-        let edge_b = EdgePath::from_segments(
+        let mut edge_b = EdgePath::from_segments(
             piece_b_id, BoundaryCurve::Outline, b.1 as u32, (b.1 + 1) as u32, false,
         );
+        // Escolhe automaticamente a orientação que melhor aproxima os extremos A↔B.
+        // Isso evita que dois contornos com sentidos opostos sejam pareados torcidos.
+        let points_a = edge_path_points(&self.pattern_project, &edge_a, 8);
+        let points_b = edge_path_points(&self.pattern_project, &edge_b, 8);
+        if points_a.len() >= 2 && points_b.len() >= 2 {
+            let same_direction = points_a[0].distance(points_b[0])
+                + points_a[points_a.len() - 1].distance(points_b[points_b.len() - 1]);
+            let reversed_direction = points_a[0].distance(points_b[points_b.len() - 1])
+                + points_a[points_a.len() - 1].distance(points_b[0]);
+            edge_b.reversed = reversed_direction < same_direction;
+        }
 
         self.reset_seam_controls();
         self.pattern_tool = PatternTool::Select;
