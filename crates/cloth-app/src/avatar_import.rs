@@ -3,10 +3,12 @@
 //! substitui apenas a geometria visual do boneco.
 
 use cloth_render::{MeshKind, StaticMeshData, Vertex};
+use cloth_sim::SignedDistanceField;
 use glam::Vec3;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 const MAX_VERTICES: usize = 2_000_000;
 const MAX_TRIANGLES: usize = 2_000_000;
@@ -14,6 +16,8 @@ const MAX_TRIANGLES: usize = 2_000_000;
 pub struct ImportedAvatar {
     pub display_name: String,
     pub mesh: StaticMeshData,
+    /// SDF em metros, gerado com a mesma transformação/escala da malha visual.
+    pub collision_sdf: Option<Arc<SignedDistanceField>>,
 }
 
 pub fn load_model(path: &Path, target_height_meters: f32) -> Result<ImportedAvatar, String> {
@@ -36,9 +40,14 @@ pub fn load_model(path: &Path, target_height_meters: f32) -> Result<ImportedAvat
     };
 
     let (positions, indices) = normalize_mesh(positions, indices, target_height)?;
+    // Gerado uma única vez na importação; o solver só fará amostragens trilineares por frame.
+    // Malhas não adequadas para um campo assinado mantêm o fallback de colisores analíticos.
+    let collision_sdf = SignedDistanceField::from_triangle_mesh(&positions, &indices, 0.01)
+        .ok().map(Arc::new);
     let vertices = make_vertices(&positions, &indices)?;
     Ok(ImportedAvatar {
         display_name: name,
+        collision_sdf,
         mesh: StaticMeshData {
             vertices,
             indices,
