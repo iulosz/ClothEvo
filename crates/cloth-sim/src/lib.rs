@@ -20,7 +20,7 @@ pub mod params;
 pub mod scenes;
 pub mod solver;
 
-pub use avatar::{build_avatar_colliders, AvatarConfig};
+pub use avatar::{build_avatar_colliders, clear_shell_radius, AvatarConfig};
 pub use builder::{ClothBuilder, PanelHandle};
 pub use collider::Collider;
 pub use sdf::SignedDistanceField;
