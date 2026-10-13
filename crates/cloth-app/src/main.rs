@@ -2354,10 +2354,6 @@ impl ClothEvoApp {
         if !self.pattern_project.pieces.is_empty() {
             ui.separator();
             ui.collapsing("Piques e correspondência", |ui| {
-
-        if !self.pattern_project.pieces.is_empty() {
-            ui.separator();
-            ui.collapsing("Piques e correspondência", |ui| {
                 let piece_index = self.selected_piece.min(self.pattern_project.pieces.len() - 1);
                 self.selected_piece = piece_index;
                 let piece_id = self.pattern_project.pieces[piece_index].id;
