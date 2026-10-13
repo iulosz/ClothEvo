@@ -3693,10 +3693,11 @@ impl ClothEvoApp {
             egui::Color32::from_rgb(198, 153, 108),
         );
 
-        let tool_label = if self.pattern_tool == PatternTool::Draw {
-            "DESENHAR · clique para adicionar pontos"
-        } else {
-            "EDITAR · arraste vértices/alças · botão direito/meio move a vista"
+        let tool_label = match self.pattern_tool {
+            PatternTool::Draw => "DESENHAR · clique para adicionar pontos",
+            PatternTool::Select => "EDITAR · arraste vértices/alças · botão direito/meio move a vista",
+            PatternTool::Sew => "COSTURA 1:1 · clique na borda A e depois na borda B",
+            PatternTool::FreeSew => "COSTURA LIVRE · escolha A/B e selecione as bordas",
         };
         painter.text(
             rect.left_top() + egui::vec2(12.0, 12.0),
