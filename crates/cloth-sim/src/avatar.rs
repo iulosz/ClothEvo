@@ -96,6 +96,41 @@ pub fn build_avatar_colliders(config: &AvatarConfig) -> Result<Vec<Collider>, St
     Ok(out)
 }
 
+/// Menor raio r >= min_radius para que o centro de uma faixa do molde fique fora
+/// dos colisores em alturas amostradas. É uma estimativa por linha central: não inclui
+/// a largura tangencial do molde e limita a busca a 1,5 m.
+pub fn clear_shell_radius(
+    colliders: &[Collider],
+    angle: f32,
+    y_min: f32,
+    y_max: f32,
+    clearance: f32,
+    min_radius: f32,
+) -> f32 {
+    const SAMPLES: usize = 9;
+    const STEP: f32 = 0.005;
+    const MAX_RADIUS: f32 = 1.5;
+    let (sin_a, cos_a) = angle.sin_cos();
+    let (lo, hi) = if y_min <= y_max { (y_min, y_max) } else { (y_max, y_min) };
+    let start = min_radius.max(0.0);
+    let mut radius = start;
+
+    for k in 0..SAMPLES {
+        let t = k as f32 / (SAMPLES - 1) as f32;
+        let y = lo + (hi - lo) * t;
+        let mut r = start;
+        while r < MAX_RADIUS {
+            let point = Vec3::new(sin_a * r, y, cos_a * r);
+            if colliders.iter().all(|collider| collider.sdf(point) >= clearance) {
+                break;
+            }
+            r += STEP;
+        }
+        radius = radius.max(r);
+    }
+    radius
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +166,23 @@ mod tests {
         assert!(build_avatar_colliders(&bad).is_err());
         let too_wide = AvatarConfig { shoulder_width_m: 1.5, ..AvatarConfig::default() };
         assert!(build_avatar_colliders(&too_wide).is_err());
+    }
+
+    #[test]
+    fn clear_shell_radius_leaves_sphere_and_keeps_minimum_when_clear() {
+        let sphere = vec![Collider::Sphere { center: Vec3::new(0.0, 1.0, 0.0), radius: 0.2 }];
+        let radius = clear_shell_radius(&sphere, 0.0, 0.9, 1.1, 0.0, 0.14);
+        assert!(radius >= 0.2 && radius < 0.21, "raio fora do esperado: {radius}");
+        let far = clear_shell_radius(&sphere, 0.0, 2.0, 2.2, 0.0, 0.14);
+        assert!((far - 0.14).abs() < 1e-6);
+    }
+
+    #[test]
+    fn clear_shell_radius_is_finite_and_not_below_minimum_for_default_avatar() {
+        let colliders = build_avatar_colliders(&AvatarConfig::default()).unwrap();
+        for angle in [-1.5_f32, 0.0, 1.5] {
+            let radius = clear_shell_radius(&colliders, angle, 0.9, 1.6, 0.0, 0.14);
+            assert!(radius.is_finite() && radius >= 0.14);
+        }
     }
 }
