@@ -1,6 +1,9 @@
 //! Algoritmos geométricos sem dependência da UI ou do renderizador.
 
-use pattern_core::{Curve2D, CurveSegment, Point2};
+use pattern_core::{
+    BoundaryCurve, Curve2D, CurveParam, CurveSegment, EdgePath, PatternPiece, Point2, SeamDefinition,
+};
+use std::collections::HashMap;
 use std::fmt;
 
 pub mod editor_ops;
@@ -11,6 +14,8 @@ pub use editor_ops::{
 };
 
 const EPS: f64 = 1.0e-9;
+/// Orçamento global por curva para manter amostragem/sincronização limitada.
+const MAX_CURVE_SAMPLES: usize = 4_096;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GeometryError {
@@ -57,8 +62,91 @@ fn cubic(p0: Point2, p1: Point2, p2: Point2, p3: Point2, t: f64) -> Point2 {
 }
 
 /// Amostra uma curva e preserva o mapeamento entre segmentos da curva original e vértices.
-pub fn sample_curve_with_ranges(curve: &Curve2D, cubic_steps: usize) -> SampledCurve {
+/// Variante do amostrador que injeta exatamente parâmetros indicados na borda.
+/// Retorna os índices dos vértices forçados na mesma ordem de `forced_params`; não faz
+/// projeção para um vértice vizinho. Os parâmetros precisam identificar segmentos existentes.
+pub fn sample_curve_with_forced_params(
+    curve: &Curve2D,
+    cubic_steps: usize,
+    forced_params: &[(u32, f64)],
+) -> Result<(SampledCurve, Vec<usize>), GeometryError> {
+    if forced_params.iter().any(|(segment, t)| {
+        *segment as usize >= curve.segments.len() || !t.is_finite() || !(0.0..=1.0).contains(t)
+    }) {
+        return Err(GeometryError::InvalidParameter);
+    }
     let steps = cubic_steps.max(1);
+    let mut points = vec![curve.start];
+    let mut ranges = Vec::with_capacity(curve.segments.len());
+    let mut forced_indices = vec![None; forced_params.len()];
+    let mut current = curve.start;
+
+    for (segment_index, segment) in curve.segments.iter().enumerate() {
+        let start_index = points.len() - 1;
+        let mut ts = Vec::new();
+        if matches!(segment, CurveSegment::CubicBezier { .. }) {
+            ts.extend((1..steps).map(|step| step as f64 / steps as f64));
+        }
+        ts.extend(forced_params.iter().filter_map(|(forced_segment, t)| {
+            (*forced_segment as usize == segment_index && *t > EPS && *t < 1.0 - EPS).then_some(*t)
+        }));
+        ts.push(1.0);
+        ts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        ts.dedup_by(|a, b| (*a - *b).abs() <= EPS);
+
+        for (forced_index, (forced_segment, t)) in forced_params.iter().enumerate() {
+            if *forced_segment as usize == segment_index && t.abs() <= EPS {
+                forced_indices[forced_index] = Some(start_index);
+            }
+        }
+        for t in ts {
+            let point = match segment {
+                CurveSegment::Line { to } => Point2::new(
+                    current.x + (to.x - current.x) * t,
+                    current.y + (to.y - current.y) * t,
+                ),
+                CurveSegment::CubicBezier { control1, control2, to } => {
+                    cubic(current, *control1, *control2, *to, t)
+                }
+            };
+            points.push(point);
+            let vertex_index = points.len() - 1;
+            for (forced_index, (forced_segment, forced_t)) in forced_params.iter().enumerate() {
+                if *forced_segment as usize == segment_index && (*forced_t - t).abs() <= EPS {
+                    forced_indices[forced_index] = Some(vertex_index);
+                }
+            }
+        }
+        ranges.push((start_index, points.len() - 1));
+        current = segment.endpoint();
+    }
+
+    if curve.closed && points.len() > 1 && points[0].distance(*points.last().unwrap()) <= EPS {
+        let duplicated_index = points.len() - 1;
+        points.pop();
+        for range in &mut ranges {
+            if range.1 == duplicated_index { range.1 = 0; }
+        }
+        for index in &mut forced_indices {
+            if *index == Some(duplicated_index) { *index = Some(0); }
+        }
+    }
+    let forced_indices = forced_indices.into_iter()
+        .map(|index| index.ok_or(GeometryError::InvalidParameter))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((SampledCurve { points, segment_vertex_ranges: ranges }, forced_indices))
+}
+
+pub fn sample_curve_with_ranges(curve: &Curve2D, cubic_steps: usize) -> SampledCurve {
+    let cubic_count = curve.segments.iter()
+        .filter(|segment| matches!(segment, CurveSegment::CubicBezier { .. }))
+        .count();
+    let line_count = curve.segments.len().saturating_sub(cubic_count);
+    let extra_budget = MAX_CURVE_SAMPLES.saturating_sub(1 + line_count);
+    let safe_steps = if cubic_count == 0 { 1 } else {
+        (extra_budget / cubic_count).max(1)
+    };
+    let steps = cubic_steps.max(1).min(safe_steps);
     let mut points = vec![curve.start];
     let mut ranges = Vec::with_capacity(curve.segments.len());
     let mut current = curve.start;
@@ -87,6 +175,418 @@ pub fn sample_curve_with_ranges(curve: &Curve2D, cubic_steps: usize) -> SampledC
         }
     }
     SampledCurve { points, segment_vertex_ranges: ranges }
+}
+
+/// Parâmetros t amostrados por segmento da curva original. Cada lista inclui 0 e 1.
+type SegmentParameters = Vec<Vec<f64>>;
+
+fn point_on_segment(curve: &Curve2D, segment_index: usize, t: f64) -> Point2 {
+    let start = if segment_index == 0 {
+        curve.start
+    } else {
+        curve.segments[segment_index - 1].endpoint()
+    };
+    match &curve.segments[segment_index] {
+        CurveSegment::Line { to } => Point2::new(
+            start.x + (to.x - start.x) * t,
+            start.y + (to.y - start.y) * t,
+        ),
+        CurveSegment::CubicBezier { control1, control2, to } => {
+            cubic(start, *control1, *control2, *to, t)
+        }
+    }
+}
+
+fn cubic_parameters(
+    curve: &Curve2D,
+    segment_index: usize,
+    t0: f64,
+    t1: f64,
+    max_spacing: f64,
+    depth: u32,
+    out: &mut Vec<f64>,
+) -> Result<(), GeometryError> {
+    let p0 = point_on_segment(curve, segment_index, t0);
+    let p1 = point_on_segment(curve, segment_index, t1);
+    let span = t1 - t0;
+    let q1 = point_on_segment(curve, segment_index, t0 + span * 0.25);
+    let q2 = point_on_segment(curve, segment_index, t0 + span * 0.50);
+    let q3 = point_on_segment(curve, segment_index, t0 + span * 0.75);
+    let polyline_length = p0.distance(q1) + q1.distance(q2)
+        + q2.distance(q3) + q3.distance(p1);
+    let chord_length = p0.distance(p1);
+    let sufficiently_short = polyline_length <= max_spacing;
+    let sufficiently_flat = polyline_length - chord_length <= max_spacing * 0.04;
+
+    if depth >= 18 || (sufficiently_short && sufficiently_flat) {
+        if out.len() >= MAX_CURVE_SAMPLES {
+            return Err(GeometryError::InvalidParameter);
+        }
+        out.push(t1);
+        return Ok(());
+    }
+    let mid = (t0 + t1) * 0.5;
+    cubic_parameters(curve, segment_index, t0, mid, max_spacing, depth + 1, out)?;
+    cubic_parameters(curve, segment_index, mid, t1, max_spacing, depth + 1, out)?;
+    Ok(())
+}
+
+fn segment_parameters(curve: &Curve2D, max_spacing: f64) -> Result<SegmentParameters, GeometryError> {
+    if !max_spacing.is_finite() || max_spacing <= 0.0
+        || curve.segments.len().saturating_add(1) > MAX_CURVE_SAMPLES
+    {
+        return Err(GeometryError::InvalidParameter);
+    }
+    // Count all vertices across the whole curve, not just per individual segment.
+    let mut total_samples = 1usize;
+    let mut result = Vec::with_capacity(curve.segments.len());
+    for (index, segment) in curve.segments.iter().enumerate() {
+        match segment {
+            CurveSegment::Line { to } => {
+                let start = if index == 0 {
+                    curve.start
+                } else {
+                    curve.segments[index - 1].endpoint()
+                };
+                let length = start.distance(*to);
+                let count = (length / max_spacing).ceil().max(1.0);
+                if !count.is_finite() || count > MAX_CURVE_SAMPLES as f64 {
+                    return Err(GeometryError::InvalidParameter);
+                }
+                let count = count as usize;
+                if total_samples.saturating_add(count) > MAX_CURVE_SAMPLES {
+                    return Err(GeometryError::InvalidParameter);
+                }
+                total_samples += count;
+                result.push((0..=count).map(|i| i as f64 / count as f64).collect());
+            }
+            CurveSegment::CubicBezier { .. } => {
+                let mut params = vec![0.0];
+                cubic_parameters(curve, index, 0.0, 1.0, max_spacing, 0, &mut params)?;
+                let added = params.len().saturating_sub(1);
+                if total_samples.saturating_add(added) > MAX_CURVE_SAMPLES {
+                    return Err(GeometryError::InvalidParameter);
+                }
+                total_samples += added;
+                result.push(params);
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn normalize_parameters(params: &mut Vec<f64>) {
+    params.sort_by(f64::total_cmp);
+    params.dedup_by(|a, b| (*a - *b).abs() <= 1.0e-10);
+    if params.first().is_none_or(|t| *t > 1.0e-10) {
+        params.insert(0, 0.0);
+    } else if let Some(first) = params.first_mut() {
+        *first = 0.0;
+    }
+    if params.last().is_none_or(|t| *t < 1.0 - 1.0e-10) {
+        params.push(1.0);
+    } else if let Some(last) = params.last_mut() {
+        *last = 1.0;
+    }
+}
+
+fn sample_from_parameters(curve: &Curve2D, params: &SegmentParameters) -> SampledCurve {
+    let mut points = vec![curve.start];
+    let mut ranges = Vec::with_capacity(curve.segments.len());
+    for (segment_index, segment_params) in params.iter().enumerate() {
+        let start_index = points.len() - 1;
+        for &t in segment_params.iter().skip(1) {
+            points.push(point_on_segment(curve, segment_index, t));
+        }
+        ranges.push((start_index, points.len() - 1));
+    }
+
+    if curve.closed && points.len() > 1 && points[0].distance(*points.last().unwrap()) <= EPS {
+        let duplicated_index = points.len() - 1;
+        points.pop();
+        for range in &mut ranges {
+            if range.1 == duplicated_index { range.1 = 0; }
+        }
+    }
+    SampledCurve { points, segment_vertex_ranges: ranges }
+}
+
+fn edge_segment_lengths(
+    curve: &Curve2D,
+    params: &SegmentParameters,
+    edge: &pattern_core::EdgeRef,
+) -> Result<Vec<f64>, GeometryError> {
+    let start = edge.segment_start as usize;
+    let end = edge.segment_end as usize;
+    if start >= end || end > curve.segments.len() || params.len() != curve.segments.len() {
+        return Err(GeometryError::InvalidSegment);
+    }
+    Ok((start..end).map(|segment_index| {
+        let ts = &params[segment_index];
+        ts.windows(2).map(|pair| {
+            point_on_segment(curve, segment_index, pair[0])
+                .distance(point_on_segment(curve, segment_index, pair[1]))
+        }).sum::<f64>()
+    }).collect())
+}
+
+/// Frações de comprimento de arco (0..1) para todos os nós existentes na borda.
+fn edge_sample_fractions(
+    curve: &Curve2D,
+    params: &SegmentParameters,
+    edge: &pattern_core::EdgeRef,
+) -> Result<Vec<f64>, GeometryError> {
+    let lengths = edge_segment_lengths(curve, params, edge)?;
+    let total = lengths.iter().sum::<f64>();
+    if !total.is_finite() || total <= EPS {
+        return Err(GeometryError::DegenerateEdge);
+    }
+    let mut fractions = vec![0.0, 1.0];
+    let mut preceding = 0.0;
+    for (offset, length) in lengths.iter().copied().enumerate() {
+        let segment_index = edge.segment_start as usize + offset;
+        let ts = &params[segment_index];
+        let mut local = 0.0;
+        for (sample_index, pair) in ts.windows(2).enumerate() {
+            let a = point_on_segment(curve, segment_index, pair[0]);
+            let b = point_on_segment(curve, segment_index, pair[1]);
+            if sample_index == 0 {
+                let fraction = (preceding / total).clamp(0.0, 1.0);
+                fractions.push(if edge.reversed { 1.0 - fraction } else { fraction });
+            }
+            local += a.distance(b);
+            let fraction = ((preceding + local) / total).clamp(0.0, 1.0);
+            fractions.push(if edge.reversed { 1.0 - fraction } else { fraction });
+        }
+        preceding += length;
+    }
+    Ok(fractions)
+}
+
+/// Converte fração de arco orientada para um parâmetro de segmento usando a amostragem base.
+fn segment_parameter_at_edge_fraction(
+    curve: &Curve2D,
+    params: &SegmentParameters,
+    edge: &pattern_core::EdgeRef,
+    oriented_fraction: f64,
+) -> Result<(usize, f64), GeometryError> {
+    let lengths = edge_segment_lengths(curve, params, edge)?;
+    let total = lengths.iter().sum::<f64>();
+    if !total.is_finite() || total <= EPS {
+        return Err(GeometryError::DegenerateEdge);
+    }
+    let canonical_fraction = if edge.reversed {
+        1.0 - oriented_fraction
+    } else {
+        oriented_fraction
+    }.clamp(0.0, 1.0);
+    let target = canonical_fraction * total;
+    let mut preceding = 0.0;
+
+    for (offset, length) in lengths.iter().copied().enumerate() {
+        let segment_index = edge.segment_start as usize + offset;
+        let ts = &params[segment_index];
+        if target <= preceding + length + 1.0e-10 || offset + 1 == lengths.len() {
+            let local_target = (target - preceding).clamp(0.0, length);
+            let mut local = 0.0;
+            for pair in ts.windows(2) {
+                let a = point_on_segment(curve, segment_index, pair[0]);
+                let b = point_on_segment(curve, segment_index, pair[1]);
+                let span = a.distance(b);
+                if local_target <= local + span + 1.0e-10 {
+                    let alpha = if span <= EPS { 0.0 } else {
+                        ((local_target - local) / span).clamp(0.0, 1.0)
+                    };
+                    return Ok((segment_index, pair[0] + (pair[1] - pair[0]) * alpha));
+                }
+                local += span;
+            }
+            return Ok((segment_index, 1.0));
+        }
+        preceding += length;
+    }
+    Err(GeometryError::InvalidSegment)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PathSample { param: CurveParam, point: Point2, fraction: f64 }
+
+#[derive(Clone, Debug)]
+struct EdgeSamples { piece_id: u64, samples: Vec<PathSample>, length: f64, prefix: f64 }
+
+#[derive(Clone, Debug)]
+struct SampledPathChain { edges: Vec<EdgeSamples>, total_length: f64 }
+
+fn edge_path_samples(
+    curve: &Curve2D, params: &SegmentParameters, edge: &EdgePath,
+) -> Result<(Vec<PathSample>, f64), GeometryError> {
+    if edge.curve != BoundaryCurve::Outline
+        || !edge.start.t.is_finite() || !edge.end.t.is_finite()
+        || !(0.0..=1.0).contains(&edge.start.t) || !(0.0..=1.0).contains(&edge.end.t)
+        || edge.start.segment as usize >= curve.segments.len()
+        || edge.end.segment as usize >= curve.segments.len()
+        || edge.start_position() >= edge.end_position()
+        || params.len() != curve.segments.len()
+    { return Err(GeometryError::InvalidSegment); }
+
+    let mut raw: Vec<(CurveParam, Point2)> = Vec::new();
+    for segment_index in edge.start.segment as usize..=edge.end.segment as usize {
+        let t0 = if segment_index == edge.start.segment as usize { edge.start.t } else { 0.0 };
+        let t1 = if segment_index == edge.end.segment as usize { edge.end.t } else { 1.0 };
+        let mut ts = vec![t0];
+        ts.extend(params[segment_index].iter().copied()
+            .filter(|t| *t > t0 + 1.0e-10 && *t < t1 - 1.0e-10));
+        if t1 > t0 + 1.0e-10 { ts.push(t1); }
+        for t in ts {
+            let param = CurveParam { segment: segment_index as u32, t };
+            let point = point_on_segment(curve, segment_index, t);
+            if raw.last().is_none_or(|(previous, _)| previous.segment != param.segment
+                || (previous.t - param.t).abs() > 1.0e-10) {
+                raw.push((param, point));
+            }
+        }
+    }
+    if edge.reversed { raw.reverse(); }
+    if raw.len() < 2 { return Err(GeometryError::DegenerateEdge); }
+
+    let mut cumulative = vec![0.0_f64; raw.len()];
+    for index in 1..raw.len() {
+        cumulative[index] = cumulative[index - 1] + raw[index - 1].1.distance(raw[index].1);
+    }
+    let total = *cumulative.last().unwrap_or(&0.0);
+    if !total.is_finite() || total <= EPS { return Err(GeometryError::DegenerateEdge); }
+    let samples = raw.into_iter().enumerate().map(|(index, (param, point))| PathSample {
+        param, point, fraction: (cumulative[index] / total).clamp(0.0, 1.0),
+    }).collect();
+    Ok((samples, total))
+}
+
+fn sample_path_chain(
+    pieces_by_id: &HashMap<u64, &PatternPiece>,
+    base_params: &HashMap<u64, SegmentParameters>,
+    paths: &[EdgePath],
+) -> Result<SampledPathChain, GeometryError> {
+    let mut edges = Vec::new();
+    let mut total_length = 0.0;
+    for edge in paths {
+        if edge.curve != BoundaryCurve::Outline { return Err(GeometryError::InvalidSegment); }
+        let piece = *pieces_by_id.get(&edge.piece_id).ok_or(GeometryError::InvalidSegment)?;
+        let params = base_params.get(&piece.id).ok_or(GeometryError::InvalidSegment)?;
+        let (samples, length) = edge_path_samples(&piece.outline, params, edge)?;
+        edges.push(EdgeSamples { piece_id: piece.id, samples, length, prefix: total_length });
+        total_length += length;
+    }
+    if !total_length.is_finite() || total_length <= EPS { return Err(GeometryError::DegenerateEdge); }
+    Ok(SampledPathChain { edges, total_length })
+}
+
+impl SampledPathChain {
+    fn fractions(&self) -> Vec<f64> {
+        let mut fractions = vec![0.0, 1.0];
+        for edge in &self.edges {
+            fractions.extend(edge.samples.iter().map(|sample|
+                ((edge.prefix + sample.fraction * edge.length) / self.total_length).clamp(0.0, 1.0)));
+        }
+        fractions
+    }
+
+    fn parameter_at_fraction(&self, fraction: f64) -> Result<(u64, CurveParam), GeometryError> {
+        let target = fraction.clamp(0.0, 1.0) * self.total_length;
+        let edge = self.edges.iter().find(|edge| target <= edge.prefix + edge.length + 1.0e-10)
+            .or_else(|| self.edges.last()).ok_or(GeometryError::InvalidSegment)?;
+        let local = ((target - edge.prefix) / edge.length).clamp(0.0, 1.0);
+        let samples = &edge.samples;
+        if local <= 1.0e-10 { return Ok((edge.piece_id, samples[0].param)); }
+        for pair in samples.windows(2) {
+            let span = pair[1].fraction - pair[0].fraction;
+            if span <= 1.0e-12 { continue; }
+            if local <= pair[1].fraction + 1.0e-10 {
+                let alpha = ((local - pair[0].fraction) / span).clamp(0.0, 1.0);
+                let param = if pair[0].param.segment == pair[1].param.segment {
+                    CurveParam { segment: pair[0].param.segment,
+                        t: pair[0].param.t + (pair[1].param.t - pair[0].param.t) * alpha }
+                } else if alpha < 0.5 { pair[0].param } else { pair[1].param };
+                return Ok((edge.piece_id, param));
+            }
+        }
+        Ok((edge.piece_id, samples.last().ok_or(GeometryError::InvalidSegment)?.param))
+    }
+}
+
+/// Sincroniza cadeias M:N pelo arco acumulado e força piques/extremidades parciais como vértices.
+pub fn sample_pattern_outlines_with_seam_sync(
+    pieces: &[PatternPiece], seams: &[SeamDefinition],
+) -> Result<HashMap<u64, SampledCurve>, GeometryError> {
+    let pieces_by_id: HashMap<_, _> = pieces.iter().map(|piece| (piece.id, piece)).collect();
+    let mut base_params = HashMap::with_capacity(pieces.len());
+    for piece in pieces {
+        let mut params = segment_parameters(&piece.outline, piece.fabric.particle_distance_meters)?;
+        for notch in &piece.notches {
+            if let Some(segment) = params.get_mut(notch.segment_index as usize) {
+                if notch.t.is_finite() && (0.0..=1.0).contains(&notch.t) { segment.push(notch.t); }
+            }
+        }
+        base_params.insert(piece.id, params);
+    }
+
+    // Força todos os parâmetros de costura antes de sincronizar; nenhuma extremidade depende de snap.
+    for seam in seams {
+        for edge in seam.sides_a.iter().chain(seam.sides_b.iter()) {
+            if edge.curve != BoundaryCurve::Outline { continue; }
+            let params = base_params.get_mut(&edge.piece_id).ok_or(GeometryError::InvalidSegment)?;
+            for param in [edge.start, edge.end] {
+                if !param.t.is_finite() || !(0.0..=1.0).contains(&param.t) {
+                    return Err(GeometryError::InvalidParameter);
+                }
+                params.get_mut(param.segment as usize).ok_or(GeometryError::InvalidSegment)?.push(param.t);
+            }
+        }
+    }
+    for params in base_params.values_mut() {
+        for segment in params { normalize_parameters(segment); }
+    }
+
+    let mut synchronized_params = base_params.clone();
+    for seam in seams {
+        if seam.sides_a.is_empty() || seam.sides_b.is_empty() { continue; }
+        if seam.sides_a.iter().chain(seam.sides_b.iter()).any(|edge| edge.curve != BoundaryCurve::Outline) {
+            continue;
+        }
+        let chain_a = sample_path_chain(&pieces_by_id, &base_params, &seam.sides_a)?;
+        let chain_b = sample_path_chain(&pieces_by_id, &base_params, &seam.sides_b)?;
+        let mut fractions = chain_a.fractions();
+        fractions.extend(chain_b.fractions());
+        fractions.sort_by(f64::total_cmp);
+        fractions.dedup_by(|a, b| (*a - *b).abs() <= 1.0e-8);
+        if fractions.len() > MAX_CURVE_SAMPLES { return Err(GeometryError::InvalidParameter); }
+
+        for fraction in fractions {
+            for (piece_id, param) in [
+                chain_a.parameter_at_fraction(fraction)?,
+                chain_b.parameter_at_fraction(fraction)?,
+            ] {
+                synchronized_params.get_mut(&piece_id).ok_or(GeometryError::InvalidSegment)?
+                    .get_mut(param.segment as usize).ok_or(GeometryError::InvalidSegment)?.push(param.t);
+            }
+        }
+        for paths in [&seam.sides_a, &seam.sides_b] {
+            for edge in paths {
+                let params = synchronized_params.get(&edge.piece_id).ok_or(GeometryError::InvalidSegment)?;
+                let total = 1usize.saturating_add(
+                    params.iter().map(|segment| segment.len().saturating_sub(1)).sum::<usize>()
+                );
+                if total > MAX_CURVE_SAMPLES { return Err(GeometryError::InvalidParameter); }
+            }
+        }
+    }
+
+    let mut sampled = HashMap::with_capacity(pieces.len());
+    for piece in pieces {
+        let params = synchronized_params.get_mut(&piece.id).ok_or(GeometryError::InvalidSegment)?;
+        for segment in params.iter_mut() { normalize_parameters(segment); }
+        sampled.insert(piece.id, sample_from_parameters(&piece.outline, params));
+    }
+    Ok(sampled)
 }
 
 /// Amostra curvas Bézier cúbicas e segmentos lineares. Em curvas fechadas, remove o ponto
@@ -168,6 +668,12 @@ fn segments_intersect(a: Point2, b: Point2, c: Point2, d: Point2) -> bool {
 /// Valida uma borda fechada sem autointerseções. A entrada não precisa repetir o ponto inicial.
 pub fn validate_simple_polygon(polygon: &[Point2]) -> Result<(), GeometryError> {
     if polygon.len() < 3 { return Err(GeometryError::TooFewPoints); }
+    if polygon.len() > MAX_CURVE_SAMPLES {
+        return Err(GeometryError::InvalidParameter);
+    }
+    if polygon.iter().any(|point| !point.x.is_finite() || !point.y.is_finite()) {
+        return Err(GeometryError::InvalidParameter);
+    }
     for i in 0..polygon.len() {
         if polygon[i].distance(polygon[(i + 1) % polygon.len()]) <= EPS {
             return Err(GeometryError::DegenerateEdge);
@@ -183,7 +689,11 @@ pub fn validate_simple_polygon(polygon: &[Point2]) -> Result<(), GeometryError> 
             if segments_intersect(a, b, c, d) { return Err(GeometryError::SelfIntersection); }
         }
     }
-    if signed_area(polygon).abs() <= EPS { return Err(GeometryError::TooFewPoints); }
+    let area = signed_area(polygon);
+    if !area.is_finite() {
+        return Err(GeometryError::InvalidParameter);
+    }
+    if area.abs() <= EPS { return Err(GeometryError::TooFewPoints); }
     Ok(())
 }
 
@@ -348,6 +858,112 @@ mod tests {
         assert!(curve_length(&curve, 16) > 1.0);
     }
 
+    fn edge_points(sampled: &SampledCurve, segment_index: usize) -> Vec<Point2> {
+        let (start, end) = sampled.segment_vertex_ranges[segment_index];
+        if end >= start {
+            (start..=end).map(|index| sampled.points[index]).collect()
+        } else {
+            (start..sampled.points.len()).chain(0..=end)
+                .map(|index| sampled.points[index]).collect()
+        }
+    }
+
+    fn normalized_arc(points: &[Point2]) -> Vec<f64> {
+        let mut cumulative = vec![0.0];
+        for pair in points.windows(2) {
+            cumulative.push(cumulative.last().copied().unwrap() + pair[0].distance(pair[1]));
+        }
+        let total = cumulative.last().copied().unwrap_or(0.0).max(EPS);
+        cumulative.iter().map(|length| length / total).collect()
+    }
+
+    #[test]
+    fn sampling_rejects_aggregate_vertex_overflow_across_multiple_segments() {
+        let mut piece = PatternPiece::from_polygon(77, "Alta resolução", &[
+            Point2::new(0.0, 0.0),
+            Point2::new(1.1, 0.0),
+            Point2::new(1.1, 1.1),
+            Point2::new(0.0, 1.1),
+        ]).unwrap();
+        piece.fabric.particle_distance_meters = 0.001;
+        assert!(sample_pattern_outlines_with_seam_sync(&[piece], &[]).is_err());
+    }
+
+    #[test]
+    fn spacing_aware_sampling_subdivides_long_linear_boundaries() {
+        let mut piece = PatternPiece::from_polygon(1, "Retângulo", &[
+            Point2::new(0.0, 0.0),
+            Point2::new(2.0, 0.0),
+            Point2::new(2.0, 1.0),
+            Point2::new(0.0, 1.0),
+        ]).unwrap();
+        piece.fabric.particle_distance_meters = 0.25;
+        let sampled = sample_pattern_outlines_with_seam_sync(&[piece], &[]).unwrap();
+        let outline = &sampled[&1];
+        assert_eq!(outline.segment_vertex_ranges.len(), 4);
+        assert!(outline.points.len() >= 24);
+        for index in 0..outline.points.len() {
+            let next = outline.points[(index + 1) % outline.points.len()];
+            assert!(outline.points[index].distance(next) <= 0.250_001);
+        }
+    }
+
+    #[test]
+    fn asymmetric_seam_edges_get_identical_normalized_node_distribution() {
+        let mut longer = PatternPiece::from_polygon(1, "Borda longa", &[
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(1.0, 2.0),
+            Point2::new(0.0, 2.0),
+        ]).unwrap();
+        let mut shorter = PatternPiece::from_polygon(2, "Borda curta", &[
+            Point2::new(2.0, 0.0),
+            Point2::new(3.0, 0.0),
+            Point2::new(3.0, 1.0),
+            Point2::new(2.0, 1.0),
+        ]).unwrap();
+        longer.fabric.particle_distance_meters = 0.5;
+        shorter.fabric.particle_distance_meters = 0.4;
+        let edge_a = pattern_core::EdgeRef::single_segment(1, 1);
+        let mut edge_b = pattern_core::EdgeRef::single_segment(2, 3);
+        // A borda esquerda do segundo molde tem orientação oposta à borda direita do primeiro.
+        edge_b.reversed = true;
+        let seam = SeamDefinition {
+            id: 7,
+            name: "Lateral".into(),
+            sides_a: vec![edge_a.into()],
+            sides_b: vec![edge_b.into()],
+            ease_meters: 0.0,
+        };
+        let sampled = sample_pattern_outlines_with_seam_sync(&[longer, shorter], &[seam]).unwrap();
+        let a = edge_points(&sampled[&1], 1);
+        let mut b = edge_points(&sampled[&2], 3);
+        b.reverse();
+        assert_eq!(a.len(), b.len(), "ambos os lados da costura devem ter nós correspondentes");
+        let arc_a = normalized_arc(&a);
+        let arc_b = normalized_arc(&b);
+        assert_eq!(arc_a.len(), arc_b.len());
+        for (a, b) in arc_a.iter().zip(&arc_b) {
+            assert!((a - b).abs() < 1.0e-6, "frações de arco divergentes: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn synchronized_sampling_keeps_original_segment_ranges_and_reversed_closure() {
+        let piece = PatternPiece::from_polygon(5, "Costura de fechamento", &[
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(1.0, 1.0),
+            Point2::new(0.0, 1.0),
+        ]).unwrap();
+        let sampled = sample_pattern_outlines_with_seam_sync(&[piece], &[]).unwrap();
+        let outline = &sampled[&5];
+        assert_eq!(outline.segment_vertex_ranges.len(), 4);
+        let closing = outline.segment_vertex_ranges[3];
+        assert_eq!(closing.1, 0);
+        assert!(edge_points(outline, 3).len() >= 2);
+    }
+
     #[test]
     fn polygon_offset_expands_rectangle() {
         let rect = [
@@ -356,6 +972,35 @@ mod tests {
         ];
         let offset = offset_polygon(&rect, 0.1).unwrap();
         assert!((signed_area(&offset).abs() - 2.64).abs() < 1e-6);
+    }
+
+    #[test]
+    fn simple_polygon_rejects_excessive_vertex_count_before_quadratic_checks() {
+        let polygon = (0..=MAX_CURVE_SAMPLES).map(|index| {
+            let angle = std::f64::consts::TAU * index as f64 / (MAX_CURVE_SAMPLES + 1) as f64;
+            Point2::new(angle.cos(), angle.sin())
+        }).collect::<Vec<_>>();
+        assert_eq!(validate_simple_polygon(&polygon), Err(GeometryError::InvalidParameter));
+    }
+
+    #[test]
+    fn simple_polygon_rejects_non_finite_coordinates() {
+        let polygon = [
+            Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
+            Point2::new(f64::NAN, 1.0), Point2::new(0.0, 1.0),
+        ];
+        assert_eq!(validate_simple_polygon(&polygon), Err(GeometryError::InvalidParameter));
+    }
+
+    #[test]
+    fn simple_polygon_rejects_overflowing_area_calculation() {
+        let polygon = [
+            Point2::new(-1.0e200, -1.0e200),
+            Point2::new(1.0e200, -1.0e200),
+            Point2::new(1.0e200, 1.0e200),
+            Point2::new(-1.0e200, 1.0e200),
+        ];
+        assert_eq!(validate_simple_polygon(&polygon), Err(GeometryError::InvalidParameter));
     }
 
     #[test]

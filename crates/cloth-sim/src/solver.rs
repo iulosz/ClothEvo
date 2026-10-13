@@ -11,6 +11,10 @@ use crate::params::{ConstraintKind, SimParams, KIND_COUNT};
 
 /// Grupos de cor menores que isso são resolvidos em série (overhead do rayon não compensa).
 const PAR_MIN: usize = 256;
+/// Limita o custo da auto-colisão quando muitos pontos colapsam na mesma célula.
+const MAX_SELF_COLLISION_CANDIDATES_PER_PARTICLE: usize = 96;
+/// Orçamento agregado para que a lista de pares nunca cresça com N² nem com 96·N sem limite.
+const MAX_SELF_COLLISION_CANDIDATE_PAIRS_TOTAL: usize = 2_000_000;
 
 /// Restrição de distância entre duas partículas (stretch, shear ou costura).
 #[derive(Clone, Copy, Debug)]
@@ -83,6 +87,12 @@ pub struct Simulation {
     last_substep_dt: f32,
     /// Pares topologicamente adjacentes (ou unidos por costura) que não devem auto-colidir.
     self_collision_exclusions: HashSet<(u32, u32)>,
+    /// Contatos de auto-colisão acumulados no passo de simulação atual.
+    last_self_collision_contacts: usize,
+    /// Maior penetração interna detectada no passo atual, em metros.
+    last_self_collision_penetration: f32,
+    /// Recuperações/clamps de estabilidade ocorridos no passo atual.
+    last_stability_corrections: usize,
     last_density: f32,
 
     distance: Vec<DistanceConstraint>,
@@ -144,6 +154,9 @@ impl Simulation {
             friction_scale,
             last_substep_dt: 0.0,
             self_collision_exclusions,
+            last_self_collision_contacts: 0,
+            last_self_collision_penetration: 0.0,
+            last_stability_corrections: 0,
             dist_lambda: vec![0.0; distance.len()],
             distance,
             dist_colors,
@@ -167,6 +180,13 @@ impl Simulation {
         self.bending.len()
     }
 
+    /// Acesso somente de crate para validar os alvos das dobradiças físicas sem expor
+    /// os buffers internos do solver à API pública.
+    #[cfg(test)]
+    pub(crate) fn bending_constraints(&self) -> &[BendConstraint] {
+        &self.bending
+    }
+
     pub fn is_pinned(&self, i: usize) -> bool {
         self.pinned[i]
     }
@@ -176,8 +196,81 @@ impl Simulation {
         self.pos.copy_from_slice(&self.rest_pos);
         self.prev.copy_from_slice(&self.rest_pos);
         self.vel.fill(Vec3::ZERO);
+        self.last_self_collision_contacts = 0;
+        self.last_self_collision_penetration = 0.0;
+        self.last_stability_corrections = 0;
         self.last_substep_dt = 0.0;
         self.stats = Stats::default();
+    }
+
+    /// Translada um intervalo de partículas, incluindo o estado de repouso usado por Reiniciar.
+    ///
+    /// É usado pelo modo de posicionamento pré-simulação: mover um painel na viewport deve
+    /// sobreviver ao reset e preservar as velocidades em zero antes de iniciar a física.
+    pub fn translate_particles(&mut self, start: usize, end: usize, delta: Vec3) -> bool {
+        if start >= end || end > self.pos.len() || !delta.is_finite() {
+            return false;
+        }
+        for i in start..end {
+            self.pos[i] += delta;
+            self.prev[i] += delta;
+            self.rest_pos[i] += delta;
+            self.vel[i] = Vec3::ZERO;
+        }
+        self.last_substep_dt = 0.0;
+        true
+    }
+
+    /// Gira um intervalo de partículas em torno de um centro, incluindo o estado de repouso.
+    /// Assim a transformação interativa continua correta depois de Reiniciar.
+    pub fn rotate_particles(&mut self, start: usize, end: usize, center: Vec3, rotation: glam::Quat) -> bool {
+        if start >= end || end > self.pos.len() || !center.is_finite()
+            || !rotation.is_finite() || rotation.length_squared() <= 1.0e-12
+        {
+            return false;
+        }
+        let rotation = rotation.normalize();
+        for i in start..end {
+            self.pos[i] = center + rotation * (self.pos[i] - center);
+            self.prev[i] = center + rotation * (self.prev[i] - center);
+            self.rest_pos[i] = center + rotation * (self.rest_pos[i] - center);
+            self.vel[i] = rotation * self.vel[i];
+        }
+        self.last_substep_dt = 0.0;
+        true
+    }
+
+    /// Escala um painel ao longo de um eixo normalizado em torno do centro indicado.
+    /// É usado apenas durante o posicionamento; a prévia é reconstruída ao soltar o gizmo
+    /// para atualizar áreas, massas e comprimentos de repouso com a nova dimensão.
+    pub fn scale_particles_axis(
+        &mut self,
+        start: usize,
+        end: usize,
+        center: Vec3,
+        axis: Vec3,
+        factor: f32,
+    ) -> bool {
+        if start >= end || end > self.pos.len() || !center.is_finite() || !axis.is_finite()
+            || axis.length_squared() <= 1.0e-12 || !factor.is_finite()
+            || !(0.01..=100.0).contains(&factor)
+        {
+            return false;
+        }
+        let axis = axis.normalize();
+        let scale_point = |point: Vec3| {
+            let offset = point - center;
+            center + offset + axis * (offset.dot(axis) * (factor - 1.0))
+        };
+        for i in start..end {
+            self.pos[i] = scale_point(self.pos[i]);
+            self.prev[i] = scale_point(self.prev[i]);
+            self.rest_pos[i] = scale_point(self.rest_pos[i]);
+            let velocity = self.vel[i];
+            self.vel[i] = velocity + axis * (velocity.dot(axis) * (factor - 1.0));
+        }
+        self.last_substep_dt = 0.0;
+        true
     }
 
     fn refresh_masses(&mut self) {
@@ -215,6 +308,9 @@ impl Simulation {
         let damp = (-self.params.damping.max(0.0) * h).exp();
         let g = self.params.gravity;
         let parallel = self.params.parallel;
+        self.last_self_collision_contacts = 0;
+        self.last_self_collision_penetration = 0.0;
+        self.last_stability_corrections = 0;
 
         for _ in 0..substeps {
             // 1. Predição de posições.
@@ -261,24 +357,37 @@ impl Simulation {
             }
             self.collide();
 
-            // 4. Reconstrução de velocidade com limitador de segurança para evitar explosões.
+            // 4. Reconstrói velocidades, recuperando estados não finitos e limitando picos.
             let max_speed = self.params.max_particle_speed.clamp(1.0, 100.0);
             let max_displacement = max_speed * h;
             for i in 0..self.pos.len() {
+                if !self.pos[i].is_finite() || !self.prev[i].is_finite() {
+                    self.pos[i] = if self.prev[i].is_finite() {
+                        self.prev[i]
+                    } else {
+                        self.rest_pos[i]
+                    };
+                    self.prev[i] = self.pos[i];
+                    self.vel[i] = Vec3::ZERO;
+                    self.last_stability_corrections += 1;
+                    continue;
+                }
                 if self.inv_mass[i] <= 0.0 {
                     self.vel[i] = Vec3::ZERO;
                     continue;
                 }
                 let mut delta = self.pos[i] - self.prev[i];
                 let displacement = delta.length();
-                if displacement.is_finite() && displacement > max_displacement {
+                if !delta.is_finite() {
+                    self.pos[i] = self.prev[i];
+                    self.vel[i] = Vec3::ZERO;
+                    self.last_stability_corrections += 1;
+                    continue;
+                }
+                if displacement > max_displacement {
                     delta *= max_displacement / displacement.max(1e-9);
                     self.pos[i] = self.prev[i] + delta;
-                } else if !delta.is_finite() {
-                    // O app reconhece e pausa uma divergência não recuperável; evite propagá-la
-                    // para velocidades ou para a hash grid de colisão no substep seguinte.
-                    self.vel[i] = Vec3::splat(f32::NAN);
-                    continue;
+                    self.last_stability_corrections += 1;
                 }
                 self.vel[i] = delta / h;
             }
@@ -306,40 +415,14 @@ impl Simulation {
             .fold(0.0_f32, f32::max);
         if max_thickness <= 1.0e-6 { return; }
         let cell_size = (2.0 * max_thickness).max(0.005);
-        let cell_of = |p: Vec3| -> (i32, i32, i32) {
-            (
-                (p.x / cell_size).floor() as i32,
-                (p.y / cell_size).floor() as i32,
-                (p.z / cell_size).floor() as i32,
-            )
-        };
-        let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
-        for (i, p) in self.pos.iter().enumerate() {
-            if p.is_finite() {
-                grid.entry(cell_of(*p)).or_default().push(i as u32);
-            }
-        }
 
-        // Cada par aparece uma única vez: sempre processamos j > i.
-        let mut pairs: Vec<(u32, u32)> = Vec::new();
-        for (&cell, indices) in &grid {
-            for dx in -1..=1 {
-                for dy in -1..=1 {
-                    for dz in -1..=1 {
-                        let key = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
-                        let Some(neighbours) = grid.get(&key) else { continue; };
-                        for &i in indices {
-                            for &j in neighbours {
-                                if j <= i { continue; }
-                                let pair = (i, j);
-                                if self.self_collision_exclusions.contains(&pair) { continue; }
-                                pairs.push(pair);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // O helper constrói uma única grade espacial e limita o número de pares
+        // antes de resolvê-los, evitando alocação redundante em malhas densas.
+        let pairs = bounded_self_collision_candidate_pairs(
+            &self.pos,
+            cell_size,
+            &self.self_collision_exclusions,
+        );
 
         let global_mu = self.params.friction.max(0.0);
         for (ia, ib) in pairs {
@@ -365,6 +448,9 @@ impl Simulation {
                 }
             };
             let penetration = min_distance - distance;
+            self.last_self_collision_contacts += 1;
+            self.last_self_collision_penetration =
+                self.last_self_collision_penetration.max(penetration);
             let correction = normal * penetration;
             let ci = correction * (wi / weight);
             let cj = -correction * (wj / weight);
@@ -400,27 +486,41 @@ impl Simulation {
             let thickness = self.params.thickness * self.thickness_scale[i].max(1.0e-4);
             let mut p = self.pos[i];
             let mut q = self.prev[i];
-            for c in &self.colliders {
-                let d = c.sdf(p) - thickness;
-                if d < 0.0 {
-                    let n = c.normal(p);
-                    p -= n * d; // empurra para fora
 
-                    // A projeção de uma penetração é uma correção geométrica, não um impulso.
-                    // Ajusta a posição anterior na direção normal para não converter uma correção
-                    // grande (por exemplo, no primeiro frame) em velocidade artificial explosiva.
-                    let normal_delta = (p - q).dot(n);
-                    q += n * normal_delta;
+            // Colisores se sobrepõem nas juntas (ombro/braço, pelve/coxa). Sair de um
+            // pode levar a partícula para dentro de outro que já foi processado; repetir
+            // a passada estabiliza essas junções sem um custo grande por partícula.
+            for _pass in 0..3 {
+                let mut touched = false;
+                for collider in &self.colliders {
+                    let d = collider.sdf(p) - thickness;
+                    if d < 0.0 {
+                        touched = true;
+                        let n = collider.normal(p);
+                        p -= n * d; // empurra para fora
 
-                    // Atrito de Coulomb em posição: limita o deslocamento tangencial por μ·penetração.
-                    let dx = p - q;
-                    let t = dx - n * dx.dot(n);
-                    let tl = t.length();
-                    if tl > 1e-9 {
-                        let max_friction = mu * (-d);
-                        let friction_scale = if tl <= max_friction { 1.0 } else { max_friction / tl };
-                        p -= t * friction_scale;
+                        // A projeção geométrica não deve converter a correção numa velocidade
+                        // artificial explosiva. Ajusta a posição anterior na direção normal.
+                        let normal_delta = (p - q).dot(n);
+                        q += n * normal_delta;
+
+                        // Atrito de Coulomb em posição.
+                        let dx = p - q;
+                        let tangent = dx - n * dx.dot(n);
+                        let tangent_length = tangent.length();
+                        if tangent_length > 1e-9 {
+                            let max_friction = mu * (-d);
+                            let friction_scale = if tangent_length <= max_friction {
+                                1.0
+                            } else {
+                                max_friction / tangent_length
+                            };
+                            p -= tangent * friction_scale;
+                        }
                     }
+                }
+                if !touched {
+                    break;
                 }
             }
             self.pos[i] = p;
@@ -518,6 +618,21 @@ impl Simulation {
             .fold(0.0, f32::max)
     }
 
+    /// Contatos de auto-colisão encontrados em todos os substeps do último passo.
+    pub fn self_collision_contacts(&self) -> usize {
+        self.last_self_collision_contacts
+    }
+
+    /// Maior penetração entre partículas não adjacentes no último passo, em metros.
+    pub fn self_collision_max_penetration(&self) -> f32 {
+        self.last_self_collision_penetration
+    }
+
+    /// Quantidade de partículas recuperadas ou limitadas pelo mecanismo de estabilidade.
+    pub fn stability_corrections(&self) -> usize {
+        self.last_stability_corrections
+    }
+
     /// Normais por vértice (média ponderada pela área), para o render.
     pub fn compute_vertex_normals(&self, out: &mut Vec<Vec3>) {
         out.clear();
@@ -593,6 +708,93 @@ impl Simulation {
     }
 }
 
+
+fn bounded_self_collision_candidate_pairs(
+    positions: &[Vec3],
+    cell_size: f32,
+    exclusions: &HashSet<(u32, u32)>,
+) -> Vec<(u32, u32)> {
+    if positions.len() < 2 { return Vec::new(); }
+    let cell_size = cell_size.max(1.0e-5);
+    let cell_of = |p: Vec3| -> (i32, i32, i32) {
+        ((p.x / cell_size).floor() as i32,
+         (p.y / cell_size).floor() as i32,
+         (p.z / cell_size).floor() as i32)
+    };
+    let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
+    for (i, position) in positions.iter().enumerate() {
+        if position.is_finite() {
+            grid.entry(cell_of(*position)).or_default().push(i as u32);
+        }
+    }
+    let per_particle_budget = (MAX_SELF_COLLISION_CANDIDATE_PAIRS_TOTAL / positions.len())
+        .min(MAX_SELF_COLLISION_CANDIDATES_PER_PARTICLE);
+    if per_particle_budget == 0 {
+        return Vec::new();
+    }
+    // Não reserva capacidade proporcional ao número de vértices: malhas sem vizinhos
+    // próximos não devem pagar por pares que nunca serão gerados.
+    let mut pairs = Vec::new();
+    for (i, position) in positions.iter().enumerate() {
+        if !position.is_finite() { continue; }
+        let (cx, cy, cz) = cell_of(*position);
+        let mut candidates = 0usize;
+        'neighbor_cells: for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let Some(neighbours) = grid.get(&(cx + dx, cy + dy, cz + dz)) else { continue; };
+                    let first_after_i = neighbours.partition_point(|&j| (j as usize) <= i);
+                    for &j in &neighbours[first_after_i..] {
+                        if candidates >= per_particle_budget {
+                            break 'neighbor_cells;
+                        }
+                        candidates += 1;
+                        let pair = (i as u32, j);
+                        if exclusions.contains(&pair) { continue; }
+                        pairs.push(pair);
+                    }
+                }
+            }
+        }
+    }
+    pairs
+}
+
+#[cfg(test)]
+mod self_collision_candidate_tests {
+    use super::*;
+
+    #[test]
+    fn candidate_pairs_are_bounded_when_all_particles_collapse_into_one_cell() {
+        let positions = vec![Vec3::ZERO; 800];
+        let pairs = bounded_self_collision_candidate_pairs(&positions, 0.01, &HashSet::new());
+        assert!(!pairs.is_empty());
+        assert!(pairs.len() <= positions.len() * MAX_SELF_COLLISION_CANDIDATES_PER_PARTICLE);
+        assert!(pairs.iter().all(|&(a, b)| a < b));
+        let unique = pairs.iter().copied().collect::<HashSet<_>>();
+        assert_eq!(unique.len(), pairs.len());
+    }
+
+    #[test]
+    fn candidate_pairs_obey_global_memory_budget_on_large_collapsed_mesh() {
+        let positions = vec![Vec3::ZERO; 25_000];
+        let pairs = bounded_self_collision_candidate_pairs(&positions, 0.01, &HashSet::new());
+        assert!(!pairs.is_empty());
+        assert!(pairs.len() <= MAX_SELF_COLLISION_CANDIDATE_PAIRS_TOTAL);
+        assert!(pairs.len() < positions.len() * MAX_SELF_COLLISION_CANDIDATES_PER_PARTICLE);
+    }
+
+    #[test]
+    fn candidate_pairs_skip_excluded_and_non_finite_particles() {
+        let positions = vec![Vec3::ZERO, Vec3::ZERO, Vec3::splat(f32::NAN), Vec3::ZERO];
+        let exclusions = HashSet::from([(0_u32, 1_u32)]);
+        let pairs = bounded_self_collision_candidate_pairs(&positions, 0.01, &exclusions);
+        assert!(pairs.iter().all(|&(a, b)| a != 2 && b != 2));
+        assert!(!pairs.contains(&(0, 1)));
+        assert!(pairs.contains(&(0, 3)));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn solve_distance(
     cs: &[DistanceConstraint],
@@ -624,14 +826,20 @@ fn solve_distance(
             if len < 1e-9 {
                 return;
             }
-            let mut cval = len - c.rest;
-            if c.kind == ConstraintKind::Seam {
-                // A costura "puxa" devagar, para não lançar o tecido.
-                cval = cval.min(seam_step);
-            }
+            let cval = len - c.rest;
             let alpha = c.scale / stiff[c.kind as usize] * inv_h2;
-            let dl = (-cval - alpha * *lam) / (w + alpha);
-            *lam += dl;
+            let mut dl = (-cval - alpha * *lam) / (w + alpha);
+            if c.kind == ConstraintKind::Seam {
+                // Limita a correção acumulada de cada costura por substep.
+                // Assim, mais iterações melhoram a convergência, mas não aumentam
+                // indefinidamente a distância que a costura pode puxar neste substep.
+                let max_lambda = seam_step / w;
+                let next_lambda = (*lam + dl).clamp(-max_lambda, max_lambda);
+                dl = next_lambda - *lam;
+                *lam = next_lambda;
+            } else {
+                *lam += dl;
+            }
             let corr = d * (dl / len);
             *ptr.get().add(a) = pa + corr * wa;
             *ptr.get().add(b) = pb - corr * wb;
@@ -1092,6 +1300,31 @@ mod stability_tests {
     }
 
     #[test]
+    fn seam_pull_budget_is_independent_of_solver_iteration_count() {
+        let run = |iterations: usize| {
+            let mut positions = vec![Vec3::ZERO, Vec3::X];
+            let inv_mass = [1.0_f32, 1.0];
+            let constraint = DistanceConstraint {
+                a: 0, b: 1, rest: 0.0, scale: 1.0e-6, kind: ConstraintKind::Seam,
+            };
+            let mut lambda = [0.0_f32];
+            let stiffness = [1.0, 1.0, 1.0, 5_000.0];
+            for _ in 0..iterations {
+                solve_distance(
+                    &[constraint], &mut lambda, &mut positions, &inv_mass,
+                    1.0, &stiffness, 0.01, false,
+                );
+            }
+            1.0 - (positions[0] - positions[1]).length()
+        };
+        let one_iteration = run(1);
+        let many_iterations = run(8);
+        assert!(one_iteration <= 0.010_001, "single iteration exceeded seam budget: {one_iteration}");
+        assert!(many_iterations <= 0.010_001, "multiple iterations exceeded seam budget: {many_iterations}");
+        assert!((one_iteration - many_iterations).abs() < 1.0e-5);
+    }
+
+    #[test]
     fn self_collision_separates_non_adjacent_overlapping_panels() {
         let mut sim = minimal_simulation(true, 0.001);
         let before = (sim.pos[0] - sim.pos[3]).length();
@@ -1099,6 +1332,8 @@ mod stability_tests {
         let after = (sim.pos[0] - sim.pos[3]).length();
         assert!(after > before, "self collision should increase layer separation");
         assert!(sim.is_finite());
+        assert!(sim.self_collision_contacts() > 0);
+        assert!(sim.self_collision_max_penetration() > 0.0);
     }
 
     #[test]
@@ -1117,6 +1352,86 @@ mod stability_tests {
         sim.params.max_particle_speed = 2.0;
         sim.step(1.0 / 60.0);
         assert!(sim.max_particle_speed() <= 2.01);
+        assert!(sim.stability_corrections() > 0);
         assert_eq!(sim.unstable_particle_count(10.0), 0);
+    }
+
+    #[test]
+    fn non_finite_particle_state_is_recovered_and_reported() {
+        let mut sim = minimal_simulation(false, 0.0);
+        sim.pos[0] = Vec3::splat(f32::NAN);
+        sim.step(1.0 / 60.0);
+        assert!(sim.is_finite());
+        assert!(sim.stability_corrections() > 0);
+        assert_eq!(sim.vel[0], Vec3::ZERO);
+    }
+}
+
+#[cfg(test)]
+mod placement_transform_tests {
+    use super::*;
+
+    fn tiny_simulation() -> Simulation {
+        Simulation::from_parts(
+            vec![Vec3::ZERO, Vec3::X, Vec3::Y],
+            Vec::new(),
+            vec![1.0; 3],
+            vec![false; 3],
+            vec![1.0; 3],
+            vec![1.0; 3],
+            vec![1.0; 3],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            SimParams::default(),
+        )
+    }
+
+    #[test]
+    fn translating_panel_range_persists_after_reset() {
+        let mut sim = tiny_simulation();
+        let delta = Vec3::new(0.25, 0.5, -0.75);
+        assert!(sim.translate_particles(1, 3, delta));
+        assert_eq!(sim.pos[0], Vec3::ZERO);
+        assert_eq!(sim.pos[1], Vec3::X + delta);
+        assert_eq!(sim.prev[2], Vec3::Y + delta);
+        sim.reset();
+        assert_eq!(sim.pos[1], Vec3::X + delta);
+        assert_eq!(sim.pos[2], Vec3::Y + delta);
+        assert_eq!(sim.vel[1], Vec3::ZERO);
+    }
+
+    #[test]
+    fn rotating_panel_range_persists_after_reset() {
+        let mut sim = tiny_simulation();
+        let rotation = glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        assert!(sim.rotate_particles(0, 3, Vec3::ZERO, rotation));
+        assert!((sim.pos[1] - Vec3::Y).length() < 1e-5);
+        sim.reset();
+        assert!((sim.pos[1] - Vec3::Y).length() < 1e-5);
+        assert_eq!(sim.vel[1], Vec3::ZERO);
+    }
+
+    #[test]
+    fn scaling_panel_range_persists_after_reset_and_rejects_invalid_factors() {
+        let mut sim = tiny_simulation();
+        assert!(sim.scale_particles_axis(0, 3, Vec3::ZERO, Vec3::X, 2.0));
+        assert!((sim.pos[1] - Vec3::X * 2.0).length() < 1e-5);
+        assert!((sim.pos[2] - Vec3::Y).length() < 1e-5);
+        sim.reset();
+        assert!((sim.pos[1] - Vec3::X * 2.0).length() < 1e-5);
+        assert!(!sim.scale_particles_axis(0, 3, Vec3::ZERO, Vec3::ZERO, 2.0));
+        assert!(!sim.scale_particles_axis(0, 3, Vec3::ZERO, Vec3::X, 0.0));
+    }
+
+    #[test]
+    fn translating_panel_range_rejects_invalid_bounds_or_delta() {
+        let mut sim = tiny_simulation();
+        assert!(!sim.translate_particles(2, 2, Vec3::X));
+        assert!(!sim.translate_particles(0, 4, Vec3::X));
+        assert!(!sim.translate_particles(0, 1, Vec3::splat(f32::NAN)));
+        assert_eq!(sim.pos[0], Vec3::ZERO);
     }
 }

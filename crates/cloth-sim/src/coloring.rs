@@ -1,29 +1,60 @@
+use std::collections::HashMap;
 use std::ops::Range;
 
 /// Coloração gulosa: itens com a mesma cor não compartilham nenhuma partícula,
 /// logo podem ser resolvidos em paralelo sem condição de corrida.
 ///
 /// Usa uma máscara `u128` por partícula (até 128 cores; malhas triangulares precisam de ~10).
-pub fn greedy_coloring<const N: usize>(items: &[[u32; N]], particle_count: usize) -> Vec<u16> {
+pub fn greedy_coloring<const N: usize>(items: &[[u32; N]], particle_count: usize) -> Vec<u32> {
+    // Mantém um bitset contíguo e rápido para as primeiras 128 cores. Só vértices de
+    // grafos degenerados que excedem esse limite recebem palavras adicionais no mapa.
     let mut used = vec![0u128; particle_count];
+    let mut overflow = HashMap::<usize, Vec<u64>>::new();
     let mut colors = Vec::with_capacity(items.len());
     for item in items {
-        let mut mask = 0u128;
-        for &p in item {
-            mask |= used[p as usize];
+        let mut color = 0usize;
+        loop {
+            let available = if color < 128 {
+                let bit = 1u128 << color;
+                item.iter().all(|&particle| used[particle as usize] & bit == 0)
+            } else {
+                let extra_color = color - 128;
+                let word = extra_color / 64;
+                let bit = 1u64 << (extra_color % 64);
+                item.iter().all(|&particle| {
+                    overflow.get(&(particle as usize))
+                        .and_then(|words| words.get(word))
+                        .is_none_or(|mask| mask & bit == 0)
+                })
+            };
+            if available { break; }
+            color += 1;
         }
-        let color = (!mask).trailing_zeros();
-        assert!(color < 128, "grafo de restrições precisa de mais de 128 cores");
-        for &p in item {
-            used[p as usize] |= 1u128 << color;
+
+        if color < 128 {
+            let bit = 1u128 << color;
+            for &particle in item {
+                used[particle as usize] |= bit;
+            }
+        } else {
+            let extra_color = color - 128;
+            let word = extra_color / 64;
+            let bit = 1u64 << (extra_color % 64);
+            for &particle in item {
+                let words = overflow.entry(particle as usize).or_default();
+                if words.len() <= word {
+                    words.resize(word + 1, 0);
+                }
+                words[word] |= bit;
+            }
         }
-        colors.push(color as u16);
+        colors.push(color as u32);
     }
     colors
 }
 
 /// Reordena `items` agrupando por cor (estável) e devolve as faixas contíguas de cada cor.
-pub fn group_by_color<T: Copy>(items: &[T], colors: &[u16]) -> (Vec<T>, Vec<Range<usize>>) {
+pub fn group_by_color<T: Copy>(items: &[T], colors: &[u32]) -> (Vec<T>, Vec<Range<usize>>) {
     debug_assert_eq!(items.len(), colors.len());
     let color_count = colors.iter().copied().max().map_or(0, |c| c as usize + 1);
     let mut counts = vec![0usize; color_count];
@@ -63,9 +94,18 @@ mod tests {
     }
 
     #[test]
+    fn coloring_supports_more_than_128_conflicting_items_without_panicking() {
+        let items = vec![[0u32]; 130];
+        let colors = greedy_coloring(&items, 1);
+        assert_eq!(colors.len(), 130);
+        assert_eq!(colors.iter().copied().collect::<std::collections::HashSet<_>>().len(), 130);
+        assert_eq!(colors.iter().copied().max(), Some(129));
+    }
+
+    #[test]
     fn grouping_keeps_all_items() {
         let items = [10, 20, 30, 40];
-        let colors = [1u16, 0, 1, 0];
+        let colors = [1u32, 0, 1, 0];
         let (sorted, ranges) = group_by_color(&items, &colors);
         assert_eq!(sorted, vec![20, 40, 10, 30]);
         assert_eq!(ranges, vec![0..2, 2..4]);

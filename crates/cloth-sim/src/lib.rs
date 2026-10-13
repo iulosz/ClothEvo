@@ -13,15 +13,17 @@
 pub mod avatar;
 pub mod builder;
 pub mod collider;
+pub mod sdf;
 mod coloring;
 pub mod mesh;
 pub mod params;
 pub mod scenes;
 pub mod solver;
 
-pub use avatar::{build_avatar_colliders, AvatarConfig};
+pub use avatar::{build_avatar_colliders, clear_shell_radius, AvatarConfig};
 pub use builder::{ClothBuilder, PanelHandle};
 pub use collider::Collider;
+pub use sdf::SignedDistanceField;
 pub use mesh::{GridPanel, PanelMesh, Placement};
 pub use params::{ConstraintKind, FabricPreset, PanelMaterial, SimParams};
 pub use scenes::{build_scene, SceneKind};

@@ -1,9 +1,14 @@
-# ClothEvo — Fase 0
+# ClothEvo — Pattern Studio + XPBD
 
-Protótipo para validar os maiores riscos técnicos de um programa de moldes + simulação de tecido
-(estilo CLO3D / Marvelous Designer): **estabilidade e desempenho do solver XPBD**, colisão com
-primitivas e **costuras 2D → 3D**. Ainda não há editor 2D, avatar glTF nem DXF — isso vem nas
-próximas fases.
+Aplicação desktop em Rust para edição de moldes 2D e simulação de tecido XPBD em 3D. O repositório
+inclui geometria vetorial de curvas lineares/Bézier, triangulação CDT, costuras, piques, simetria,
+Cut & Sew, detalhes de dobra/prega, prévia de posicionamento 3D, colisores analíticos e renderer WGPU
+integrado ao egui.
+
+**Estado do projeto:** protótipo em desenvolvimento. Alguns recursos são aproximados: a auto-colisão
+usa um orçamento de candidatos para proteger o desempenho; linhas de dobra mapeiam para arestas
+existentes da malha; e o simulador atual usa colisores corporais analíticos, sem importação de avatar
+glTF. Ainda não é um substituto completo do CLO3D/Marvelous Designer nem um pipeline de produção.
 
 ## Como rodar
 
@@ -17,7 +22,7 @@ próximas fases.
 
 ```bash
 cargo run --release -p cloth-app      # abre o ClothEvo (use --release: o solver é pesado)
-cargo test --workspace                # 22 testes
+cargo test --workspace                # testes unitários do workspace
 cargo run --release -p cloth-sim --example bench   # benchmark do solver sem janela
 cargo run --release -p cloth-sim --example diag -- 1 24 20 1 10   # diagnóstico de estabilidade
 ```
@@ -171,7 +176,7 @@ A simetria mantém a correspondência de índices nas operações topológicas s
 3. Clique em **Cut & Sew**. O ClothEvo valida o caminho, divide o contorno em dois, preserva os segmentos Bézier, cria as duas peças e adiciona automaticamente uma costura entre as novas bordas de corte.
 4. O vínculo de simetria é preservado: se a peça tem um par, o caminho é refletido e o corte é executado nos dois moldes na mesma operação. As duas novas peças também formam um novo par vinculado.
 
-O sistema remapeia referências de costura e entalhes em trechos de borda que continuam íntegros. Se uma costura existente usa um segmento dividido pelo corte, ou se um detalhe interno, pence, furo, linha de fio ou prega atravessa a nova divisão, a operação é cancelada sem alterar o projeto. Nesse caso, reposicione/refaça o detalhe ou a costura e tente novamente. O corte não divide automaticamente esses detalhes que atravessam a linha.
+O sistema remapeia referências de costura e entalhes em trechos de borda que continuam íntegros. Linhas internas, dobras e eixos de pregas que cruzam o corte são divididos em fragmentos aproximados e preservados em cada peça; curvas inteiramente de um lado mantêm a representação original. Pence e furos que atravessam o corte, linha de fio ambígua e costuras existentes que dependem de segmentos divididos ainda são recusados sem alterar o projeto.
 
 As novas costuras conectam as bordas recém-criadas no grafo do projeto. A aplicação de folga diferencial (*ease*) continua sendo uma etapa separada do solver físico.
 
@@ -216,3 +221,54 @@ Na viewport de simulação, ajuste **substeps por quadro** e **iterações por s
 O atrito da seção **Física e montagem 3D por molde** é configurável por tecido e afeta o contato com colisores e outras partes do pano. Os controles globais de atrito e espessura continuam atuando como multiplicadores. As métricas mostram velocidade máxima, deslocamento do último substep, partículas acima do limiar de velocidade e aberturas críticas nas costuras.
 
 Os comandos **Pausar**, **Passo único** e **Reiniciar** são independentes: o passo único pausa antes de avançar exatamente um passo fixo; reiniciar restaura o estado de colocação e mantém a simulação pausada.
+
+
+## Posicionamento 3D pré-simulação
+
+O Pattern Studio usa o arquivo PNG raster da referência **T-POSE** em `assets/t_pose_reference.png`, exibido diretamente como textura no canvas 2D pela opção **Guia anatômico T-Pose**. O contorno não é vetorizado nem reconstruído. A imagem conserva sua proporção de pixels (585 × 632) e é exibida com altura de referência de 1,72 m e largura derivada dessa proporção; é um gabarito visual, não um avatar de fabricação.
+
+Use **Posicionar moldes na cena 3D** para gerar uma prévia dos painéis em torno do manequim sem iniciar automaticamente a física. Selecione um painel e escolha no painel lateral o modo **Mover**, **Girar**, **Escalar** ou **Transformar**:
+
+- **Mover**: arraste as setas coloridas para deslocar o molde por eixo.
+- **Girar**: arraste os anéis para rotacionar o molde no eixo correspondente.
+- **Escalar**: arraste os quadrados nas extremidades dos eixos; como o molde é uma superfície 2D, o controle normal ao plano aplica escala uniforme no plano.
+- **Transformar**: combina setas, anéis e controles de escala numa única ferramenta.
+- Arrastar o corpo do painel no modo **Mover** ainda permite posicionamento livre no plano da câmera. Arrastar fora dos painéis orbita; botão direito/meio move a câmera; a roda controla o zoom.
+- Use **Restaurar transformação deste molde** para recuperar posição, rotação e escala originais e **Iniciar simulação de tecido** quando terminar.
+
+As transformações são gravadas no projeto e no estado de repouso do solver. A rotação é aplicada sem reconstruir a malha; após escalar, a prévia é reconstruída ao soltar o manipulador para recalcular áreas, massas e restrições de repouso. Os comandos de costura continuam ligados aos vértices de contorno preservados pela triangulação CDT.
+
+
+### Topologia da malha de tecido
+
+A triangulação CDT preserva os vértices de contorno usados pelas costuras, e os pontos internos agora usam linhas alternadas com deslocamento de meia célula (amostragem triangular). Isso reduz o padrão ortogonal da grade anterior e tende a distribuir melhor os comprimentos das arestas internas. O espaçamento por molde continua configurável em **Distância entre partículas**; valores menores geram malha mais densa e elevam o custo da simulação.
+
+
+### P1 — Integridade dos piques, dobras e pregas
+
+A inserção de um vértice subdivide parametricamente os piques do segmento: os piques anteriores ao corte mantêm o segmento esquerdo, os posteriores migram para o segmento direito, e os índices seguintes são deslocados. A exclusão de uma âncora remapeia os piques para a nova aresta combinada por fração do comprimento de arco dos segmentos antigos; a exclusão da primeira âncora também trata explicitamente o fechamento do contorno. As operações de inserção e exclusão são validadas antes de confirmar a alteração no projeto.
+
+Linhas de dobra do tipo **Vale** e **Montanha** agora mapeiam para arestas internas existentes da malha. Essas arestas recebem rigidez de flexão local e um ângulo diedral-alvo em repouso; linhas do tipo **Decorativa** permanecem apenas visuais. O ângulo inicial de uma dobra física é de 30° e a rigidez inicial é 35% da rigidez de flexão base. Arquivos antigos sem o campo de ângulo usam esse valor padrão.
+
+Uma **prega** gera dois vincos paralelos aproximados em lados opostos do eixo, separados pela profundidade definida e com ângulos-alvo opostos. O mapeamento usa caminhos no grafo de adjacência da malha existente: não insere vértices nem modifica a triangulação CDT. O painel de montagem informa quantas arestas de dobra/prega foram mapeadas; se nenhuma aresta interna puder ser encontrada, é preciso aumentar a resolução do molde ou revisar o traçado.
+
+### P2 — Integridade dos detalhes no Cut & Sew
+
+Ao executar um corte, o editor mantém linhas internas, dobras e eixos de pregas. Se um desses elementos cruza o caminho de corte, a curva é particionada por lado e convertida em fragmentos poligonais, com o encontro calculado por busca binária entre amostras. Curvas inteiramente contidas em uma das peças mantêm a representação original, incluindo segmentos Bézier. A aproximação usa 64 intervalos por segmento original; isso evita perder o detalhe, mas fragmentos cruzados não são uma subdivisão Bézier exata.
+
+A operação continua transacional: referências de costura existentes, pences ou furos que não podem ser reparticionados com segurança causam cancelamento sem mutar o projeto. Linhas de fio e linhas de costura ambíguas também continuam protegidas em vez de serem atribuídas arbitrariamente.
+
+### P3 — Validação preventiva dos dados de molde
+
+A validação do projeto verifica valores finitos não só no contorno, mas também em linhas de costura e internas, dobras, eixos de pregas, linha de fio, pences, furos, anotações e coeficientes de graduação. A escala de montagem precisa ser finita e positiva. Como salvar e carregar passam por PatternProject::validate, dados inválidos são rejeitados antes de serem persistidos ou usados nas próximas etapas.
+
+Os testes incluem regressões para geometria não finita, escalas inválidas, coeficientes de graduação e fragmentação de linhas cruzadas pelo Cut & Sew. P3 pode continuar com avisos de qualidade geométrica (por exemplo, autointerseções, contornos degenerados e margens de costura sem solução) sem transformar esses avisos em rejeições automáticas antes de haver regras geométricas robustas para esses casos.
+
+
+### Limites de segurança da simulação e da malha
+
+A auto-colisão examina até 96 candidatos por partícula, com um orçamento global de 2 milhões de pares por substep e sem pré-alocação proporcional à malha. Isso evita crescimento quadrático de memória quando vértices colapsam numa célula. Em congestionamentos extremos, alguns pares deixam de ser examinados; o limite é uma proteção de estabilidade/desempenho, não uma garantia de colisão exaustiva.
+
+A preparação da malha recusa contornos com mais de 4.096 vértices, grades acima de 2 milhões de candidatos, custo estimado acima de 25 milhões de verificações ponto-contorno ou malhas acima de 500 mil vértices. Quando um limite é ultrapassado, aumente o espaçamento entre partículas ou simplifique o contorno.
+
+Transformações 3D importadas são limitadas a translações entre -100 m e 100 m, rotações até ±360.000 graus e escala entre (0, 100]. Valores fora desses limites são rejeitados antes de serem convertidos para o solver em f32.

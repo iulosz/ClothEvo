@@ -1,4 +1,7 @@
 use glam::{Vec2, Vec3};
+use std::sync::Arc;
+
+use crate::sdf::SignedDistanceField;
 
 /// Colisores analíticos descritos por campo de distância assinada (SDF).
 /// Positivo = fora, negativo = dentro.
@@ -13,6 +16,8 @@ pub enum Collider {
     Capsule { a: Vec3, b: Vec3, radius: f32 },
     /// Cilindro com tampas planas, do ponto `a` ao ponto `b`.
     Cylinder { a: Vec3, b: Vec3, radius: f32 },
+    /// Colisão pela superfície de um avatar, amostrada num campo de distância em metros.
+    TriangleMeshSdf { field: Arc<SignedDistanceField> },
 }
 
 impl Collider {
@@ -22,12 +27,12 @@ impl Collider {
     }
 
     pub fn sdf(&self, p: Vec3) -> f32 {
-        match *self {
-            Collider::Plane { normal, offset } => normal.dot(p) - offset,
-            Collider::Sphere { center, radius } => (p - center).length() - radius,
+        match self {
+            Collider::Plane { normal, offset } => normal.dot(p) - *offset,
+            Collider::Sphere { center, radius } => (p - *center).length() - *radius,
             Collider::Ellipsoid { center, radii } => {
                 // Aproximação de distância assinada de um elipsoide (positiva fora).
-                let q = p - center;
+                let q = p - *center;
                 let scaled = Vec3::new(q.x / radii.x, q.y / radii.y, q.z / radii.z);
                 let k0 = scaled.length();
                 let k1 = Vec3::new(
@@ -38,46 +43,62 @@ impl Collider {
                 if k1 < 1e-9 { -radii.min_element() } else { k0 * (k0 - 1.0) / k1 }
             }
             Collider::Capsule { a, b, radius } => {
-                let ab = b - a;
+                let ab = *b - *a;
                 let t = if ab.length_squared() > 1e-12 {
-                    ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0)
+                    ((p - *a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0)
                 } else { 0.0 };
-                (p - (a + ab * t)).length() - radius
+                (p - (*a + ab * t)).length() - *radius
             }
             Collider::Cylinder { a, b, radius } => {
-                let axis = b - a;
+                let axis = *b - *a;
                 let h = axis.length();
                 if h < 1e-9 {
-                    return (p - a).length() - radius;
+                    return (p - *a).length() - *radius;
                 }
                 let u = axis / h;
-                let pa = p - a;
+                let pa = p - *a;
                 let t = pa.dot(u);
                 let radial = (pa - u * t).length();
-                let dx = radial - radius;
+                let dx = radial - *radius;
                 let dy = (t - 0.5 * h).abs() - 0.5 * h;
                 let outside = Vec2::new(dx.max(0.0), dy.max(0.0)).length();
                 outside + dx.max(dy).min(0.0)
             }
+            Collider::TriangleMeshSdf { field } => field.sample(p),
         }
     }
 
     /// Normal da superfície (gradiente do SDF), apontando para fora.
     pub fn normal(&self, p: Vec3) -> Vec3 {
-        match *self {
-            Collider::Plane { normal, .. } => normal,
-            Collider::Sphere { center, .. } => (p - center).try_normalize().unwrap_or(Vec3::Y),
+        match self {
+            Collider::Plane { normal, .. } => *normal,
+            Collider::Sphere { center, .. } => (p - *center).try_normalize().unwrap_or(Vec3::Y),
             Collider::Ellipsoid { center, radii } => {
-                let q = p - center;
+                let q = p - *center;
                 Vec3::new(q.x / (radii.x * radii.x), q.y / (radii.y * radii.y), q.z / (radii.z * radii.z))
-                    .try_normalize().unwrap_or(Vec3::Y)
+                    .try_normalize().unwrap_or_else(|| {
+                        // No centro o gradiente é nulo. Sair pelo eixo mais curto evita um
+                        // empurrão arbitrário para cima, que pode injetar energia no tecido.
+                        if radii.x <= radii.y && radii.x <= radii.z {
+                            Vec3::X
+                        } else if radii.z <= radii.y {
+                            Vec3::Z
+                        } else {
+                            Vec3::Y
+                        }
+                    })
             }
             Collider::Capsule { a, b, .. } => {
-                let ab = b - a;
+                let ab = *b - *a;
                 let t = if ab.length_squared() > 1e-12 {
-                    ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0)
+                    ((p - *a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0)
                 } else { 0.0 };
-                (p - (a + ab * t)).try_normalize().unwrap_or(Vec3::X)
+                (p - (*a + ab * t)).try_normalize().unwrap_or_else(|| {
+                    // No eixo da cápsula, escolhe uma direção perpendicular ao eixo.
+                    let axis = ab.try_normalize().unwrap_or(Vec3::Y);
+                    let helper = if axis.x.abs() < 0.9 { Vec3::X } else { Vec3::Z };
+                    axis.cross(helper).try_normalize().unwrap_or(Vec3::X)
+                })
             }
             Collider::Cylinder { a, b, .. } => {
                 const E: f32 = 1e-3;
@@ -92,13 +113,13 @@ impl Collider {
 
                 // No eixo do cilindro, a derivada radial numérica é zero por simetria.
                 // Usar +Y como fallback empurrava o tecido para cima, injetando energia.
-                let axis = b - a;
+                let axis = *b - *a;
                 let length = axis.length();
                 if length < 1e-9 {
-                    return (p - a).try_normalize().unwrap_or(Vec3::X);
+                    return (p - *a).try_normalize().unwrap_or(Vec3::X);
                 }
                 let axis_dir = axis / length;
-                let axial_position = (p - a).dot(axis_dir);
+                let axial_position = (p - *a).dot(axis_dir);
                 if axial_position < 0.0 {
                     return -axis_dir;
                 }
@@ -109,6 +130,7 @@ impl Collider {
                 let helper = if axis_dir.x.abs() < 0.9 { Vec3::X } else { Vec3::Z };
                 axis_dir.cross(helper).try_normalize().unwrap_or(Vec3::Z)
             }
+            Collider::TriangleMeshSdf { field } => field.gradient(p),
         }
     }
 }
