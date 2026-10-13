@@ -461,6 +461,10 @@ struct ClothEvoApp {
     seam_b_start_t: f64,
     seam_b_end_t: f64,
     seam_free_mode: bool,
+    /// Captura direta de arestas no canvas para construir uma costura sem navegar por combos.
+    seam_pick_mode: bool,
+    /// Mantém cadeias capturadas como a fonte da costura, mesmo depois de sair do modo de seleção.
+    seam_canvas_pick_used: bool,
     seam_snap_tolerance_px: f32,
     dragging_seam_handle: Option<(bool, bool)>,
     seam_drag_before: Option<PatternEditorSnapshot>,
@@ -597,6 +601,8 @@ impl ClothEvoApp {
             seam_b_start_t: 0.0,
             seam_b_end_t: 1.0,
             seam_free_mode: false,
+            seam_pick_mode: false,
+            seam_canvas_pick_used: false,
             seam_snap_tolerance_px: 10.0,
             dragging_seam_handle: None,
             seam_drag_before: None,
@@ -1882,6 +1888,55 @@ impl ClothEvoApp {
             ui.separator();
             ui.strong("Sistema avançado de costura");
 
+            // Ferramenta de seleção direta: seleciona bordas no canvas sem navegar por combos.
+            ui.horizontal(|ui| {
+                let label = if self.seam_pick_mode {
+                    "Concluir seleção no canvas"
+                } else {
+                    "Selecionar arestas no canvas"
+                };
+                if ui.button(label).clicked() {
+                    self.seam_pick_mode = !self.seam_pick_mode;
+                    if self.seam_pick_mode {
+                        self.pattern_tool = PatternTool::Select;
+                        self.seam_canvas_pick_used = true;
+                        self.pattern_message = format!(
+                            "Seleção de costura ativa: clique nas arestas do lado {}. Troque para o outro lado e selecione as bordas correspondentes.",
+                            if self.seam_active_side_a { "A" } else { "B" }
+                        );
+                    } else {
+                        self.pattern_message = "Seleção no canvas pausada. Revise os dois lados e crie/salve a costura.".into();
+                    }
+                }
+                ui.selectable_value(&mut self.seam_active_side_a, true, "Lado A");
+                ui.selectable_value(&mut self.seam_active_side_a, false, "Lado B");
+            });
+            ui.horizontal(|ui| {
+                if ui.button("Limpar A").clicked() {
+                    self.seam_sides_a.clear();
+                    self.seam_a_active_path = 0;
+                    self.seam_canvas_pick_used = true;
+                    self.seam_active_side_a = true;
+                    self.pattern_message = "Lado A limpo. Selecione novamente as arestas no canvas.".into();
+                }
+                if ui.button("Limpar B").clicked() {
+                    self.seam_sides_b.clear();
+                    self.seam_b_active_path = 0;
+                    self.seam_canvas_pick_used = true;
+                    self.seam_active_side_a = false;
+                    self.pattern_message = "Lado B limpo. Selecione novamente as arestas no canvas.".into();
+                }
+            });
+            if self.seam_pick_mode {
+                ui.strong(format!(
+                    "MODO COSTURA · Lado {} ativo",
+                    if self.seam_active_side_a { "A" } else { "B" }
+                ));
+                ui.weak("Clique nas bordas no canvas 2D para adicioná-las à cadeia. Alterne A/B para montar o outro lado; as correspondências são distribuídas pelo comprimento acumulado.");
+            } else {
+                ui.weak("Use a seleção direta para montar os lados A/B no canvas; os controles de segmentos abaixo continuam disponíveis para ajustes precisos.");
+            }
+
             let mut requested_seam = self.selected_seam_id;
             egui::ComboBox::from_id_salt("selected_seam")
                 .selected_text(self.selected_seam_id
@@ -1899,6 +1954,8 @@ impl ClothEvoApp {
                     }
                 });
             if requested_seam != self.selected_seam_id {
+                self.seam_pick_mode = false;
+                self.seam_canvas_pick_used = false;
                 self.selected_seam_id = requested_seam;
                 if let Some(id) = requested_seam {
                     if let Some(seam) = self.pattern_project.seams.iter().find(|seam| seam.id == id).cloned() {
@@ -2037,24 +2094,7 @@ impl ClothEvoApp {
             ui.checkbox(&mut self.seam_a_reversed, "Inverter direção da borda A");
             ui.checkbox(&mut self.seam_b_reversed, "Inverter direção da borda B");
 
-            ui.horizontal(|ui| {
-                ui.label("Lado ativo para Shift+clique:");
-                ui.selectable_value(&mut self.seam_active_side_a, true, "A");
-                ui.selectable_value(&mut self.seam_active_side_a, false, "B");
-            });
-            ui.horizontal(|ui| {
-                if ui.button("Adicionar borda atual a A").clicked() {
-                    if let Ok((edge, _)) = self.seam_edges_from_controls() {
-                        self.add_draft_edge_to_side(true, edge);
-                    }
-                }
-                if ui.button("Adicionar borda atual a B").clicked() {
-                    if let Ok((_, edge)) = self.seam_edges_from_controls() {
-                        self.add_draft_edge_to_side(false, edge);
-                    }
-                }
-            });
-            ui.weak("Cada lado é uma cadeia ordenada. Shift+clique em uma borda adiciona-a ao lado ativo.");
+            ui.weak("Cada lado é uma cadeia ordenada. Na seleção direta, clique nas arestas sem precisar manter Shift; fora dela, Shift+clique continua adicionando ao lado ativo.");
             for is_a in [true, false] {
                 let paths = if is_a { self.seam_sides_a.clone() } else { self.seam_sides_b.clone() };
                 let active = if is_a { self.seam_a_active_path } else { self.seam_b_active_path };
@@ -2187,6 +2227,10 @@ impl ClothEvoApp {
                 }
                 if ui.button("Nova costura").clicked() {
                     self.reset_seam_controls();
+                    self.seam_pick_mode = true;
+                    self.seam_canvas_pick_used = true;
+                    self.pattern_tool = PatternTool::Select;
+                    self.pattern_message = "Nova costura: selecione as arestas do lado A, troque para B e selecione as correspondentes.".into();
                 }
             });
             ui.label(format!("Costuras no projeto: {}", self.pattern_project.seams.len()));
@@ -3109,6 +3153,8 @@ impl ClothEvoApp {
         self.seam_b_start_t = 0.0;
         self.seam_b_end_t = 1.0;
         self.seam_free_mode = false;
+        self.seam_pick_mode = false;
+        self.seam_canvas_pick_used = false;
         self.dragging_seam_handle = None;
         self.seam_drag_before = None;
     }
@@ -3147,11 +3193,16 @@ impl ClothEvoApp {
 
     fn current_seam_sides_with_draft(&self) -> Result<(Vec<EdgePath>, Vec<EdgePath>), String> {
         let (draft_a, draft_b) = self.seam_edges_from_controls()?;
+        let direct_capture = self.seam_pick_mode || self.seam_canvas_pick_used;
         let merge = |stored: &[EdgePath], active: usize, draft: EdgePath| {
             let mut result = stored.to_vec();
-            if result.is_empty() { result.push(draft); }
-            else if active < result.len() { result[active] = draft; }
-            else { result.push(draft); }
+            if result.is_empty() {
+                if !direct_capture { result.push(draft); }
+            } else if active < result.len() {
+                result[active] = draft;
+            } else if !direct_capture {
+                result.push(draft);
+            }
             result
         };
         Ok((
@@ -3306,6 +3357,12 @@ impl ClothEvoApp {
     }
 
     fn add_seam_from_controls(&mut self) {
+        if (self.seam_pick_mode || self.seam_canvas_pick_used)
+            && (self.seam_sides_a.is_empty() || self.seam_sides_b.is_empty())
+        {
+            self.pattern_message = "A costura precisa de pelo menos uma aresta no lado A e uma no lado B. Selecione as duas cadeias no canvas.".into();
+            return;
+        }
         let (sides_a, sides_b) = match self.current_seam_sides_with_draft() {
             Ok(sides) => sides,
             Err(error) => { self.pattern_message = error; return; }
@@ -3331,7 +3388,9 @@ impl ClothEvoApp {
         self.pattern_project = staged;
         self.selected_seam_id = Some(next_id);
         self.seam_name = name;
-        self.pattern_message = "Costura adicionada. Pareamento por arco, folga-alvo e piques serão usados na simulação.".into();
+        self.seam_pick_mode = false;
+        self.seam_canvas_pick_used = false;
+        self.pattern_message = "Costura adicionada. A/B permanecem visíveis; as correspondências são distribuídas pelo arco acumulado e pelos piques.".into();
         self.remember_pattern_change(before);
     }
 
@@ -3362,6 +3421,8 @@ impl ClothEvoApp {
             return;
         }
         self.pattern_project = staged;
+        self.seam_pick_mode = false;
+        self.seam_canvas_pick_used = false;
         self.pattern_message = format!("Costura '{id}' atualizada.");
         self.remember_pattern_change(before);
     }
@@ -3896,7 +3957,7 @@ impl ClothEvoApp {
         }
 
         // Preview do lado atual: os extremos do caminho ativo podem ser arrastados livremente.
-        if self.seam_free_mode {
+        if self.seam_free_mode || self.seam_pick_mode || self.seam_canvas_pick_used {
             if let Ok((draft_a, draft_b)) = self.seam_edges_from_controls() {
                 let paths_a = self.seam_sides_a.clone();
                 let paths_b = self.seam_sides_b.clone();
@@ -3909,9 +3970,16 @@ impl ClothEvoApp {
                     let is_a = side_index == 0;
                     let list = &mut sides[side_index];
                     let index = active[side_index];
-                    if list.is_empty() { list.push(drafts[side_index].clone()); }
-                    else if index < list.len() { list[index] = drafts[side_index].clone(); }
-                    else { list.push(drafts[side_index].clone()); }
+                    if list.is_empty() {
+                        if self.seam_canvas_pick_used {
+                            continue;
+                        }
+                        list.push(drafts[side_index].clone());
+                    } else if index < list.len() {
+                        list[index] = drafts[side_index].clone();
+                    } else if !self.seam_canvas_pick_used {
+                        list.push(drafts[side_index].clone());
+                    }
                     let color = if is_a { egui::Color32::from_rgb(255, 190, 74) } else { egui::Color32::from_rgb(94, 224, 207) };
                     for (path_index, edge) in list.iter().enumerate() {
                         let path = edge_path_points(&self.pattern_project, edge, 24);
@@ -3932,6 +4000,26 @@ impl ClothEvoApp {
                                         egui::FontId::proportional(9.0), color);
                                 }
                             }
+                        }
+                    }
+                }
+
+                // Correspondência visual aproximada por progresso do arco acumulado.
+                if self.seam_canvas_pick_used && !sides[0].is_empty() && !sides[1].is_empty() {
+                    for step in 0..=6 {
+                        let progress = step as f32 / 6.0;
+                        if let (Some(point_a), Some(point_b)) = (
+                            point_on_edge_chain_at_progress(&self.pattern_project, &sides[0], progress),
+                            point_on_edge_chain_at_progress(&self.pattern_project, &sides[1], progress),
+                        ) {
+                            let screen_a = to_screen(point_a);
+                            let screen_b = to_screen(point_b);
+                            painter.line_segment(
+                                [screen_a, screen_b],
+                                egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(220, 230, 240, 125)),
+                            );
+                            painter.circle_filled(screen_a, 2.5, egui::Color32::from_rgb(255, 235, 185));
+                            painter.circle_filled(screen_b, 2.5, egui::Color32::from_rgb(170, 250, 240));
                         }
                     }
                 }
@@ -3966,7 +4054,7 @@ impl ClothEvoApp {
             }
         }
 
-        if self.pattern_tool == PatternTool::Select {
+        if self.pattern_tool == PatternTool::Select || self.seam_pick_mode {
             if response.drag_started_by(egui::PointerButton::Primary) {
                 if let Some(pointer) = response.interact_pointer_pos() {
                     if let Some(handle) = self.hit_test_seam_handle(pointer, &to_screen) {
@@ -4031,15 +4119,18 @@ impl ClothEvoApp {
                 if let Some(pointer) = response.interact_pointer_pos() {
                     let target = self.hit_test_pattern(pointer, center);
                     let shift = ui.input(|input| input.modifiers.shift);
-                    if shift {
+                    if self.seam_pick_mode || shift {
                         if let Some(PatternEditTarget::Edge { piece, segment, .. }) = target {
                             if let Some(data) = self.pattern_project.pieces.get(piece) {
                                 let edge = EdgePath::from_segments(
                                     data.id, BoundaryCurve::Outline,
                                     segment as u32, segment as u32 + 1, false,
                                 );
+                                self.seam_canvas_pick_used |= self.seam_pick_mode;
                                 self.add_draft_edge_to_side(self.seam_active_side_a, edge);
                             }
+                        } else if self.seam_pick_mode {
+                            self.pattern_message = "Clique diretamente em uma aresta do contorno do molde; a área interna não é uma aresta.".into();
                         }
                     } else {
                         self.selected_target = target;
