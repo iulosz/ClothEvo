@@ -139,7 +139,10 @@ fn parse_fbx(path: &Path) -> Result<(Vec<[f32; 3]>, Vec<u32>), String> {
         generate_missing_normals: true,
         ..Default::default()
     };
-    let scene = ufbx::load_file(path, options)
+    let filename = path.to_str().ok_or_else(|| {
+        format!("O caminho do arquivo não pode ser representado em UTF-8: {}", path.display())
+    })?;
+    let scene = ufbx::load_file(filename, options)
         .map_err(|e| format!("Falha ao importar FBX '{}': {}", path.display(), e.description))?;
 
     let mut positions: Vec<[f32; 3]> = Vec::new();
