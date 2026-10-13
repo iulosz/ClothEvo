@@ -4,8 +4,10 @@
 //! `CLOTHEVO_SCENE=1|2|3`, `CLOTHEVO_FRAMES=<n passos simulados>` e
 //! `CLOTHEVO_SCREENSHOT=<arquivo.ppm>` — salva o viewport e fecha o app.
 
+mod avatar_import;
+
 use cloth_render::{
-    primitives, ClothTopology, OrbitCamera, SceneRenderer, StaticMeshData, Vertex,
+    primitives, ClothTopology, MeshKind, OrbitCamera, SceneRenderer, StaticMeshData, Vertex,
     ViewStyle, ViewportCallback,
 };
 use cloth_sim::{
@@ -500,6 +502,10 @@ struct ClothEvoApp {
     gizmo_mode: GizmoMode,
     avatar_guide_texture: Option<egui::TextureHandle>,
     show_avatar_guide: bool,
+    /// Mesh visual do avatar importado; os colisores físicos permanecem analíticos.
+    avatar_mesh: Option<StaticMeshData>,
+    avatar_mesh_name: Option<String>,
+    avatar_mesh_path: Option<std::path::PathBuf>,
     pattern_tool: PatternTool,
     pattern_zoom: f32,
     pattern_pan: egui::Vec2,
@@ -644,6 +650,9 @@ impl ClothEvoApp {
             gizmo_mode: GizmoMode::Move,
             avatar_guide_texture: None,
             show_avatar_guide: true,
+            avatar_mesh: None,
+            avatar_mesh_name: None,
+            avatar_mesh_path: None,
             pattern_tool: PatternTool::Draw,
             pattern_zoom: PATTERN_PIXELS_PER_METER,
             pattern_pan: egui::Vec2::ZERO,
@@ -658,8 +667,63 @@ impl ClothEvoApp {
             pattern_dirty: false,
             pattern_fit_pending: false,
         };
+        app.try_load_default_avatar();
         app.upload_scene();
         app
+    }
+
+    fn load_avatar_from_path(&mut self, path: &std::path::Path, refresh_viewport: bool) -> Result<(), String> {
+        let imported = avatar_import::load_model(
+            path,
+            self.pattern_project.avatar.height_meters as f32,
+        )?;
+        self.avatar_mesh = Some(imported.mesh);
+        self.avatar_mesh_name = Some(imported.display_name.clone());
+        self.avatar_mesh_path = Some(path.to_path_buf());
+        self.pattern_message = format!(
+            "Avatar '{}' importado. A malha visual substitui o boneco; a colisão física continua usando volumes analíticos aproximados.",
+            imported.display_name
+        );
+        if refresh_viewport {
+            self.upload_scene();
+        }
+        Ok(())
+    }
+
+    fn try_load_default_avatar(&mut self) {
+        let mut candidates = Vec::new();
+        if let Ok(executable) = std::env::current_exe() {
+            if let Some(directory) = executable.parent() {
+                candidates.push(directory.join("assets").join("Sarah.fbx"));
+                candidates.push(directory.join("Sarah.fbx"));
+            }
+        }
+        if let Ok(directory) = std::env::current_dir() {
+            candidates.push(directory.join("assets").join("Sarah.fbx"));
+            candidates.push(directory.join("Sarah.fbx"));
+        }
+        for candidate in candidates {
+            if !candidate.is_file() { continue; }
+            if let Err(error) = self.load_avatar_from_path(&candidate, false) {
+                self.pattern_message = format!(
+                    "Sarah.fbx foi encontrado, mas não pôde ser importado: {error}"
+                );
+            }
+            break;
+        }
+    }
+
+    fn import_avatar_dialog(&mut self) {
+        let selected = rfd::FileDialog::new()
+            .set_title("Importar avatar 3D")
+            .add_filter("Modelos 3D (OBJ/FBX)", &["obj", "fbx"])
+            .add_filter("Wavefront OBJ", &["obj"])
+            .add_filter("Autodesk FBX", &["fbx"])
+            .pick_file();
+        let Some(path) = selected else { return; };
+        if let Err(error) = self.load_avatar_from_path(&path, true) {
+            self.pattern_message = error;
+        }
     }
 
     /// Reconstrói a cena preservando os parâmetros atuais.
@@ -681,7 +745,15 @@ impl ClothEvoApp {
             return;
         };
         let edges = self.sim.mesh_edges();
-        let statics = statics_from(&self.sim.colliders);
+        let mut statics = statics_from(&self.sim.colliders);
+        if let Some(avatar) = self.avatar_mesh.as_ref() {
+            // Na simulação de moldes, os SDFs do corpo continuam ativos na física,
+            // mas não devem desenhar o boneco primitivo sobre a malha importada.
+            if self.using_pattern_sim {
+                statics.retain(|mesh| mesh.kind == MeshKind::Ground);
+            }
+            statics.push(avatar.clone());
+        }
         let mut renderer = rs.renderer.write();
         if let Some(r) = renderer.callback_resources.get_mut::<SceneRenderer>() {
             r.set_statics(&rs.device, &statics);
@@ -2413,7 +2485,7 @@ impl ClothEvoApp {
         let avatar_before = self.pattern_project.avatar.clone();
         let mut avatar_changed = false;
         ui.collapsing("Avatar 3D e colisão corporal", |ui| {
-            ui.label("Manequim procedural usado na montagem 3D e na colisão tecido-corpo.");
+            ui.label("Use um modelo OBJ/FBX como representação visual do avatar.");
             avatar_changed |= ui.add(egui::Slider::new(&mut self.pattern_project.avatar.height_meters, 1.20..=2.20)
                 .text("Altura (m)")).changed();
             avatar_changed |= ui.add(egui::Slider::new(&mut self.pattern_project.avatar.shoulder_width_meters, 0.25..=0.70)
@@ -2422,7 +2494,28 @@ impl ClothEvoApp {
                 .text("Largura da cintura (m)")).changed();
             avatar_changed |= ui.add(egui::Slider::new(&mut self.pattern_project.avatar.hip_width_meters, 0.22..=0.70)
                 .text("Largura do quadril (m)")).changed();
-            ui.weak("Usa 18 colisores SDF de elipsoides e cápsulas. Importação de malhas OBJ/FBX/glTF ainda não está implementada.");
+
+            ui.horizontal(|ui| {
+                if ui.button("Importar avatar OBJ/FBX…").clicked() {
+                    self.import_avatar_dialog();
+                }
+                if self.avatar_mesh.is_some() && ui.small_button("Remover modelo").clicked() {
+                    self.avatar_mesh = None;
+                    self.avatar_mesh_name = None;
+                    self.avatar_mesh_path = None;
+                    self.pattern_message = "Modelo visual removido; o manequim procedural voltou a ser exibido.".into();
+                    self.upload_scene();
+                }
+            });
+            if let Some(name) = self.avatar_mesh_name.as_ref() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(100, 220, 170),
+                    format!("Avatar visual: {name}"),
+                );
+            } else {
+                ui.weak("Avatar visual atual: manequim procedural.");
+            }
+            ui.weak("O modelo é normalizado para a altura definida acima. A colisão do tecido continua usando volumes analíticos aproximados.");
         });
         if avatar_changed {
             let mut before = self.editor_snapshot();
