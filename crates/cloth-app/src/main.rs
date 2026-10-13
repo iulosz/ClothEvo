@@ -376,6 +376,10 @@ struct PlacementGizmoDrag {
 enum PatternTool {
     Draw,
     Select,
+    /// Seleciona uma borda A e depois uma borda B para criar uma costura 1:1.
+    Sew,
+    /// Permite montar manualmente cadeias de bordas nos lados A e B (M:N).
+    FreeSew,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1605,10 +1609,45 @@ impl ClothEvoApp {
     fn pattern_controls(&mut self, ui: &mut egui::Ui) {
         ui.heading("Pattern Studio 0.4 · Geometria vetorial");
         ui.label("Editor 2D · medidas internas em metros");
+        let previous_tool = self.pattern_tool;
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.pattern_tool, PatternTool::Draw, "Desenhar");
             ui.selectable_value(&mut self.pattern_tool, PatternTool::Select, "Selecionar / editar");
         });
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.pattern_tool, PatternTool::Sew, "Costurar 1:1");
+            ui.selectable_value(&mut self.pattern_tool, PatternTool::FreeSew, "Costura livre M:N");
+        });
+        if self.pattern_tool != previous_tool
+            && matches!(self.pattern_tool, PatternTool::Sew | PatternTool::FreeSew)
+        {
+            self.reset_seam_controls();
+        }
+        match self.pattern_tool {
+            PatternTool::Sew => {
+                ui.weak("Clique na primeira borda (A) e depois na borda correspondente (B). A costura é criada imediatamente.");
+            }
+            PatternTool::FreeSew => {
+                let count_a = self.seam_sides_a.len();
+                let count_b = self.seam_sides_b.len();
+                ui.horizontal(|ui| {
+                    ui.label("Selecionando:");
+                    ui.selectable_value(&mut self.seam_active_side_a, true, format!("Lado A · {count_a}"));
+                    ui.selectable_value(&mut self.seam_active_side_a, false, format!("Lado B · {count_b}"));
+                    if ui.button("Limpar A/B").clicked() {
+                        self.reset_seam_controls();
+                        self.pattern_message = "Seleção de costura limpa. Escolha o lado A/B e selecione as bordas.".into();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Concluir costura livre").clicked() {
+                        self.finish_free_sewing();
+                    }
+                });
+                ui.weak("Escolha A, clique nas bordas que formam esse lado; escolha B, selecione as correspondentes e conclua. Não precisa pressionar Shift.");
+            }
+            _ => {}
+        }
         ui.horizontal(|ui| {
             if ui.add_enabled(!self.pattern_undo.is_empty(), egui::Button::new("↶ Desfazer")).clicked() {
                 self.undo_pattern_edit();
@@ -2328,7 +2367,22 @@ impl ClothEvoApp {
             ui.label(&self.pattern_message);
         }
         ui.separator();
-        ui.weak("Canvas: clique para adicionar pontos; as peças fechadas aparecem com contorno azul.");
+        ui.weak(match self.pattern_tool {
+            PatternTool::Draw => "Canvas: clique para adicionar pontos; as peças fechadas aparecem com contorno azul.",
+            PatternTool::Select => "Canvas: selecione ou arraste peças, vértices, alças e bordas. Shift+clique adiciona bordas à costura livre.",
+            PatternTool::Sew => "Costurar 1:1: clique no meio de uma borda A e depois na borda B correspondente.",
+            PatternTool::FreeSew => "Costura livre: escolha A ou B no painel e clique nas bordas desejadas; as cadeias selecionadas ficam destacadas.",
+        });
+    }
+
+    fn hit_test_pattern_edge(&self, pointer: egui::Pos2, center: egui::Pos2) -> Option<PatternEditTarget> {
+        hit_test_pattern_edge_only(
+            &self.pattern_project.pieces,
+            pointer,
+            center + self.pattern_pan,
+            self.pattern_zoom,
+            12.0,
+        )
     }
 
     fn hit_test_pattern(&self, pointer: egui::Pos2, center: egui::Pos2) -> Option<PatternEditTarget> {
@@ -3086,6 +3140,62 @@ impl ClothEvoApp {
                 self.remember_pattern_change(before);
             }
             Err(e) => self.pattern_message = e,
+        }
+    }
+
+    fn handle_manual_sew_click(&mut self, edge: EdgePath) {
+        // A primeira borda define A. A segunda define B e tenta criar a costura.
+        if self.seam_sides_a.is_empty() {
+            self.reset_seam_controls();
+            self.seam_sides_a.push(edge.clone());
+            self.seam_a_active_path = 0;
+            self.load_seam_edge_to_controls(true, &edge);
+            self.seam_active_side_a = false;
+            self.pattern_message = "Lado A selecionado. Agora clique na borda correspondente do lado B.".into();
+            return;
+        }
+
+        if let Some(edge_a) = self.seam_sides_a.first() {
+            if edge_a.piece_id == edge.piece_id {
+                self.pattern_message = "A costura 1:1 precisa conectar bordas de peças diferentes. Selecione uma borda de outra peça.".into();
+                return;
+            }
+        }
+
+        let previous_count = self.pattern_project.seams.len();
+        self.seam_sides_b.clear();
+        self.seam_sides_b.push(edge.clone());
+        self.seam_b_active_path = 0;
+        self.load_seam_edge_to_controls(false, &edge);
+        self.seam_active_side_a = false;
+        self.add_seam_from_controls();
+
+        if self.pattern_project.seams.len() > previous_count {
+            self.reset_seam_controls();
+            self.pattern_message = "Costura criada. Clique na próxima borda A para criar outra ligação.".into();
+        } else {
+            let reason = self.pattern_message.clone();
+            self.seam_sides_b.clear();
+            self.seam_b_active_path = 0;
+            self.seam_active_side_a = false;
+            self.pattern_message = format!("{reason} Selecione outra borda para o lado B.");
+        }
+    }
+
+    fn finish_free_sewing(&mut self) {
+        if self.seam_sides_a.is_empty() || self.seam_sides_b.is_empty() {
+            self.pattern_message = format!(
+                "Costura livre incompleta: selecione pelo menos uma borda em A e uma em B (A: {}, B: {}).",
+                self.seam_sides_a.len(),
+                self.seam_sides_b.len(),
+            );
+            return;
+        }
+        let previous_count = self.pattern_project.seams.len();
+        self.add_seam_from_controls();
+        if self.pattern_project.seams.len() > previous_count {
+            self.reset_seam_controls();
+            self.pattern_message = "Costura livre criada com as cadeias A/B selecionadas.".into();
         }
     }
 
@@ -3895,8 +4005,10 @@ impl ClothEvoApp {
             }
         }
 
-        // Preview do lado atual: os extremos do caminho ativo podem ser arrastados livremente.
-        if self.seam_free_mode {
+        // Preview de costura: mostra os lados A/B selecionados; no modo livre os extremos
+        // dos intervalos ativos também podem ser arrastados.
+        let sewing_tool_active = matches!(self.pattern_tool, PatternTool::Sew | PatternTool::FreeSew);
+        if self.seam_free_mode || sewing_tool_active {
             if let Ok((draft_a, draft_b)) = self.seam_edges_from_controls() {
                 let paths_a = self.seam_sides_a.clone();
                 let paths_b = self.seam_sides_b.clone();
@@ -3909,9 +4021,15 @@ impl ClothEvoApp {
                     let is_a = side_index == 0;
                     let list = &mut sides[side_index];
                     let index = active[side_index];
-                    if list.is_empty() { list.push(drafts[side_index].clone()); }
-                    else if index < list.len() { list[index] = drafts[side_index].clone(); }
-                    else { list.push(drafts[side_index].clone()); }
+                    if list.is_empty() {
+                        if self.seam_free_mode && !sewing_tool_active {
+                            list.push(drafts[side_index].clone());
+                        }
+                    } else if index < list.len() {
+                        list[index] = drafts[side_index].clone();
+                    } else if self.seam_free_mode && !sewing_tool_active {
+                        list.push(drafts[side_index].clone());
+                    }
                     let color = if is_a { egui::Color32::from_rgb(255, 190, 74) } else { egui::Color32::from_rgb(94, 224, 207) };
                     for (path_index, edge) in list.iter().enumerate() {
                         let path = edge_path_points(&self.pattern_project, edge, 24);
@@ -4029,8 +4147,12 @@ impl ClothEvoApp {
             }
             if response.clicked() && self.dragging_target.is_none() && self.dragging_seam_handle.is_none() {
                 if let Some(pointer) = response.interact_pointer_pos() {
-                    let target = self.hit_test_pattern(pointer, center);
                     let shift = ui.input(|input| input.modifiers.shift);
+                    let target = if shift {
+                        self.hit_test_pattern_edge(pointer, center)
+                    } else {
+                        self.hit_test_pattern(pointer, center)
+                    };
                     if shift {
                         if let Some(PatternEditTarget::Edge { piece, segment, .. }) = target {
                             if let Some(data) = self.pattern_project.pieces.get(piece) {
@@ -4054,6 +4176,33 @@ impl ClothEvoApp {
                     Some(PatternEditTarget::Piece { .. }) => self.delete_selected_piece(),
                     Some(PatternEditTarget::Anchor { .. }) => self.delete_selected_vertex(),
                     _ => {}
+                }
+            }
+        } else if matches!(self.pattern_tool, PatternTool::Sew | PatternTool::FreeSew) {
+            if response.clicked() {
+                if let Some(pointer) = response.interact_pointer_pos() {
+                    if let Some(PatternEditTarget::Edge { piece, segment, .. }) =
+                        self.hit_test_pattern_edge(pointer, center)
+                    {
+                        if let Some(data) = self.pattern_project.pieces.get(piece) {
+                            let edge = EdgePath::from_segments(
+                                data.id,
+                                BoundaryCurve::Outline,
+                                segment as u32,
+                                segment as u32 + 1,
+                                false,
+                            );
+                            match self.pattern_tool {
+                                PatternTool::Sew => self.handle_manual_sew_click(edge),
+                                PatternTool::FreeSew => {
+                                    self.add_draft_edge_to_side(self.seam_active_side_a, edge);
+                                }
+                                _ => {}
+                            }
+                        }
+                    } else {
+                        self.pattern_message = "Não encontrei uma borda nesse ponto. Clique mais perto do contorno do molde.".into();
+                    }
                 }
             }
         } else if response.clicked() {
@@ -6364,6 +6513,52 @@ mod pattern_editor_tests {
     }
 }
 
+fn hit_test_pattern_edge_only(
+    pieces: &[PatternPiece],
+    pointer: egui::Pos2,
+    origin: egui::Pos2,
+    scale: f32,
+    tolerance_px: f32,
+) -> Option<PatternEditTarget> {
+    if !scale.is_finite() || scale <= 0.0 || !tolerance_px.is_finite() || tolerance_px < 0.0 {
+        return None;
+    }
+    let to_screen = |point: PatternPoint2| {
+        egui::pos2(
+            origin.x + point.x as f32 * scale,
+            origin.y - point.y as f32 * scale,
+        )
+    };
+    let mut best_edge: Option<(f32, PatternEditTarget)> = None;
+    for (piece_index, piece) in pieces.iter().enumerate() {
+        let sampled = sample_curve_with_ranges(&piece.outline, 24);
+        let count = sampled.points.len();
+        if count < 2 { continue; }
+        for (segment_index, &(start, end)) in sampled.segment_vertex_ranges.iter().enumerate() {
+            let sample_count = if end >= start { end - start } else { count - start };
+            if sample_count == 0 { continue; }
+            for step in 0..sample_count {
+                let ia = (start + step) % count;
+                let ib = (ia + 1) % count;
+                let a = to_screen(sampled.points[ia]);
+                let b = to_screen(sampled.points[ib]);
+                let (distance, segment_t) = closest_segment_parameter(pointer, a, b);
+                if distance <= tolerance_px
+                    && best_edge.map(|best| distance < best.0).unwrap_or(true)
+                {
+                    let t = ((step as f64 + segment_t as f64) / sample_count as f64).clamp(0.02, 0.98);
+                    best_edge = Some((distance, PatternEditTarget::Edge {
+                        piece: piece_index,
+                        segment: segment_index,
+                        t,
+                    }));
+                }
+            }
+        }
+    }
+    best_edge.map(|(_, target)| target)
+}
+
 #[cfg(test)]
 mod placement_ui_tests {
     use super::*;
@@ -6394,6 +6589,31 @@ mod placement_ui_tests {
         assert!((point.x - rect.center().x).abs() < 1.0e-3);
         assert!((point.y - rect.center().y).abs() < 1.0e-3);
         assert!((0.0..=1.0).contains(&depth));
+    }
+
+    #[test]
+    fn sewing_edge_picker_prefers_contour_even_inside_vertex_hit_radius() {
+        let piece = PatternPiece::from_polygon(
+            1,
+            "Retângulo",
+            &[
+                PatternPoint2::new(0.0, 0.0),
+                PatternPoint2::new(1.0, 0.0),
+                PatternPoint2::new(1.0, 1.0),
+                PatternPoint2::new(0.0, 1.0),
+            ],
+        ).unwrap();
+        let pieces = vec![piece];
+        // O cursor fica a 6 px do vértice (normalmente selecionaria o vértice),
+        // mas exatamente sobre a aresta. A ferramenta de costura deve retornar a borda.
+        let target = hit_test_pattern_edge_only(
+            &pieces,
+            egui::pos2(6.0, 0.0),
+            egui::Pos2::ZERO,
+            100.0,
+            12.0,
+        );
+        assert!(matches!(target, Some(PatternEditTarget::Edge { piece: 0, segment: 0, .. })));
     }
 
     #[test]
