@@ -7,8 +7,8 @@
 mod avatar_import;
 
 use cloth_render::{
-    primitives, ClothTopology, MeshKind, OrbitCamera, SceneRenderer, StaticMeshData, Vertex,
-    ViewStyle, ViewportCallback,
+    primitives, CameraGoal, CameraPreset, ClothTopology, MeshKind, OrbitCamera, SceneRenderer,
+    StaticMeshData, Vertex, ViewStyle, ViewportCallback,
 };
 use cloth_sim::{
     build_avatar_colliders, build_scene, clear_shell_radius, AvatarConfig, ClothBuilder, Collider,
@@ -382,6 +382,10 @@ enum PatternTool {
     Select,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PieceTransformMode { Move, Rotate, Scale }
+#[derive(Clone, Copy)]
+struct PieceTransformDrag { piece_index: usize, pivot: PatternPoint2, last_pointer: PatternPoint2 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum PatternEditTarget {
     Piece { piece: usize },
@@ -517,6 +521,9 @@ struct ClothEvoApp {
     pattern_snap: bool,
     selected_target: Option<PatternEditTarget>,
     dragging_target: Option<PatternEditTarget>,
+    piece_transform_mode: PieceTransformMode,
+    piece_transform_drag: Option<PieceTransformDrag>,
+    camera_goal: Option<CameraGoal>,
     dragging_before: Option<PatternEditorSnapshot>,
     drag_last_world: Option<PatternPoint2>,
     pattern_undo: Vec<PatternEditorSnapshot>,
@@ -668,6 +675,9 @@ impl ClothEvoApp {
             pattern_snap: false,
             selected_target: None,
             dragging_target: None,
+            piece_transform_mode: PieceTransformMode::Move,
+            piece_transform_drag: None,
+            camera_goal: None,
             dragging_before: None,
             drag_last_world: None,
             pattern_undo: Vec::new(),
@@ -1746,6 +1756,12 @@ impl ClothEvoApp {
             ui.selectable_value(&mut self.pattern_tool, PatternTool::Draw, "Desenhar");
             ui.selectable_value(&mut self.pattern_tool, PatternTool::Select, "Selecionar / editar");
         });
+        ui.horizontal(|ui| {
+            for (mode, label) in [(PieceTransformMode::Move, "Mover (W)"), (PieceTransformMode::Rotate, "Girar (E)"), (PieceTransformMode::Scale, "Escalar (R)")] {
+                if ui.selectable_value(&mut self.piece_transform_mode, mode, label).clicked() { self.pattern_tool = PatternTool::Select; }
+            }
+        });
+        ui.weak("Atalhos W/E/R com o mouse sobre o canvas. Girar e escalar agem ao redor do centro do molde, somente no plano 2D (sem profundidade).");
         ui.horizontal(|ui| {
             if ui.add_enabled(!self.pattern_undo.is_empty(), egui::Button::new("Desfazer")).clicked() {
                 self.undo_pattern_edit();
@@ -3875,6 +3891,16 @@ impl ClothEvoApp {
         }
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         let painter = ui.painter_at(rect);
+        if response.hovered() {
+            let requested = ui.input(|i| {
+                if i.modifiers.command || i.modifiers.alt { return None; }
+                if i.key_pressed(egui::Key::W) { Some(PieceTransformMode::Move) }
+                else if i.key_pressed(egui::Key::E) { Some(PieceTransformMode::Rotate) }
+                else if i.key_pressed(egui::Key::R) { Some(PieceTransformMode::Scale) }
+                else { None }
+            });
+            if let Some(mode) = requested { self.piece_transform_mode = mode; self.pattern_tool = PatternTool::Select; }
+        }
         let center = rect.center();
 
         // O zoom é medido em pixels por metro; a translação fica em pixels da viewport.
@@ -3972,7 +3998,16 @@ impl ClothEvoApp {
             egui::FontId::proportional(10.0),
             egui::Color32::from_rgb(198, 153, 108),
         );
-
+        if self.pattern_tool == PatternTool::Select && self.piece_transform_mode != PieceTransformMode::Move {
+            if let Some(piece) = self.pattern_project.pieces.get(self.selected_piece) {
+                let pivot = self.piece_transform_drag.map(|drag| drag.pivot).unwrap_or_else(|| piece_pivot(piece));
+                let screen = to_screen(pivot);
+                let color = egui::Color32::from_rgb(255, 214, 102);
+                painter.circle_stroke(screen, 7.0, egui::Stroke::new(1.5, color));
+                painter.line_segment([screen - egui::vec2(12.0, 0.0), screen + egui::vec2(12.0, 0.0)], egui::Stroke::new(1.0, color));
+                painter.line_segment([screen - egui::vec2(0.0, 12.0), screen + egui::vec2(0.0, 12.0)], egui::Stroke::new(1.0, color));
+            }
+        }
         let shift_down = ui.input(|input| input.modifiers.shift);
         let tool_label = if self.direct_sewing_dragging || self.direct_sewing_start.is_some() {
             "COSTURA DIRETA · arraste até outra borda · Esc cancela"
@@ -3982,8 +4017,12 @@ impl ClothEvoApp {
             "COSTURA · selecione A e B no contorno"
         } else if self.pattern_tool == PatternTool::Draw {
             "DESENHAR · clique para adicionar pontos"
+        } else if self.piece_transform_mode == PieceTransformMode::Rotate {
+            "GIRAR (E) · arraste ao redor do centro do molde · somente no plano 2D · W mover · R escalar"
+        } else if self.piece_transform_mode == PieceTransformMode::Scale {
+            "ESCALAR (R) · arraste para aproximar/afastar do centro · somente no plano 2D · W mover · E girar"
         } else {
-            "EDITAR · arraste vértices/alças · botão direito/meio move a vista"
+            "EDITAR (W) · arraste vértices/alças · botão direito/meio move a vista · E girar · R escalar"
         };
         painter.text(
             rect.left_top() + egui::vec2(12.0, 12.0),
@@ -4235,6 +4274,16 @@ impl ClothEvoApp {
                     if hovering_selected_seam { draw_path_direction_arrow(&painter, path, color); }
                 }
             }
+            for progress in [0.0_f32, 0.5, 1.0] {
+                if let (Some(a), Some(b)) = (
+                    point_on_edge_chain_at_progress(&self.pattern_project, &draw_a, progress),
+                    point_on_edge_chain_at_progress(&self.pattern_project, &draw_b, progress),
+                ) {
+                    let alpha = if selected || hovering_selected_seam { 230 } else { 150 };
+                    let dash_color = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
+                    painter.extend(egui::Shape::dashed_line(&[to_screen(a), to_screen(b)], egui::Stroke::new(1.4, dash_color), 6.0, 4.0));
+                }
+            }
             if hovering_selected_seam {
                 for (progress_a, progress_b) in paired_chain_notch_markers(&self.pattern_project, &draw_a, &draw_b) {
                     if let (Some(a), Some(b)) = (
@@ -4402,10 +4451,10 @@ impl ClothEvoApp {
                     );
                     if (shift_down || self.direct_sewing_dragging) && response.hovered() {
                         if let Some(pointer) = ui.input(|input| input.pointer.hover_pos()) {
-                            painter.line_segment(
-                                [to_screen(*mid_a), pointer],
-                                egui::Stroke::new(2.0, egui::Color32::from_rgb(95, 225, 255)),
-                            );
+                            painter.extend(egui::Shape::dashed_line(
+                                &[to_screen(*mid_a), pointer],
+                                egui::Stroke::new(2.0, egui::Color32::from_rgb(95, 225, 255)), 7.0, 5.0,
+                            ));
                             if let Some((piece_b_index, segment_b)) =
                                 self.hit_test_sewing_edge(pointer, center)
                             {
@@ -4594,8 +4643,20 @@ impl ClothEvoApp {
                         self.dragging_before = None;
                         self.drag_last_world = None;
                     } else {
+                        let previous_target = self.selected_target;
                         self.selected_target = self.hit_test_pattern(pointer, center);
-                        if let Some(target) = self.selected_target {
+                        let transform_piece = if self.piece_transform_mode != PieceTransformMode::Move && !self.seam_pick_mode {
+                            self.selected_target.or(previous_target).map(|target| target.piece())
+                                .filter(|index| *index < self.pattern_project.pieces.len())
+                        } else { None };
+                        if let Some(piece_index) = transform_piece {
+                            let pivot = piece_pivot(&self.pattern_project.pieces[piece_index]);
+                            self.selected_piece = piece_index;
+                            self.piece_transform_drag = Some(PieceTransformDrag { piece_index, pivot, last_pointer: to_world(pointer) });
+                            self.dragging_target = None;
+                            self.dragging_before = None;
+                            self.drag_last_world = None;
+                        } else if let Some(target) = self.selected_target {
                             self.selected_piece = target.piece().min(self.pattern_project.pieces.len().saturating_sub(1));
                             self.dragging_target = if target.is_movable() { Some(target) } else { None };
                             self.dragging_before = self.dragging_target.map(|_| self.editor_snapshot());
@@ -4611,6 +4672,31 @@ impl ClothEvoApp {
             if response.dragged_by(egui::PointerButton::Primary) {
                 if let (Some((is_a, is_start)), Some(pointer)) = (self.dragging_seam_handle, response.interact_pointer_pos()) {
                     self.update_seam_handle_from_pointer(is_a, is_start, to_world(pointer));
+                } else if let (Some(drag), Some(pointer)) = (self.piece_transform_drag, response.interact_pointer_pos()) {
+                    let current = to_world(pointer);
+                    let previous = (drag.last_pointer.x - drag.pivot.x, drag.last_pointer.y - drag.pivot.y);
+                    let now = (current.x - drag.pivot.x, current.y - drag.pivot.y);
+                    let previous_length = previous.0.hypot(previous.1);
+                    let now_length = now.0.hypot(now.1);
+                    let mode = self.piece_transform_mode;
+                    if mode != PieceTransformMode::Move && previous_length > 1.0e-4 && now_length > 1.0e-4 {
+                        let (amount, neutral) = if mode == PieceTransformMode::Rotate {
+                            let mut delta = now.1.atan2(now.0) - previous.1.atan2(previous.0);
+                            if delta > std::f64::consts::PI { delta -= std::f64::consts::TAU; }
+                            if delta < -std::f64::consts::PI { delta += std::f64::consts::TAU; }
+                            (delta, 0.0)
+                        } else { ((now_length / previous_length).clamp(0.5, 2.0), 1.0) };
+                        if (amount - neutral).abs() > 1.0e-9 {
+                            if self.dragging_before.is_none() { self.dragging_before = Some(self.editor_snapshot()); }
+                            let id = self.pattern_project.pieces.get(drag.piece_index).map(|piece| piece.id);
+                            if let (Some(id), Some(piece)) = (id, self.pattern_project.pieces.get_mut(drag.piece_index)) {
+                                if mode == PieceTransformMode::Rotate { rotate_piece_about(piece, drag.pivot, amount); }
+                                else { scale_piece_about(piece, drag.pivot, amount); }
+                                self.sync_symmetric_mate(id);
+                            }
+                        }
+                    }
+                    self.piece_transform_drag = Some(PieceTransformDrag { last_pointer: current, ..drag });
                 } else if let (Some(target), Some(pointer)) = (self.dragging_target, response.interact_pointer_pos()) {
                     let mut world = to_world(pointer);
                     if self.pattern_snap {
@@ -4642,6 +4728,7 @@ impl ClothEvoApp {
                 } else if let Some(before) = self.dragging_before.take() {
                     self.remember_pattern_change(before);
                 }
+                self.piece_transform_drag = None;
                 self.dragging_target = None;
                 self.drag_last_world = None;
             }
@@ -5071,12 +5158,44 @@ impl ClothEvoApp {
         }
     }
 
+    fn camera_focus_bounds(&self) -> Option<(Vec3, f32)> {
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        let mut include = |p: Vec3| {
+            if p.is_finite() { min = min.min(p); max = max.max(p); }
+        };
+        if self.using_pattern_sim {
+            if let Some(mesh) = self.avatar_mesh.as_ref() {
+                for vertex in &mesh.vertices { include(Vec3::from_array(vertex.pos)); }
+            } else {
+                let height = self.pattern_project.avatar.height_meters as f32;
+                include(Vec3::new(-0.16 * height, 0.0, -0.09 * height));
+                include(Vec3::new(0.16 * height, height, 0.09 * height));
+            }
+        }
+        for &position in &self.sim.pos { include(position); }
+        if min.x > max.x { return None; }
+        Some(((min + max) * 0.5, ((max - min).length() * 0.5).max(0.25)))
+    }
+    fn focus_camera_preset(&mut self, preset: CameraPreset, aspect: f32) {
+        let (center, radius) = self.camera_focus_bounds().unwrap_or((self.camera.target, 1.0));
+        self.camera_goal = Some(self.camera.goal_for(preset, center, radius, aspect));
+    }
     fn viewport(&mut self, ui: &mut egui::Ui) {
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         let placement_mode = self.workspace == WorkspaceMode::Placement && self.using_pattern_sim;
         let aspect = rect.width() / rect.height().max(1.0);
-
+        if response.hovered() {
+            let preset = ui.input(|i| -> Option<CameraPreset> {
+                if i.modifiers.command || i.modifiers.alt { return None; }
+                if i.key_pressed(egui::Key::Num1) { Some(CameraPreset::Front) }
+                else if i.key_pressed(egui::Key::Num2) { Some(CameraPreset::Side) }
+                else if i.key_pressed(egui::Key::Num3) { Some(CameraPreset::Top) }
+                else { None }
+            });
+            if let Some(preset) = preset { self.focus_camera_preset(preset, aspect); ui.ctx().request_repaint(); }
+        }
         // Na prévia: primeiro tenta capturar um manipulador; só depois considera o painel.
         // Isso evita que um clique no eixo seja interpretado como arraste livre do tecido.
         let pointer_delta = ui.input(|i| i.pointer.delta());
@@ -5199,6 +5318,10 @@ impl ClothEvoApp {
             }
         }
 
+        if self.camera_goal.is_some() {
+            let scrolling = response.hovered() && ui.input(|i| i.smooth_scroll_delta.y != 0.0);
+            if response.dragged() || scrolling { self.camera_goal = None; }
+        }
         // Dados do frame.
         self.sim.compute_vertex_normals(&mut self.normals);
         let cloth_vertices: Vec<Vertex> = self.sim.pos.iter()
@@ -6078,6 +6201,50 @@ fn translate_project_piece(project: &mut PatternProject, piece_id: u64, dx: f64,
     }
 }
 
+fn map_curve_points(curve: &mut Curve2D, f: &impl Fn(PatternPoint2) -> PatternPoint2) {
+    curve.start = f(curve.start);
+    for segment in &mut curve.segments {
+        match segment {
+            CurveSegment::Line { to } => *to = f(*to),
+            CurveSegment::CubicBezier { control1, control2, to } => {
+                *control1 = f(*control1); *control2 = f(*control2); *to = f(*to);
+            }
+        }
+    }
+}
+fn map_piece_points(piece: &mut PatternPiece, f: impl Fn(PatternPoint2) -> PatternPoint2) {
+    map_curve_points(&mut piece.outline, &f);
+    if let Some(curve) = &mut piece.sewing_line { map_curve_points(curve, &f); }
+    for curve in &mut piece.internal_lines { map_curve_points(curve, &f); }
+    for fold in &mut piece.fold_lines { map_curve_points(&mut fold.curve, &f); }
+    for pleat in &mut piece.pleats { map_curve_points(&mut pleat.axis, &f); }
+    if let Some(grain) = &mut piece.grain_line { grain.start = f(grain.start); grain.end = f(grain.end); }
+    for dart in &mut piece.darts { dart.apex = f(dart.apex); dart.leg_a = f(dart.leg_a); dart.leg_b = f(dart.leg_b); }
+    for hole in &mut piece.holes { hole.center = f(hole.center); }
+    for annotation in &mut piece.annotations { annotation.position = f(annotation.position); }
+}
+fn piece_pivot(piece: &PatternPiece) -> PatternPoint2 {
+    let anchors = outline_anchors(&piece.outline);
+    if anchors.is_empty() { return PatternPoint2::new(0.0, 0.0); }
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for p in &anchors { min_x=min_x.min(p.x); max_x=max_x.max(p.x); min_y=min_y.min(p.y); max_y=max_y.max(p.y); }
+    PatternPoint2::new((min_x+max_x)*0.5,(min_y+max_y)*0.5)
+}
+fn rotate_piece_about(piece: &mut PatternPiece, pivot: PatternPoint2, angle_radians: f64) {
+    let (sin, cos) = angle_radians.sin_cos();
+    map_piece_points(piece, |p| {
+        let dx=p.x-pivot.x; let dy=p.y-pivot.y;
+        PatternPoint2::new(pivot.x+dx*cos-dy*sin,pivot.y+dx*sin+dy*cos)
+    });
+    for annotation in &mut piece.annotations { annotation.rotation_degrees += angle_radians.to_degrees(); }
+}
+fn scale_piece_about(piece: &mut PatternPiece, pivot: PatternPoint2, factor: f64) {
+    if !factor.is_finite() || factor <= 0.0 { return; }
+    map_piece_points(piece, |p| PatternPoint2::new(pivot.x+(p.x-pivot.x)*factor,pivot.y+(p.y-pivot.y)*factor));
+    for hole in &mut piece.holes { hole.radius_meters *= factor; }
+    for dart in &mut piece.darts { dart.intake_meters *= factor; }
+    for pleat in &mut piece.pleats { pleat.depth_meters *= factor; }
+}
 fn outline_anchors(curve: &Curve2D) -> Vec<PatternPoint2> {
     let mut anchors = vec![curve.start];
     let count = if curve.closed {
@@ -6511,6 +6678,11 @@ fn sampled_edge_indices(
 
 impl eframe::App for ClothEvoApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if let Some(goal) = self.camera_goal {
+            let camera_dt = ui.input(|i| i.stable_dt);
+            if self.camera.approach(&goal, camera_dt) { self.camera_goal = None; }
+            else { ui.ctx().request_repaint(); }
+        }
         if self.workspace == WorkspaceMode::Pattern {
             let (undo, redo) = ui.input(|i| (
                 i.modifiers.ctrl && i.key_pressed(egui::Key::Z) && !i.modifiers.shift,
@@ -7046,6 +7218,25 @@ mod placement_ui_tests {
         assert!(bounded_placement_translation([0.0; 3], Vec3::splat(f32::NAN)).is_none());
     }
 
+    #[test]
+    fn rotate_and_scale_piece_stay_in_the_2d_plane_around_the_pivot() {
+        let mut piece = PatternPiece::from_polygon(1, "teste", &[
+            PatternPoint2::new(0.0,0.0), PatternPoint2::new(0.4,0.0),
+            PatternPoint2::new(0.4,0.2), PatternPoint2::new(0.0,0.2),
+        ]).unwrap();
+        let pivot=piece_pivot(&piece);
+        assert!((pivot.x-0.2).abs()<1.0e-9 && (pivot.y-0.1).abs()<1.0e-9);
+        rotate_piece_about(&mut piece,pivot,std::f64::consts::FRAC_PI_2);
+        let anchors=outline_anchors(&piece.outline);
+        let width=anchors.iter().map(|p|p.x).fold(f64::MIN,f64::max)-anchors.iter().map(|p|p.x).fold(f64::MAX,f64::min);
+        assert!((width-0.2).abs()<1.0e-9, "largura após girar 90°: {width}");
+        let new_pivot=piece_pivot(&piece);
+        assert!((new_pivot.x-pivot.x).abs()<1.0e-9 && (new_pivot.y-pivot.y).abs()<1.0e-9);
+        scale_piece_about(&mut piece,pivot,2.0);
+        let anchors=outline_anchors(&piece.outline);
+        let width=anchors.iter().map(|p|p.x).fold(f64::MIN,f64::max)-anchors.iter().map(|p|p.x).fold(f64::MAX,f64::min);
+        assert!((width-0.4).abs()<1.0e-9, "largura após escalar 2×: {width}");
+    }
     #[test]
     fn screen_projection_maps_camera_target_to_viewport_center() {
         let camera = OrbitCamera::default();

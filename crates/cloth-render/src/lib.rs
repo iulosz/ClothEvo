@@ -18,7 +18,7 @@ use std::borrow::Cow;
 use egui_wgpu::wgpu::{self, util::DeviceExt};
 use glam::{Mat4, Vec3};
 
-pub use camera::OrbitCamera;
+pub use camera::{CameraGoal, CameraPreset, OrbitCamera};
 
 /// Vértice enviado à GPU.
 #[repr(C)]
@@ -291,6 +291,10 @@ impl SceneRenderer {
         let tris: Vec<u32> = topo.triangles.iter().flatten().copied().collect();
         let wire: Vec<u32> = topo.wire_edges.iter().flatten().copied().collect();
         let seams: Vec<u32> = topo.seam_pairs.iter().flat_map(|&(a, b)| [a, b]).collect();
+        // Em costuras longas, exibe um vínculo a cada dois; alertas seguem com todos os pares.
+        let seam_stride = if topo.seam_pairs.len() > 24 { 2 } else { 1 };
+        let display_seams: Vec<u32> = topo.seam_pairs.iter().step_by(seam_stride)
+            .flat_map(|&(a, b)| [a, b]).collect();
 
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cloth vertices"),
@@ -305,8 +309,8 @@ impl SceneRenderer {
             tri_count: tris.len() as u32,
             wire_indices: index_buffer(device, "cloth wireframe", &wire),
             wire_count: wire.len() as u32,
-            seam_indices: index_buffer(device, "cloth seams", &seams),
-            seam_count: seams.len() as u32,
+            seam_indices: index_buffer(device, "cloth seams", &display_seams),
+            seam_count: display_seams.len() as u32,
             // Capacidade de todos os vínculos; cada frame escreve apenas os avisos atuais.
             seam_warning_indices: index_buffer(device, "cloth seam warnings", &seams),
             surface: DrawSlot::new(device, &self.layout, "cloth surface uniforms"),

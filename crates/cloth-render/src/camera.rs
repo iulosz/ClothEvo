@@ -16,15 +16,69 @@ impl Default for OrbitCamera {
     fn default() -> Self {
         Self {
             target: Vec3::new(0.0, 0.7, 0.0),
-            yaw: 0.6,
-            pitch: 0.35,
+            // Vista frontal por padrão: frente do avatar/moldes aponta para +Z.
+            yaw: 0.0,
+            pitch: 0.10,
             distance: 3.2,
             fov_y: 45f32.to_radians(),
         }
     }
 }
 
+/// Vistas pré-definidas (atalhos 1/2/3 no viewport 3D).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CameraPreset {
+    Front,
+    Side,
+    Top,
+}
+impl CameraPreset {
+    pub fn yaw_pitch(self) -> (f32, f32) {
+        match self {
+            CameraPreset::Front => (0.0, 0.0),
+            CameraPreset::Side => (std::f32::consts::FRAC_PI_2, 0.0),
+            CameraPreset::Top => (0.0, 89f32.to_radians()),
+        }
+    }
+}
+#[derive(Clone, Copy, Debug)]
+pub struct CameraGoal {
+    pub target: Vec3,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub distance: f32,
+}
+fn wrap_angle(angle: f32) -> f32 {
+    (angle + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+}
 impl OrbitCamera {
+    pub fn goal_for(&self, preset: CameraPreset, target: Vec3, radius: f32, aspect: f32) -> CameraGoal {
+        let (yaw, pitch) = preset.yaw_pitch();
+        let half_v = (self.fov_y * 0.5).tan();
+        let half_h = half_v * aspect.max(0.1);
+        let fit = half_v.min(half_h).max(1.0e-3);
+        let distance = (radius.max(0.1) / fit * 1.15).clamp(0.3, 40.0);
+        CameraGoal { target, yaw, pitch, distance }
+    }
+    pub fn approach(&mut self, goal: &CameraGoal, dt: f32) -> bool {
+        let k = 1.0 - (-12.0 * dt.clamp(0.0, 0.1)).exp();
+        let delta_yaw = wrap_angle(goal.yaw - self.yaw);
+        self.yaw += delta_yaw * k;
+        self.pitch += (goal.pitch - self.pitch) * k;
+        self.distance += (goal.distance - self.distance) * k;
+        self.target += (goal.target - self.target) * k;
+        let done = delta_yaw.abs() < 1.0e-3
+            && (goal.pitch - self.pitch).abs() < 1.0e-3
+            && (goal.distance - self.distance).abs() < 1.0e-3
+            && (goal.target - self.target).length() < 1.0e-3;
+        if done {
+            self.yaw = goal.yaw;
+            self.pitch = goal.pitch;
+            self.distance = goal.distance;
+            self.target = goal.target;
+        }
+        done
+    }
     pub fn eye(&self) -> Vec3 {
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();
@@ -67,6 +121,34 @@ impl OrbitCamera {
 mod tests {
     use super::*;
 
+    #[test]
+    fn default_camera_looks_at_the_front_from_plus_z() {
+        let cam = OrbitCamera::default();
+        let offset = cam.eye() - cam.target;
+        assert!(offset.x.abs() < 1.0e-5 && offset.z > 0.0);
+    }
+    #[test]
+    fn presets_place_the_eye_in_front_side_and_above() {
+        let cam = OrbitCamera::default();
+        for (preset, check) in [(CameraPreset::Front, Vec3::Z),(CameraPreset::Side, Vec3::X),(CameraPreset::Top, Vec3::Y)] {
+            let goal = cam.goal_for(preset, Vec3::new(0.0, 0.9, 0.0), 1.0, 1.5);
+            let mut moved = cam.clone();
+            moved.yaw = goal.yaw; moved.pitch = goal.pitch; moved.distance = goal.distance; moved.target = goal.target;
+            let direction = (moved.eye() - moved.target).normalize();
+            assert!(direction.dot(check) > 0.99, "{preset:?}: {direction:?}");
+        }
+    }
+    #[test]
+    fn approach_converges_to_goal_by_the_shortest_yaw() {
+        let mut cam = OrbitCamera::default();
+        cam.yaw = 6.0;
+        let goal = CameraGoal { target: Vec3::new(0.0, 1.0, 0.0), yaw: 0.0, pitch: 0.0, distance: 2.5 };
+        let mut done = false;
+        for _ in 0..600 { if cam.approach(&goal, 1.0 / 60.0) { done = true; break; } }
+        assert!(done);
+        assert_eq!(cam.yaw, 0.0);
+        assert!((cam.distance - 2.5).abs() < 1.0e-6);
+    }
     #[test]
     fn eye_is_at_orbit_distance() {
         let cam = OrbitCamera::default();

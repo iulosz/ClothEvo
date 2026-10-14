@@ -235,6 +235,9 @@ fn normalize_mesh(
         return Err("A malha importada contém índices fora dos limites.".into());
     }
 
+    // Antes de centralizar: orienta a frente do modelo para +Z, o eixo frontal do ClothEvo.
+    orient_front_to_positive_z(&mut positions);
+
     let min = bounds_min(&positions);
     let max = bounds_max(&positions);
     let height = max[1] - min[1];
@@ -252,6 +255,43 @@ fn normalize_mesh(
     Ok((positions, indices))
 }
 
+/// Orienta malhas humanoides em pose T/A para que a frente fique em +Z e os braços em X.
+fn orient_front_to_positive_z(positions: &mut [[f32; 3]]) {
+    let min_y = positions.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+    let max_y = positions.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max);
+    let height = max_y - min_y;
+    if !height.is_finite() || height <= 1.0e-6 { return; }
+    let (mut x_lo, mut x_hi, mut z_lo, mut z_hi) =
+        (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY);
+    for p in positions.iter().filter(|p| p[1] >= min_y + 0.70 * height && p[1] <= min_y + 0.88 * height) {
+        x_lo = x_lo.min(p[0]); x_hi = x_hi.max(p[0]);
+        z_lo = z_lo.min(p[2]); z_hi = z_hi.max(p[2]);
+    }
+    if x_hi < x_lo { return; }
+    if (z_hi - z_lo) > (x_hi - x_lo) {
+        // Corrige o sentido: +X passa a apontar para +Z.
+        for p in positions.iter_mut() {
+            let (x, z) = (p[0], p[2]);
+            p[0] = -z;
+            p[2] = x;
+        }
+    }
+    let (mut shin_sum, mut shin_count) = (0.0_f32, 0_u32);
+    let (mut foot_lo, mut foot_hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    for p in positions.iter() {
+        if p[1] >= min_y + 0.15 * height && p[1] <= min_y + 0.30 * height {
+            shin_sum += p[2]; shin_count += 1;
+        }
+        if p[1] <= min_y + 0.04 * height {
+            foot_lo = foot_lo.min(p[2]); foot_hi = foot_hi.max(p[2]);
+        }
+    }
+    if shin_count == 0 || foot_hi < foot_lo { return; }
+    let ankle = shin_sum / shin_count as f32;
+    if ankle - foot_lo > (foot_hi - ankle) * 1.15 {
+        for p in positions.iter_mut() { p[0] = -p[0]; p[2] = -p[2]; }
+    }
+}
 fn make_vertices(positions: &[[f32; 3]], indices: &[u32]) -> Result<Vec<Vertex>, String> {
     let mut normals = vec![Vec3::ZERO; positions.len()];
     for triangle in indices.chunks_exact(3) {
@@ -275,6 +315,34 @@ fn make_vertices(positions: &[[f32; 3]], indices: &[u32]) -> Result<Vec<Vertex>,
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn orientation_puts_arms_along_x_and_toes_toward_plus_z() {
+        let mut positions = vec![
+            [0.0, 1.7, 0.0],
+            [-0.05, 0.0, 0.1], [0.20, 0.0, 0.1], [-0.05, 0.0, -0.1], [0.20, 0.0, -0.1],
+            [0.0, 0.4, 0.1], [0.0, 0.4, -0.1],
+            [0.0, 1.4, -0.8], [0.0, 1.4, 0.8],
+        ];
+        orient_front_to_positive_z(&mut positions);
+        let shoulders: Vec<_> = positions.iter().filter(|p| (p[1] - 1.4).abs() < 1.0e-6).collect();
+        let x_extent = shoulders.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max)
+            - shoulders.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
+        assert!(x_extent > 1.5, "braços deveriam ficar ao longo de X: {x_extent}");
+        let toe_z = positions.iter().filter(|p| p[1] < 1.0e-6).map(|p| p[2]).fold(f32::NEG_INFINITY, f32::max);
+        assert!((toe_z - 0.20).abs() < 1.0e-5, "pontas dos pés deveriam apontar para +Z: {toe_z}");
+    }
+    #[test]
+    fn orientation_keeps_an_already_frontal_figure() {
+        let mut positions = vec![
+            [0.0, 1.7, 0.0],
+            [0.1, 0.0, -0.05], [0.1, 0.0, 0.20], [-0.1, 0.0, -0.05], [-0.1, 0.0, 0.20],
+            [0.1, 0.4, 0.0], [-0.1, 0.4, 0.0],
+            [-0.8, 1.4, 0.0], [0.8, 1.4, 0.0],
+        ];
+        let before = positions.clone();
+        orient_front_to_positive_z(&mut positions);
+        assert_eq!(positions, before);
+    }
 
     #[test]
     fn obj_parser_triangulates_polygons_and_supports_negative_indices() {
