@@ -361,6 +361,10 @@ pub struct AssemblyTransform {
     /// Índices de âncoras do contorno a fixar na simulação. Vazio significa peça livre.
     #[serde(default)]
     pub pinned_anchors: Vec<u32>,
+    /// Id do ponto de posicionamento no corpo (ex.: "tronco_peito_costas"). `None` mantém o
+    /// layout automático em semicircunferência frontal.
+    #[serde(default)]
+    pub arrangement: Option<String>,
 }
 
 fn default_assembly_scale() -> [f64; 3] { [1.0; 3] }
@@ -372,6 +376,7 @@ impl Default for AssemblyTransform {
             rotation_degrees: [0.0; 3],
             scale: default_assembly_scale(),
             pinned_anchors: Vec::new(),
+            arrangement: None,
         }
     }
 }
@@ -395,6 +400,12 @@ pub struct PatternPiece {
     pub fabric: FabricProperties,
     #[serde(default)]
     pub assembly: AssemblyTransform,
+    /// Camada de empilhamento: camadas maiores ficam mais afastadas do corpo (por cima).
+    #[serde(default)]
+    pub layer: i32,
+    /// Molde congelado: não pode ser movido, girado nem escalado (2D e posicionamento 3D).
+    #[serde(default)]
+    pub frozen: bool,
     pub darts: Vec<Dart>,
     pub notches: Vec<Notch>,
     pub holes: Vec<Hole>,
@@ -415,6 +426,8 @@ impl PatternPiece {
             pleats: Vec::new(),
             fabric: FabricProperties::default(),
             assembly: AssemblyTransform::default(),
+            layer: 0,
+            frozen: false,
             darts: Vec::new(),
             notches: Vec::new(),
             holes: Vec::new(),
@@ -1544,4 +1557,28 @@ mod tests {
     }
 
 
+}
+
+#[cfg(test)]
+mod piece_props_tests {
+    use super::*;
+
+    #[test]
+    fn new_piece_properties_default_when_missing_in_old_files() {
+        let piece = PatternPiece::from_polygon(
+            1,
+            "teste",
+            &[Point2::new(0.0, 0.0), Point2::new(0.1, 0.0), Point2::new(0.1, 0.1)],
+        )
+        .unwrap();
+        let mut value = serde_json::to_value(&piece).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("layer");
+        object.remove("frozen");
+        object["assembly"].as_object_mut().unwrap().remove("arrangement");
+        let restored: PatternPiece = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.layer, 0);
+        assert!(!restored.frozen);
+        assert!(restored.assembly.arrangement.is_none());
+    }
 }

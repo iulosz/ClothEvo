@@ -11,8 +11,8 @@ use cloth_render::{
     StaticMeshData, Vertex, ViewStyle, ViewportCallback,
 };
 use cloth_sim::{
-    build_avatar_colliders, build_scene, clear_shell_radius, AvatarConfig, ClothBuilder, Collider,
-    FabricPreset,
+    arrangement_points, arrangement_surface_position, build_avatar_colliders, build_scene,
+    clear_shell_radius, AvatarConfig, ClothBuilder, Collider, FabricPreset,
     PanelMaterial, PanelMesh, Placement, SceneKind, SignedDistanceField, Simulation, SimParams,
 };
 use eframe::{egui, egui_wgpu};
@@ -37,6 +37,8 @@ const DEFAULT_RES: u32 = 40;
 const PATTERN_PIXELS_PER_METER: f32 = 360.0;
 const PATTERN_SIM_BODY_RADIUS: f32 = 0.14;
 const PATTERN_SIM_PERTURBATION: f32 = 0.001;
+/// Diferença de comprimento A/B a partir da qual a costura merece revisão (1 polegada).
+const SEAM_LENGTH_WARNING_METERS: f64 = 0.0254;
 const PATTERN_SIM_LAYER_SPACING: f32 = 0.003;
 const GIZMO_MOVE_LENGTH: f32 = 0.42;
 const GIZMO_SCALE_LENGTH: f32 = 0.70;
@@ -501,6 +503,7 @@ struct ClothEvoApp {
     using_pattern_sim: bool,
     placement_ranges: Vec<PanelPlacementRange>,
     selected_placement_piece: Option<u64>,
+    selected_arrangement_point: Option<String>,
     placement_drag_piece: Option<u64>,
     placement_drag_before: Option<PatternEditorSnapshot>,
     placement_gizmo_drag: Option<PlacementGizmoDrag>,
@@ -657,6 +660,7 @@ impl ClothEvoApp {
             using_pattern_sim: false,
             placement_ranges: Vec::new(),
             selected_placement_piece: None,
+            selected_arrangement_point: None,
             placement_drag_piece: None,
             placement_drag_before: None,
             placement_gizmo_drag: None,
@@ -1102,10 +1106,10 @@ impl ClothEvoApp {
         ui.label("Selecione um gizmo e arraste o eixo/anel/quadrado diretamente na viewport.");
         ui.horizontal_wrapped(|ui| {
             for (mode, label) in [
-                (GizmoMode::Move, "↔ Mover"),
-                (GizmoMode::Rotate, "⟳ Girar"),
-                (GizmoMode::Scale, "□ Escalar"),
-                (GizmoMode::Transform, "◇ Transformar"),
+                (GizmoMode::Move, "Mover"),
+                (GizmoMode::Rotate, "Girar"),
+                (GizmoMode::Scale, "Escalar"),
+                (GizmoMode::Transform, "Transformar"),
             ] {
                 if ui.selectable_label(self.gizmo_mode == mode, label).clicked() {
                     self.gizmo_mode = mode;
@@ -1184,6 +1188,79 @@ impl ClothEvoApp {
             }
         }
 
+        if let Some(piece_id) = self.selected_placement_piece {
+            ui.separator();
+            ui.strong("Propriedades do molde");
+            let mut layer_changed = false;
+            if let Some(piece) = self.pattern_project.pieces.iter_mut().find(|piece| piece.id == piece_id) {
+                ui.horizontal(|ui| {
+                    ui.label("Camada");
+                    let previous = piece.layer;
+                    ui.add(egui::DragValue::new(&mut piece.layer).speed(0.1))
+                        .on_hover_text("Camadas maiores ficam mais afastadas do corpo (por cima).");
+                    piece.layer = piece.layer.clamp(-9, 9);
+                    layer_changed = piece.layer != previous;
+                });
+                ui.checkbox(&mut piece.frozen, "Congelar molde (bloqueia mover, girar e escalar)");
+            }
+            if layer_changed {
+                self.pattern_message = "Camada alterada: use \"Atualizar prévia\" para reposicionar.".into();
+            }
+
+            ui.separator();
+            ui.strong("Posicionar no corpo");
+            let avatar_config = AvatarConfig {
+                height_m: self.pattern_project.avatar.height_meters as f32,
+                shoulder_width_m: self.pattern_project.avatar.shoulder_width_meters as f32,
+                waist_width_m: self.pattern_project.avatar.waist_width_meters as f32,
+                hip_width_m: self.pattern_project.avatar.hip_width_meters as f32,
+            };
+            let points = arrangement_points(&avatar_config);
+            let current_point = self.pattern_project.pieces.iter()
+                .find(|piece| piece.id == piece_id)
+                .and_then(|piece| piece.assembly.arrangement.clone());
+            let current_name = current_point.as_ref()
+                .and_then(|id| points.iter().find(|point| &point.id == id))
+                .map(|point| point.name.clone())
+                .unwrap_or_else(|| "layout automático".to_string());
+            ui.label(format!("Ponto atual: {current_name}"));
+            egui::ComboBox::from_id_salt("arrangement_point")
+                .selected_text(self.selected_arrangement_point.as_ref()
+                    .and_then(|id| points.iter().find(|point| &point.id == id))
+                    .map(|point| point.name.clone())
+                    .unwrap_or_else(|| "Escolher ponto do corpo".to_string()))
+                .width(250.0)
+                .show_ui(ui, |ui| {
+                    for point in &points {
+                        ui.selectable_value(
+                            &mut self.selected_arrangement_point,
+                            Some(point.id.clone()),
+                            point.name.as_str(),
+                        );
+                    }
+                });
+            let mut apply_point = false;
+            let mut clear_point = false;
+            ui.horizontal(|ui| {
+                if ui.add_enabled(
+                    self.selected_arrangement_point.is_some(),
+                    egui::Button::new("Posicionar neste ponto"),
+                ).clicked() {
+                    apply_point = true;
+                }
+                if ui.add_enabled(current_point.is_some(), egui::Button::new("Layout automático")).clicked() {
+                    clear_point = true;
+                }
+            });
+            ui.weak("Esquerdo = lado +X (o avatar olha para +Z). Depois de posicionar, refine com o gizmo.");
+            if apply_point {
+                let point = self.selected_arrangement_point.clone();
+                self.set_piece_arrangement(piece_id, point);
+            } else if clear_point {
+                self.set_piece_arrangement(piece_id, None);
+            }
+        }
+
         ui.separator();
         ui.checkbox(&mut self.style.wireframe, "Mostrar triangulação 3D");
         ui.checkbox(&mut self.style.seams, "Mostrar costuras");
@@ -1202,6 +1279,7 @@ impl ClothEvoApp {
     /// Aplica a translação ao projeto e à pose atual/repouso do solver, para que Reiniciar
     /// preserve o posicionamento feito antes da simulação.
     fn apply_placement_translation(&mut self, piece_id: u64, delta: Vec3) {
+        if self.piece_is_frozen(piece_id) { return; }
         let Some((first, end)) = self.placement_ranges.iter()
             .find(|range| range.piece_id == piece_id)
             .map(|range| (range.first, range.end))
@@ -1364,6 +1442,36 @@ impl ClothEvoApp {
         None
     }
 
+    fn piece_is_frozen(&self, piece_id: u64) -> bool {
+        self.pattern_project.pieces.iter()
+            .find(|piece| piece.id == piece_id)
+            .map(|piece| piece.frozen)
+            .unwrap_or(false)
+    }
+
+    /// Define (ou limpa) o ponto de posicionamento do molde e refaz a prévia; restaura o
+    /// projeto anterior se a montagem falhar.
+    fn set_piece_arrangement(&mut self, piece_id: u64, point: Option<String>) {
+        if self.piece_is_frozen(piece_id) {
+            self.pattern_message = "O molde está congelado; descongele para reposicioná-lo.".into();
+            return;
+        }
+        let before = self.editor_snapshot();
+        let Some(piece) = self.pattern_project.pieces.iter_mut().find(|piece| piece.id == piece_id)
+        else { return; };
+        piece.assembly.arrangement = point;
+        piece.assembly.translation_meters = [0.0; 3];
+        piece.assembly.rotation_degrees = [0.0; 3];
+        let selected = self.selected_placement_piece;
+        if let Err(error) = self.start_pattern_simulation() {
+            self.pattern_project = before.project.clone();
+            self.pattern_message = format!("Posicionamento cancelado; estado anterior restaurado: {error}");
+            return;
+        }
+        self.selected_placement_piece = selected;
+        self.remember_pattern_change(before);
+    }
+
     fn apply_placement_rotation_delta(
         &mut self,
         piece_id: u64,
@@ -1378,6 +1486,7 @@ impl ClothEvoApp {
         }
         let Some(range) = self.placement_ranges.iter().find(|range| range.piece_id == piece_id).copied()
         else { return; };
+        if self.piece_is_frozen(piece_id) { return; }
         let center = range.pivot;
         let rotation = Quat::from_axis_angle(axis_world.normalize(), degrees.to_radians());
         if !self.sim.rotate_particles(range.first, range.end, center, rotation) {
@@ -1391,6 +1500,7 @@ impl ClothEvoApp {
 
     fn apply_placement_scale_factor(&mut self, piece_id: u64, axis: usize, factor: f32) {
         if axis >= 3 || !factor.is_finite() || factor <= 0.0 { return; }
+        if self.piece_is_frozen(piece_id) { return; }
         let Some(range) = self.placement_ranges.iter().find(|range| range.piece_id == piece_id).copied()
         else { return; };
         let Some((_, object_axes, _)) = self.placement_gizmo_axes(piece_id) else { return; };
@@ -1494,6 +1604,7 @@ impl ClothEvoApp {
 
     fn rotate_selected_placement(&mut self, axis: usize, degrees: f64) {
         let Some(id) = self.selected_placement_piece else { return; };
+        if self.piece_is_frozen(id) { return; }
         let before = self.editor_snapshot();
         let Some(piece) = self.pattern_project.pieces.iter_mut().find(|piece| piece.id == id) else { return; };
         if axis >= 3 { return; }
@@ -2453,6 +2564,35 @@ impl ClothEvoApp {
                 }
             });
             ui.label(format!("Costuras no projeto: {}", self.pattern_project.seams.len()));
+
+            ui.separator();
+            egui::CollapsingHeader::new(egui::RichText::new("Verificar comprimentos das costuras").strong())
+                .default_open(false)
+                .show(ui, |ui| {
+                    if self.pattern_project.seams.is_empty() {
+                        ui.weak("Nenhuma costura no projeto.");
+                    }
+                    egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
+                        for seam in &self.pattern_project.seams {
+                            let length_a = edge_chain_length_meters(&self.pattern_project, &seam.sides_a);
+                            let length_b = edge_chain_length_meters(&self.pattern_project, &seam.sides_b);
+                            let difference = length_a - length_b;
+                            let deviation = (difference - seam.ease_meters).abs();
+                            let (color, status) = if deviation <= 0.005 {
+                                (egui::Color32::LIGHT_GREEN, "ok")
+                            } else if deviation <= SEAM_LENGTH_WARNING_METERS {
+                                (egui::Color32::from_rgb(255, 190, 80), "atenção")
+                            } else {
+                                (egui::Color32::from_rgb(255, 120, 120), "revisar")
+                            };
+                            ui.colored_label(color, format!(
+                                "{} · A {:.1} cm · B {:.1} cm · dif. {:+.1} cm ({})",
+                                seam.name, length_a * 100.0, length_b * 100.0, difference * 100.0, status
+                            ));
+                        }
+                    });
+                    ui.weak("Verde: até 0,5 cm do alvo · âmbar: até 2,5 cm (1 polegada) · vermelho: acima disso.");
+                });
 
             ui.separator();
             ui.strong("Auto Sewing — sugestões");
@@ -4647,7 +4787,8 @@ impl ClothEvoApp {
                         self.selected_target = self.hit_test_pattern(pointer, center);
                         let transform_piece = if self.piece_transform_mode != PieceTransformMode::Move && !self.seam_pick_mode {
                             self.selected_target.or(previous_target).map(|target| target.piece())
-                                .filter(|index| *index < self.pattern_project.pieces.len())
+                                .filter(|index| *index < self.pattern_project.pieces.len()
+                                    && !self.pattern_project.pieces[*index].frozen)
                         } else { None };
                         if let Some(piece_index) = transform_piece {
                             let pivot = piece_pivot(&self.pattern_project.pieces[piece_index]);
@@ -4658,7 +4799,10 @@ impl ClothEvoApp {
                             self.drag_last_world = None;
                         } else if let Some(target) = self.selected_target {
                             self.selected_piece = target.piece().min(self.pattern_project.pieces.len().saturating_sub(1));
-                            self.dragging_target = if target.is_movable() { Some(target) } else { None };
+                            let locked = self.pattern_project.pieces.get(target.piece())
+                                .map(|piece| piece.frozen)
+                                .unwrap_or(false);
+                            self.dragging_target = if target.is_movable() && !locked { Some(target) } else { None };
                             self.dragging_before = self.dragging_target.map(|_| self.editor_snapshot());
                             self.drag_last_world = Some(to_world(pointer));
                         } else {
@@ -4930,6 +5074,22 @@ impl ClothEvoApp {
         // A altura-base acompanha a altura do avatar; 1,72 m preserva o layout anterior.
         let origin_y = (0.9 * f64::from(avatar.height_m) / 1.72 - min_y) as f32;
 
+        // Empilhamento: camada menor fica mais perto do corpo; empate resolve pela ordem dos moldes.
+        let mut layer_order: Vec<usize> = (0..piece_count).collect();
+        layer_order.sort_by_key(|&index| {
+            let piece_id = prepared[index].0;
+            let layer = self.pattern_project.pieces.iter()
+                .find(|piece| piece.id == piece_id)
+                .map(|piece| piece.layer)
+                .unwrap_or(0);
+            (layer, index)
+        });
+        let mut layer_rank = vec![0usize; piece_count];
+        for (rank, &index) in layer_order.iter().enumerate() {
+            layer_rank[index] = rank;
+        }
+        let arrangement_list = arrangement_points(&avatar);
+
         for (piece_index, (id, sample, mesh, fabric, assembly, grain, name)) in
             prepared.into_iter().enumerate()
         {
@@ -4973,17 +5133,32 @@ impl ClothEvoApp {
                 0.0,
                 PATTERN_SIM_BODY_RADIUS,
             );
-            let shell_radius = pattern_sim_shell_radius(piece_index, piece_thickness).max(
+            let shell_radius = pattern_sim_shell_radius(layer_rank[piece_index], piece_thickness).max(
                 body_clear_radius
                     + piece_thickness
                     + PATTERN_SIM_PERTURBATION
-                    + piece_index as f32 * PATTERN_SIM_LAYER_SPACING,
+                    + layer_rank[piece_index] as f32 * PATTERN_SIM_LAYER_SPACING,
             );
-            let auto_origin = Vec3::new(
-                angle.sin() * shell_radius,
-                origin_y + center_y as f32,
-                angle.cos() * shell_radius,
-            );
+            // Com ponto de posicionamento, o centro do molde vai para a superfície do corpo nesse
+            // ponto, voltado para a normal dele; sem ponto, vale o layout automático frontal.
+            let arrangement_point = assembly.arrangement.as_deref()
+                .and_then(|point_id| arrangement_list.iter().find(|point| point.id == point_id));
+            let (auto_origin, base_angle) = if let Some(point) = arrangement_point {
+                let clearance = piece_thickness
+                    + PATTERN_SIM_PERTURBATION
+                    + layer_rank[piece_index] as f32 * PATTERN_SIM_LAYER_SPACING;
+                let surface = arrangement_surface_position(&body_colliders, point, clearance);
+                (Vec3::new(surface.x, point.anchor.y, surface.z), point.normal.x.atan2(point.normal.z))
+            } else {
+                (
+                    Vec3::new(
+                        angle.sin() * shell_radius,
+                        origin_y + center_y as f32,
+                        angle.cos() * shell_radius,
+                    ),
+                    angle,
+                )
+            };
             let translation = auto_origin + Vec3::new(
                 assembly.translation_meters[0] as f32,
                 assembly.translation_meters[1] as f32,
@@ -4995,7 +5170,7 @@ impl ClothEvoApp {
                 assembly.rotation_degrees[1].rem_euclid(360.0).to_radians() as f32,
                 assembly.rotation_degrees[2].rem_euclid(360.0).to_radians() as f32,
             );
-            let base_rotation = Quat::from_rotation_y(angle);
+            let base_rotation = Quat::from_rotation_y(base_angle);
             let rotation = base_rotation * local_rotation;
             let material = PanelMaterial {
                 density_kg_m2: fabric.density_kg_m2 as f32,

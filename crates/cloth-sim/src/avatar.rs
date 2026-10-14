@@ -96,6 +96,90 @@ pub fn build_avatar_colliders(config: &AvatarConfig) -> Result<Vec<Collider>, St
     Ok(out)
 }
 
+/// Ponto de posicionamento no corpo, para arrumar moldes em volta do avatar.
+/// `anchor` fica dentro do volume do corpo (centro da região) e `normal` aponta para fora:
+/// +Z é a frente do avatar. Convenção: o avatar olha para +Z e "esquerdo" é o lado +X.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArrangementPoint {
+    pub id: String,
+    pub name: String,
+    pub anchor: Vec3,
+    pub normal: Vec3,
+}
+
+fn push_front_back(out: &mut Vec<ArrangementPoint>, id: &str, name: &str, anchor: Vec3) {
+    out.push(ArrangementPoint {
+        id: format!("{id}_frente"),
+        name: format!("{name} · frente"),
+        anchor,
+        normal: Vec3::Z,
+    });
+    out.push(ArrangementPoint {
+        id: format!("{id}_costas"),
+        name: format!("{name} · costas"),
+        anchor,
+        normal: Vec3::NEG_Z,
+    });
+}
+
+/// Pontos de posicionamento derivados das mesmas medidas que geram os colisores analíticos:
+/// pescoço, peito, cintura e quadril (frente/costas) e braços, antebraços, coxas e canelas
+/// (esquerdo/direito, frente/costas).
+pub fn arrangement_points(config: &AvatarConfig) -> Vec<ArrangementPoint> {
+    let h = config.height_m;
+    let scale = h / 1.72;
+    let shoulders = config.shoulder_width_m;
+    let hips = config.hip_width_m;
+    let mut out = Vec::new();
+
+    push_front_back(&mut out, "pescoco", "Pescoço", Vec3::new(0.0, h * 0.855, 0.0));
+    push_front_back(&mut out, "tronco_peito", "Peito", Vec3::new(0.0, h * 0.725, 0.0));
+    push_front_back(&mut out, "tronco_cintura", "Cintura", Vec3::new(0.0, h * 0.625, 0.0));
+    push_front_back(&mut out, "quadril", "Quadril", Vec3::new(0.0, h * 0.535, 0.0));
+
+    for (sign, side_id, side_name) in [(1.0_f32, "esq", "esquerdo"), (-1.0_f32, "dir", "direito")] {
+        let shoulder = Vec3::new(sign * shoulders * 0.43, h * 0.785, 0.0);
+        let elbow = Vec3::new(sign * shoulders * 0.66, h * 0.625, 0.0);
+        let wrist = Vec3::new(sign * shoulders * 0.76, h * 0.445, 0.015 * scale);
+        push_front_back(&mut out, &format!("braco_{side_id}"), &format!("Braço {side_name}"),
+            (shoulder + elbow) * 0.5);
+        push_front_back(&mut out, &format!("antebraco_{side_id}"), &format!("Antebraço {side_name}"),
+            (elbow + wrist) * 0.5);
+
+        let x = sign * hips * 0.245;
+        let hip = Vec3::new(x, h * 0.535, 0.0);
+        let knee = Vec3::new(x * 1.02, h * 0.305, 0.005 * scale);
+        let ankle = Vec3::new(x * 1.04, h * 0.075, 0.0);
+        push_front_back(&mut out, &format!("coxa_{side_id}"), &format!("Coxa {side_name}"),
+            (hip + knee) * 0.5);
+        push_front_back(&mut out, &format!("canela_{side_id}"), &format!("Canela {side_name}"),
+            (knee + ankle) * 0.5);
+    }
+    out
+}
+
+/// Posição na superfície do corpo para o centro de um molde: caminha do `anchor` ao longo da
+/// `normal` em passos de 5 mm até sair de todos os colisores com folga `clearance` (teto de 1 m).
+/// Funciona com colisores analíticos e com o SDF de uma malha importada.
+pub fn arrangement_surface_position(
+    colliders: &[Collider],
+    point: &ArrangementPoint,
+    clearance: f32,
+) -> Vec3 {
+    const STEP: f32 = 0.005;
+    const MAX_DISTANCE: f32 = 1.0;
+    let direction = point.normal.normalize_or_zero();
+    let mut distance = 0.0_f32;
+    while distance < MAX_DISTANCE {
+        let position = point.anchor + direction * distance;
+        if colliders.iter().all(|collider| collider.sdf(position) >= clearance) {
+            return position;
+        }
+        distance += STEP;
+    }
+    point.anchor + direction * MAX_DISTANCE
+}
+
 /// Menor raio r >= min_radius para que o centro de uma faixa do molde fique fora
 /// dos colisores em alturas amostradas. É uma estimativa por linha central: não inclui
 /// a largura tangencial do molde e limita a busca a 1,5 m.
@@ -183,6 +267,38 @@ mod tests {
         for angle in [-1.5_f32, 0.0, 1.5] {
             let radius = clear_shell_radius(&colliders, angle, 0.9, 1.6, 0.0, 0.14);
             assert!(radius.is_finite() && radius >= 0.14);
+        }
+    }
+}
+
+#[cfg(test)]
+mod arrangement_tests {
+    use super::*;
+
+    #[test]
+    fn points_cover_front_and_back_with_unique_ids() {
+        let points = arrangement_points(&AvatarConfig::default());
+        assert!(points.len() >= 24, "pontos: {}", points.len());
+        let mut ids: Vec<_> = points.iter().map(|point| point.id.clone()).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), points.len(), "ids devem ser únicos");
+        assert!(points.iter().any(|point| point.id == "tronco_peito_costas" && point.normal == Vec3::NEG_Z));
+        assert!(points.iter().any(|point| point.id == "tronco_peito_frente" && point.normal == Vec3::Z));
+    }
+
+    #[test]
+    fn surface_position_leaves_the_body_along_the_normal_at_the_anchor_height() {
+        let config = AvatarConfig::default();
+        let colliders = build_avatar_colliders(&config).unwrap();
+        for point in arrangement_points(&config) {
+            let position = arrangement_surface_position(&colliders, &point, 0.002);
+            assert!(
+                colliders.iter().all(|collider| collider.sdf(position) >= 0.002 - 1.0e-4),
+                "{} ficou dentro do corpo", point.id
+            );
+            assert!((position - point.anchor).dot(point.normal) > 0.0, "{} não saiu do corpo", point.id);
+            assert!((position.y - point.anchor.y).abs() < 1.0e-5 && (position.x - point.anchor.x).abs() < 1.0e-5);
         }
     }
 }
