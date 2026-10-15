@@ -6,7 +6,9 @@ use crate::builder::ClothBuilder;
 use crate::collider::Collider;
 use crate::mesh::{GridPanel, Placement};
 use crate::params::SimParams;
+use crate::sdf::SignedDistanceField;
 use crate::solver::Simulation;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SceneKind {
@@ -16,16 +18,32 @@ pub enum SceneKind {
     SphereDrop,
     /// Dois painéis costurados nas laterais ao redor de um cilindro: costuras + colisão.
     SewnTube,
+    /// Tecido sobre um torso fechado com colisão por SDF de malha importada.
+    SdfAvatarDrop,
+    /// Travessia rápida do torso em um único substep para registrar o baseline de CCD.
+    FastSdfCrossing,
 }
 
 impl SceneKind {
+    /// Cenas disponibilizadas no seletor interativo do app.
     pub const ALL: [SceneKind; 3] = [Self::HangingCloth, Self::SphereDrop, Self::SewnTube];
+
+    /// Cenários fixos do diagnóstico/benchmark de colisão, incluindo SDF e movimento rápido.
+    pub const DIAGNOSTIC: [SceneKind; 5] = [
+        Self::HangingCloth,
+        Self::SphereDrop,
+        Self::SewnTube,
+        Self::SdfAvatarDrop,
+        Self::FastSdfCrossing,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::HangingCloth => "1. Pano pendurado",
             Self::SphereDrop => "2. Pano sobre esfera",
             Self::SewnTube => "3. Tubo costurado",
+            Self::SdfAvatarDrop => "4. Tecido sobre torso (SDF)",
+            Self::FastSdfCrossing => "5. Travessia rápida do torso (SDF)",
         }
     }
 }
@@ -35,7 +53,9 @@ impl SceneKind {
 pub fn build_scene(kind: SceneKind, res: u32, params: SimParams) -> Simulation {
     let res = res.max(8);
     let mut b = ClothBuilder::new();
-    b.add_collider(Collider::ground());
+    if !matches!(kind, SceneKind::SdfAvatarDrop | SceneKind::FastSdfCrossing) {
+        b.add_collider(Collider::ground());
+    }
 
     match kind {
         SceneKind::HangingCloth => {
@@ -59,6 +79,16 @@ pub fn build_scene(kind: SceneKind, res: u32, params: SimParams) -> Simulation {
             );
             b.add_panel(&panel.mesh, placement);
             b.add_collider(Collider::Sphere { center: Vec3::new(0.0, 0.4, 0.0), radius: 0.4 });
+            b.perturb(0.002);
+        }
+        SceneKind::SdfAvatarDrop | SceneKind::FastSdfCrossing => {
+            let panel = GridPanel::new(0.6, 0.6, res, res);
+            let placement = Placement::new(
+                Vec3::new(-0.3, 1.3, 0.3),
+                Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+            );
+            b.add_panel(&panel.mesh, placement);
+            b.add_collider(Collider::TriangleMeshSdf { field: avatar_torso_sdf() });
             b.perturb(0.002);
         }
         SceneKind::SewnTube => {
@@ -86,5 +116,31 @@ pub fn build_scene(kind: SceneKind, res: u32, params: SimParams) -> Simulation {
         }
     }
 
-    b.build(params)
+    let mut simulation = b.build(params);
+    if kind == SceneKind::FastSdfCrossing {
+        simulation.params.gravity = Vec3::ZERO;
+        simulation.params.substeps = 1;
+        simulation.params.max_particle_speed = 100.0;
+        simulation.vel.fill(Vec3::NEG_Y * 100.0);
+    }
+    simulation
+}
+
+/// SDF de referência fechado para exercitar o caminho de colisão de avatares importados.
+/// O torso é uma caixa triangularizada de 1,4 × 0,8 × 0,7 m; não depende de assets externos.
+fn avatar_torso_sdf() -> Arc<SignedDistanceField> {
+    let positions = [
+        [-0.7, 0.2, -0.35], [0.7, 0.2, -0.35], [0.7, 1.0, -0.35], [-0.7, 1.0, -0.35],
+        [-0.7, 0.2, 0.35], [0.7, 0.2, 0.35], [0.7, 1.0, 0.35], [-0.7, 1.0, 0.35],
+    ];
+    let indices = [
+        0, 2, 1, 0, 3, 2,
+        4, 5, 6, 4, 6, 7,
+        0, 1, 5, 0, 5, 4,
+        3, 7, 6, 3, 6, 2,
+        0, 4, 7, 0, 7, 3,
+        1, 2, 6, 1, 6, 5,
+    ];
+    Arc::new(SignedDistanceField::from_triangle_mesh(&positions, &indices, 0.015)
+        .expect("o torso interno deve ser uma malha fechada válida"))
 }

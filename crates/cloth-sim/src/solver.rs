@@ -38,11 +38,20 @@ pub struct BendConstraint {
     pub scale: f32,
 }
 
-/// Métricas de tempo (diagnóstico para a UI).
+/// Métricas de desempenho e contato do último passo (diagnóstico para a UI e benchmarks).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Stats {
     /// Média móvel do tempo gasto por `step`, em ms.
     pub step_ms: f32,
+    /// Média móvel do tempo gasto resolvendo restrições XPBD, em ms por passo.
+    pub constraint_ms: f32,
+    /// Média móvel do tempo gasto consultando e projetando colisores externos, em ms por passo.
+    pub body_collision_ms: f32,
+    /// Projeções de contato com colisores externos durante o último passo.
+    /// Uma partícula pode contar mais de uma vez se várias passadas forem necessárias.
+    pub body_contact_projections: usize,
+    /// Maior penetração relativa à espessura configurada, medida antes da correção, em metros.
+    pub body_max_penetration_m: f32,
     pub steps: u64,
 }
 
@@ -308,6 +317,10 @@ impl Simulation {
         let damp = (-self.params.damping.max(0.0) * h).exp();
         let g = self.params.gravity;
         let parallel = self.params.parallel;
+        let mut constraint_elapsed_ms = 0.0_f32;
+        let mut body_collision_elapsed_ms = 0.0_f32;
+        self.stats.body_contact_projections = 0;
+        self.stats.body_max_penetration_m = 0.0;
         self.last_self_collision_contacts = 0;
         self.last_self_collision_penetration = 0.0;
         self.last_stability_corrections = 0;
@@ -325,6 +338,7 @@ impl Simulation {
             // 2. Restrições (XPBD, λ zerado a cada substep).
             self.dist_lambda.fill(0.0);
             self.bend_lambda.fill(0.0);
+            let constraint_start = Instant::now();
             for _ in 0..iterations {
                 for r in &self.dist_colors {
                     solve_distance(
@@ -350,12 +364,15 @@ impl Simulation {
                     );
                 }
             }
+            constraint_elapsed_ms += constraint_start.elapsed().as_secs_f32() * 1000.0;
 
             // 3. Auto-colisão de vértices não adjacentes (hash espacial), depois colisores externos.
             if self.params.self_collision {
                 self.collide_self();
             }
+            let body_collision_start = Instant::now();
             self.collide();
+            body_collision_elapsed_ms += body_collision_start.elapsed().as_secs_f32() * 1000.0;
 
             // 4. Reconstrói velocidades, recuperando estados não finitos e limitando picos.
             let max_speed = self.params.max_particle_speed.clamp(1.0, 100.0);
@@ -394,11 +411,13 @@ impl Simulation {
         }
 
         let ms = start.elapsed().as_secs_f32() * 1000.0;
-        self.stats.step_ms = if self.stats.steps == 0 {
-            ms
-        } else {
-            0.9 * self.stats.step_ms + 0.1 * ms
+        let first_sample = self.stats.steps == 0;
+        let blend = |previous: f32, sample: f32| {
+            if first_sample { sample } else { 0.9 * previous + 0.1 * sample }
         };
+        self.stats.step_ms = blend(self.stats.step_ms, ms);
+        self.stats.constraint_ms = blend(self.stats.constraint_ms, constraint_elapsed_ms);
+        self.stats.body_collision_ms = blend(self.stats.body_collision_ms, body_collision_elapsed_ms);
         self.stats.steps += 1;
     }
 
@@ -496,6 +515,9 @@ impl Simulation {
                     let d = collider.sdf(p) - thickness;
                     if d < 0.0 {
                         touched = true;
+                        self.stats.body_contact_projections += 1;
+                        self.stats.body_max_penetration_m =
+                            self.stats.body_max_penetration_m.max(-d);
                         let n = collider.normal(p);
                         p -= n * d; // empurra para fora
 
@@ -1198,10 +1220,17 @@ mod tests {
     #[test]
     fn cloth_does_not_penetrate_sphere() {
         let mut sim = build_scene(SceneKind::SphereDrop, 24, SimParams::default());
+        let mut contact_projections = 0usize;
+        let mut max_penetration = 0.0_f32;
         for _ in 0..600 {
             sim.step(1.0 / 60.0);
+            contact_projections += sim.stats.body_contact_projections;
+            max_penetration = max_penetration.max(sim.stats.body_max_penetration_m);
         }
         assert!(sim.is_finite());
+        assert!(contact_projections > 0, "a cena deveria registrar contatos com o corpo");
+        assert!(max_penetration.is_finite() && max_penetration > 0.0);
+        assert!(sim.stats.constraint_ms.is_finite() && sim.stats.body_collision_ms.is_finite());
         for c in &sim.colliders {
             for p in &sim.pos {
                 assert!(c.sdf(*p) > -0.02, "partícula dentro do colisor: {:?}", c);
@@ -1210,6 +1239,56 @@ mod tests {
         // o tecido deve ter descido (e parado em cima da esfera/chão)
         let avg_y = sim.pos.iter().map(|p| p.y).sum::<f32>() / sim.pos.len() as f32;
         assert!(avg_y < 1.0, "o tecido não caiu: {avg_y}");
+    }
+
+    #[test]
+    fn sdf_avatar_scene_records_reference_contact_metrics() {
+        let mut sim = build_scene(SceneKind::SdfAvatarDrop, 16, SimParams::default());
+        let mut contact_projections = 0usize;
+        let mut max_penetration = 0.0_f32;
+        for _ in 0..240 {
+            sim.step(1.0 / 60.0);
+            contact_projections += sim.stats.body_contact_projections;
+            max_penetration = max_penetration.max(sim.stats.body_max_penetration_m);
+        }
+
+        let sdf = sim.colliders.iter().find_map(|collider| match collider {
+            Collider::TriangleMeshSdf { field } => Some(field),
+            _ => None,
+        }).expect("a cena deve usar o SDF do torso");
+        let minimum_margin = sim.pos.iter()
+            .map(|position| sdf.sample(*position) - sim.params.thickness)
+            .fold(f32::INFINITY, f32::min);
+
+        assert!(sim.is_finite(), "a cena com SDF divergiu");
+        assert!(contact_projections > 0, "o SDF deveria registrar contatos");
+        assert!(max_penetration.is_finite() && max_penetration > 0.0);
+        assert!(minimum_margin > -0.04, "penetração final excessiva no SDF: {minimum_margin} m");
+        assert!(sim.stats.constraint_ms.is_finite() && sim.stats.body_collision_ms.is_finite());
+    }
+
+    #[test]
+    fn fast_sdf_crossing_records_the_current_discrete_baseline() {
+        let mut sim = build_scene(
+            SceneKind::FastSdfCrossing,
+            12,
+            SimParams::default(),
+        );
+        sim.step(1.0 / 60.0);
+
+        let sdf = sim.colliders.iter().find_map(|collider| match collider {
+            Collider::TriangleMeshSdf { field } => Some(field),
+            _ => None,
+        }).expect("a cena deve usar o SDF do torso");
+        let minimum_sdf = sim.pos.iter()
+            .map(|position| sdf.sample(*position))
+            .fold(f32::INFINITY, f32::min);
+
+        // Esta cena registra a referência da detecção discreta: o pano cruza todo o
+        // torso em um único substep, então os contatos perdidos ficam mensuráveis.
+        assert!(sim.is_finite());
+        assert_eq!(sim.stats.body_contact_projections, 0);
+        assert!(minimum_sdf > 0.0, "a referência deve terminar abaixo e fora do torso");
     }
 
     #[test]

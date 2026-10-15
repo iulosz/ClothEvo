@@ -212,6 +212,24 @@ O solver faz pareamento das duas bordas pelo comprimento de arco normalizado e c
 Ações disponíveis: criar costura, selecionar e alterar uma costura existente, inverter a direção de A ou B, selecionar intervalos com vários segmentos e descosturar. A simulação atual ainda costura apenas bordas do contorno; linhas de costura internas exigem um mapeamento de malha próprio em uma etapa futura.
 
 
+## Referência de colisão tecido–corpo (Etapa 1)
+
+A suíte do `cloth-sim` inclui a queda sobre esfera analítica e uma cena reproduzível de tecido
+sobre um torso fechado, consultado por SDF de malha. O torso de referência mede 1,4 × 0,8 × 0,7 m
+e é gerado no código, sem depender de um arquivo de avatar.
+
+Execute `cargo test -p cloth-sim` para validar os cenários. Para observar as métricas em execução:
+
+```bash
+cargo run --release -p cloth-sim --example diag -- 4 24 20 1 10
+```
+
+O diagnóstico informa projeções de contato e a maior penetração medida antes da correção no último
+passo, além das médias móveis de tempo do passo completo, das restrições e dos colisores externos.
+A quinta cena (`5`) reproduz um cruzamento do torso em um único substep:
+`cargo run --release -p cloth-sim --example diag -- 5 24 1 1 0.1`. Ela registra a referência
+atual da detecção discreta para comparar a etapa de detecção contínua.
+
 ## Estabilidade da simulação
 
 Na viewport de simulação, ajuste **substeps por quadro** e **iterações por substep**: aumentar substeps costuma estabilizar movimentos rápidos; aumentar iterações melhora a convergência das restrições, com custo adicional. O limite de velocidade por partícula atua como salvaguarda contra deslocamentos extremos. Se forem encontrados valores não finitos, a simulação pausa e retorna ao estado inicial da cena para impedir que geometria inválida continue sendo propagada.

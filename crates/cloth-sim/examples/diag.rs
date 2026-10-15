@@ -1,6 +1,6 @@
 //! Diagnóstico de estabilidade: imprime deformação máxima e energia cinética ao longo do tempo.
 //!
-//! `cargo run --release -p cloth-sim --example diag -- [cena 1-3] [res] [substeps] [iterações] [segundos]`
+//! `cargo run --release -p cloth-sim --example diag -- [cena 1-5] [res] [substeps] [iterações] [segundos]`
 
 use cloth_sim::{build_scene, SceneKind, SimParams};
 
@@ -9,7 +9,7 @@ fn main() {
     let get = |i: usize, default: f32| -> f32 {
         args.get(i).and_then(|s| s.parse().ok()).unwrap_or(default)
     };
-    let kind = SceneKind::ALL[(get(0, 1.0) as usize).clamp(1, 3) - 1];
+    let kind = SceneKind::DIAGNOSTIC[(get(0, 1.0) as usize).clamp(1, SceneKind::DIAGNOSTIC.len()) - 1];
     let res = get(1, 24.0) as u32;
     let seconds = get(4, 10.0);
 
@@ -26,27 +26,34 @@ fn main() {
     );
     let mut sim = build_scene(kind, res, params);
     println!(
-        "{:>6} {:>10} {:>10} {:>10} {:>12} {:>8} {:>8}",
-        "t(s)", "strain máx", "p99", "p50", "energia cin.", "y mín", "pior"
+        "{:>6} {:>10} {:>10} {:>10} {:>12} {:>8} {:>10} {:>12} {:>10} {:>10} {:>10} {:>20}",
+        "t(s)", "strain máx", "p99", "p50", "energia cin.", "y mín",
+        "contatos", "penet. máx", "passo ms", "restr. ms", "colisor ms", "pior"
     );
 
     let dt = 1.0 / 60.0;
     let frames = (seconds / dt) as usize;
     for f in 0..=frames {
-        if f % 30 == 0 {
+        let report_every = if kind == SceneKind::FastSdfCrossing { 1 } else { 30 };
+        if f % report_every == 0 {
             let lowest = sim.pos.iter().map(|p| p.y).fold(f32::MAX, f32::min);
             let worst = sim
                 .worst_strain_edge()
                 .map(|(a, b, k, _)| format!("{:?}({a},{b})", k))
                 .unwrap_or_default();
             println!(
-                "{:>6.2} {:>10.4} {:>10.4} {:>10.4} {:>12.6} {:>8.3} {}",
+                "{:>6.2} {:>10.4} {:>10.4} {:>10.4} {:>12.6} {:>8.3} {:>10} {:>12.5} {:>10.3} {:>10.3} {:>10.3} {:>20}",
                 f as f32 * dt,
                 sim.max_strain(),
                 sim.strain_percentile(0.99),
                 sim.strain_percentile(0.5),
                 sim.kinetic_energy(),
                 lowest,
+                sim.stats.body_contact_projections,
+                sim.stats.body_max_penetration_m,
+                sim.stats.step_ms,
+                sim.stats.constraint_ms,
+                sim.stats.body_collision_ms,
                 worst
             );
         }
