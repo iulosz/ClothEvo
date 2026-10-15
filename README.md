@@ -224,11 +224,25 @@ Execute `cargo test -p cloth-sim` para validar os cenários. Para observar as m�
 cargo run --release -p cloth-sim --example diag -- 4 24 20 1 10
 ```
 
-O diagnóstico informa projeções de contato e a maior penetração medida antes da correção no último
-passo, além das médias móveis de tempo do passo completo, das restrições e dos colisores externos.
+O diagnóstico informa projeções de contato, trajetórias examinadas pelo CCD aproximado, contatos
+interceptados, penetração máxima e tempos do passo/restrições/colisores.
 A quinta cena (`5`) reproduz um cruzamento do torso em um único substep:
-`cargo run --release -p cloth-sim --example diag -- 5 24 1 1 0.1`. Ela registra a referência
-atual da detecção discreta para comparar a etapa de detecção contínua.
+`cargo run --release -p cloth-sim --example diag -- 5 24 1 1 0.1`. Ela deve registrar contatos
+CCD e manter o tecido fora da superfície do torso.
+
+## Etapa 2 — Detecção contínua aproximada tecido–corpo
+
+O solver examina trajetórias de partículas longas entre a posição anterior e a prevista, usando
+avanços limitados pelas distâncias dos SDFs. Ao encontrar a primeira superfície de contato, remove
+a componente do movimento dirigida para dentro do corpo e preserva o deslizamento tangencial.
+O contato corporal também é projetado após cada iteração XPBD, reduzindo a chance de as restrições
+reintroduzirem penetração após uma correção.
+
+Os contadores `body_sweep_tests` e `body_swept_contacts` mostram quantas trajetórias foram examinadas
+e quantos contatos foram interceptados; a interface e o exemplo `diag` expõem esses valores.
+Esta é uma forma contínua aproximada baseada em SDF, não uma implementação exata de CCD
+triângulo-triângulo. Ela reduz o tunneling, mas precisa ser validada com diferentes resoluções de
+SDF, tecidos e movimentos antes de ser considerada suficiente para produção.
 
 ## Estabilidade da simulação
 

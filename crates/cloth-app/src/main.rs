@@ -1047,6 +1047,14 @@ impl ClothEvoApp {
         ui.label(format!("energia cinética: {:.4} J", sim.kinetic_energy()));
         ui.label(format!("velocidade máx.: {:.2} m/s · deslocamento do substep: {:.1} mm",
             sim.max_particle_speed(), sim.max_particle_displacement() * 1000.0));
+        ui.label(format!(
+            "colisão corpo: {} projeções · {} trajetórias CCD · {} contatos CCD · penetração máx. {:.2} mm · {:.2} ms",
+            sim.stats.body_contact_projections,
+            sim.stats.body_sweep_tests,
+            sim.stats.body_swept_contacts,
+            sim.stats.body_max_penetration_m * 1000.0,
+            sim.stats.body_collision_ms,
+        ));
         let speed_limit = self.sim.params.max_particle_speed.clamp(1.0, 100.0);
         let unstable = sim.unstable_particle_count(speed_limit);
         if sim.stability_corrections() > 0 {

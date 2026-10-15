@@ -26,9 +26,9 @@ fn main() {
     );
     let mut sim = build_scene(kind, res, params);
     println!(
-        "{:>6} {:>10} {:>10} {:>10} {:>12} {:>8} {:>10} {:>12} {:>10} {:>10} {:>10} {:>20}",
+        "{:>6} {:>10} {:>10} {:>10} {:>12} {:>8} {:>10} {:>12} {:>10} {:>10} {:>10} {:>8} {:>8} {:>20}",
         "t(s)", "strain máx", "p99", "p50", "energia cin.", "y mín",
-        "contatos", "penet. máx", "passo ms", "restr. ms", "colisor ms", "pior"
+        "contatos", "penet. máx", "passo ms", "restr. ms", "colisor ms", "sweeps", "CCD", "pior"
     );
 
     let dt = 1.0 / 60.0;
@@ -42,7 +42,7 @@ fn main() {
                 .map(|(a, b, k, _)| format!("{:?}({a},{b})", k))
                 .unwrap_or_default();
             println!(
-                "{:>6.2} {:>10.4} {:>10.4} {:>10.4} {:>12.6} {:>8.3} {:>10} {:>12.5} {:>10.3} {:>10.3} {:>10.3} {:>20}",
+                "{:>6.2} {:>10.4} {:>10.4} {:>10.4} {:>12.6} {:>8.3} {:>10} {:>12.5} {:>10.3} {:>10.3} {:>10.3} {:>8} {:>8} {:>20}",
                 f as f32 * dt,
                 sim.max_strain(),
                 sim.strain_percentile(0.99),
@@ -54,6 +54,8 @@ fn main() {
                 sim.stats.step_ms,
                 sim.stats.constraint_ms,
                 sim.stats.body_collision_ms,
+                sim.stats.body_sweep_tests,
+                sim.stats.body_swept_contacts,
                 worst
             );
         }

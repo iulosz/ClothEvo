@@ -20,7 +20,7 @@ pub enum SceneKind {
     SewnTube,
     /// Tecido sobre um torso fechado com colisão por SDF de malha importada.
     SdfAvatarDrop,
-    /// Travessia rápida do torso em um único substep para registrar o baseline de CCD.
+    /// Travessia rápida do torso em um único substep para validar a detecção contínua aproximada.
     FastSdfCrossing,
 }
 

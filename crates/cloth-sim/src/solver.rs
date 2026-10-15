@@ -47,9 +47,12 @@ pub struct Stats {
     pub constraint_ms: f32,
     /// Média móvel do tempo gasto consultando e projetando colisores externos, em ms por passo.
     pub body_collision_ms: f32,
-    /// Projeções de contato com colisores externos durante o último passo.
-    /// Uma partícula pode contar mais de uma vez se várias passadas forem necessárias.
+    /// Projeções discretas de contato com colisores externos durante o último passo.
     pub body_contact_projections: usize,
+    /// Trajetórias longas examinadas pelo detector contínuo aproximado no último passo.
+    pub body_sweep_tests: usize,
+    /// Contatos detectados ao longo da trajetória, mesmo quando a posição final sairia do corpo.
+    pub body_swept_contacts: usize,
     /// Maior penetração relativa à espessura configurada, medida antes da correção, em metros.
     pub body_max_penetration_m: f32,
     pub steps: u64,
@@ -320,6 +323,8 @@ impl Simulation {
         let mut constraint_elapsed_ms = 0.0_f32;
         let mut body_collision_elapsed_ms = 0.0_f32;
         self.stats.body_contact_projections = 0;
+        self.stats.body_sweep_tests = 0;
+        self.stats.body_swept_contacts = 0;
         self.stats.body_max_penetration_m = 0.0;
         self.last_self_collision_contacts = 0;
         self.last_self_collision_penetration = 0.0;
@@ -335,11 +340,11 @@ impl Simulation {
                 }
             }
 
-            // 2. Restrições (XPBD, λ zerado a cada substep).
+            // 2. Restrições XPBD alternadas com contato corporal.
             self.dist_lambda.fill(0.0);
             self.bend_lambda.fill(0.0);
-            let constraint_start = Instant::now();
             for _ in 0..iterations {
+                let constraint_start = Instant::now();
                 for r in &self.dist_colors {
                     solve_distance(
                         &self.distance[r.clone()],
@@ -363,16 +368,18 @@ impl Simulation {
                         parallel,
                     );
                 }
+                constraint_elapsed_ms += constraint_start.elapsed().as_secs_f32() * 1000.0;
+                let body_collision_start = Instant::now();
+                self.collide();
+                body_collision_elapsed_ms += body_collision_start.elapsed().as_secs_f32() * 1000.0;
             }
-            constraint_elapsed_ms += constraint_start.elapsed().as_secs_f32() * 1000.0;
-
-            // 3. Auto-colisão de vértices não adjacentes (hash espacial), depois colisores externos.
+            // Auto-colisão pode alterar posições; reimpõe o contato corporal depois dela.
             if self.params.self_collision {
                 self.collide_self();
+                let body_collision_start = Instant::now();
+                self.collide();
+                body_collision_elapsed_ms += body_collision_start.elapsed().as_secs_f32() * 1000.0;
             }
-            let body_collision_start = Instant::now();
-            self.collide();
-            body_collision_elapsed_ms += body_collision_start.elapsed().as_secs_f32() * 1000.0;
 
             // 4. Reconstrói velocidades, recuperando estados não finitos e limitando picos.
             let max_speed = self.params.max_particle_speed.clamp(1.0, 100.0);
@@ -502,9 +509,21 @@ impl Simulation {
                 continue;
             }
             let mu = self.params.friction.max(0.0) * self.friction_scale[i].max(0.0);
-            let thickness = self.params.thickness * self.thickness_scale[i].max(1.0e-4);
+            let thickness = self.params.thickness.max(0.0) * self.thickness_scale[i].max(1.0e-4);
             let mut p = self.pos[i];
             let mut q = self.prev[i];
+
+            // Captura cruzamentos mesmo quando o início e o fim estão fora do corpo.
+            if body_sweep_is_needed(q, p, thickness) {
+                self.stats.body_sweep_tests += 1;
+                if let Some((swept_position, normal, penetration)) = swept_body_contact(q, p, thickness, &self.colliders) {
+                    p = swept_position;
+                    self.stats.body_swept_contacts += 1;
+                    self.stats.body_max_penetration_m = self.stats.body_max_penetration_m.max(penetration);
+                    let normal_delta = (p - q).dot(normal);
+                    q += normal * normal_delta;
+                }
+            }
 
             // Colisores se sobrepõem nas juntas (ombro/braço, pelve/coxa). Sair de um
             // pode levar a partícula para dentro de outro que já foi processado; repetir
@@ -818,6 +837,73 @@ mod self_collision_candidate_tests {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Limite conservador para detectar cruzamentos entre o estado anterior e o previsto.
+fn body_sweep_is_needed(start: Vec3, end: Vec3, clearance: f32) -> bool {
+    let threshold = (clearance.max(0.0) * 1.5).max(0.004);
+    (end - start).length_squared() > threshold * threshold
+}
+
+/// Menor distância assinada ao conjunto de colisores (união aproximada dos volumes).
+fn closest_body_gap(point: Vec3, clearance: f32, colliders: &[Collider]) -> Option<(f32, usize)> {
+    let mut best: Option<(f32, usize)> = None;
+    for (index, collider) in colliders.iter().enumerate() {
+        let gap = collider.sdf(point) - clearance;
+        if !gap.is_finite() { continue; }
+        if best.is_none_or(|(current, _)| gap < current) {
+            best = Some((gap, index));
+        }
+    }
+    best
+}
+
+/// CCD aproximado por SDF: avança pela trajetória com passos limitados pela distância à superfície.
+/// Remove a componente de movimento para dentro do corpo e preserva o deslizamento tangencial.
+fn swept_body_contact(
+    start: Vec3, end: Vec3, clearance: f32, colliders: &[Collider],
+) -> Option<(Vec3, Vec3, f32)> {
+    const MAX_STEPS: usize = 128;
+    const MAX_ADVANCE_M: f32 = 0.025;
+    const MIN_ADVANCE_M: f32 = 0.0005;
+    const START_PENETRATION_TOLERANCE_M: f32 = 0.002;
+
+    if colliders.is_empty() || !start.is_finite() || !end.is_finite() || !clearance.is_finite() {
+        return None;
+    }
+    let clearance = clearance.max(0.0);
+    let motion = end - start;
+    let travel = motion.length();
+    if !travel.is_finite() || !body_sweep_is_needed(start, end, clearance) { return None; }
+    let (initial_gap, _) = closest_body_gap(start, clearance, colliders)?;
+    // Sobreposições profundas preexistentes são tratadas pela projeção discreta.
+    if initial_gap < -START_PENETRATION_TOLERANCE_M { return None; }
+
+    let epsilon = (clearance * 0.2).clamp(0.0005, 0.0015);
+    let mut t = 0.0_f32;
+    for _ in 0..MAX_STEPS {
+        let sample = start + motion * t;
+        let (gap, collider_index) = closest_body_gap(sample, clearance, colliders)?;
+        let normal = colliders[collider_index].normal(sample).try_normalize()?;
+        let moving_inward = motion.dot(normal) < -1.0e-5;
+        if gap <= epsilon && (moving_inward || gap < -1.0e-5) {
+            let penetration = (-gap).max(0.0);
+            let boundary_position = sample + normal * penetration;
+            let remaining = end - sample;
+            let inward_remainder = remaining.dot(normal);
+            let slide = if inward_remainder < 0.0 {
+                remaining - normal * inward_remainder
+            } else { remaining };
+            return Some((boundary_position + slide, normal, penetration));
+        }
+        let remaining_distance = travel * (1.0 - t);
+        if remaining_distance <= MIN_ADVANCE_M || t >= 1.0 { break; }
+        let advance = (gap.max(MIN_ADVANCE_M) * 0.75).min(MAX_ADVANCE_M).max(MIN_ADVANCE_M);
+        let next_t = (t + advance / travel).min(1.0);
+        if next_t <= t + 1.0e-7 { break; }
+        t = next_t;
+    }
+    None
+}
+
 fn solve_distance(
     cs: &[DistanceConstraint],
     lambda: &mut [f32],
@@ -1268,27 +1354,42 @@ mod tests {
     }
 
     #[test]
-    fn fast_sdf_crossing_records_the_current_discrete_baseline() {
-        let mut sim = build_scene(
-            SceneKind::FastSdfCrossing,
-            12,
-            SimParams::default(),
-        );
+    fn fast_sdf_crossing_is_caught_by_continuous_collision() {
+        let mut sim = build_scene(SceneKind::FastSdfCrossing, 12, SimParams::default());
         sim.step(1.0 / 60.0);
-
         let sdf = sim.colliders.iter().find_map(|collider| match collider {
             Collider::TriangleMeshSdf { field } => Some(field),
             _ => None,
         }).expect("a cena deve usar o SDF do torso");
-        let minimum_sdf = sim.pos.iter()
-            .map(|position| sdf.sample(*position))
+        let minimum_margin = sim.pos.iter()
+            .map(|position| sdf.sample(*position) - sim.params.thickness)
             .fold(f32::INFINITY, f32::min);
-
-        // Esta cena registra a referência da detecção discreta: o pano cruza todo o
-        // torso em um único substep, então os contatos perdidos ficam mensuráveis.
         assert!(sim.is_finite());
-        assert_eq!(sim.stats.body_contact_projections, 0);
-        assert!(minimum_sdf > 0.0, "a referência deve terminar abaixo e fora do torso");
+        assert!(sim.stats.body_sweep_tests > 0, "deveria examinar trajetórias longas");
+        assert!(sim.stats.body_swept_contacts > 0, "deveria interceptar a travessia");
+        assert!(minimum_margin > -0.015, "o tecido atravessou o torso: margem {minimum_margin} m");
+    }
+
+    #[test]
+    fn swept_contact_stops_an_outside_to_outside_sphere_crossing() {
+        let sphere = Collider::Sphere { center: Vec3::ZERO, radius: 1.0 };
+        let (position, normal, penetration) = swept_body_contact(
+            Vec3::new(-2.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0), 0.05,
+            std::slice::from_ref(&sphere),
+        ).expect("o movimento deveria atingir a esfera");
+        assert!(normal.dot(Vec3::NEG_X) > 0.99, "normal incorreta: {normal:?}");
+        assert!(position.x < -1.0, "deveria parar na entrada: {position:?}");
+        assert!(sphere.sdf(position) >= 0.05 - 1.0e-4, "ficou dentro da margem: {position:?}");
+        assert!(penetration <= 1.0e-3);
+    }
+
+    #[test]
+    fn swept_contact_does_not_block_motion_away_from_surface() {
+        let sphere = Collider::Sphere { center: Vec3::ZERO, radius: 1.0 };
+        assert!(swept_body_contact(
+            Vec3::new(-1.1, 0.0, 0.0), Vec3::new(-2.0, 0.0, 0.0), 0.05,
+            std::slice::from_ref(&sphere),
+        ).is_none());
     }
 
     #[test]
