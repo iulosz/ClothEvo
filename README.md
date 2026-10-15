@@ -7,8 +7,8 @@ integrado ao egui.
 
 **Estado do projeto:** protótipo em desenvolvimento. Alguns recursos são aproximados: a auto-colisão
 usa um orçamento de candidatos para proteger o desempenho; linhas de dobra mapeiam para arestas
-existentes da malha; e o simulador atual usa colisores corporais analíticos, sem importação de avatar
-glTF. Ainda não é um substituto completo do CLO3D/Marvelous Designer nem um pipeline de produção.
+existentes da malha; e avatares importados são estáticos, sem esqueleto ou deformação animada. A
+colisão por SDF é aproximada e depende da qualidade e topologia da malha. Ainda não é um substituto completo do CLO3D/Marvelous Designer nem um pipeline de produção.
 
 ## Como rodar
 
@@ -82,7 +82,7 @@ Medidos num ambiente de 2 vCPUs, 20 substeps por frame de 1/60 s, release:
 ## Limitações conhecidas da Fase 0
 
 * Sem auto-colisão tecido–tecido.
-* Colisores analíticos apenas; avatar com BVH/SDF entra na Fase 4.
+* Colisores analíticos para o manequim procedural; avatares OBJ/FBX estáticos com SDF estão descritos na Etapa 5.
 * A malha vem de grades; a triangulação CDT de moldes reais entra na Fase 1/2.
 
 
@@ -337,3 +337,34 @@ O atrito normal e tangencial é resolvido separadamente. O atrito estático tent
 Projetos antigos mantêm o campo existente como coeficiente estático e recebem `0,32` como padrão para o novo coeficiente dinâmico. O painel de propriedades permite ajustar ambos; os diagnósticos da simulação mostram contatos estáticos e deslizantes, velocidade tangencial relativa e a maior resposta normal posicional.
 
 As regressões do solver verificam os limites estático e dinâmico, o deslizamento vértice–triângulo, o atrito tecido–avatar e a remoção do histórico após a separação. As cenas de camadas, costuras e cruzamento rápido continuam exercitando o ciclo de restrições e contatos.
+
+
+## Etapa 5 — avatares estáticos OBJ/FBX
+
+O painel **Avatar e colisão corporal** importa arquivos OBJ e FBX fora da thread da interface. O
+FBX converte eixos/unidades para Y-up e metros; para OBJ, o importador estima o eixo vertical. A
+geometria é centralizada, apoiada no chão, ajustada à altura configurada e pode receber um giro em
+Y. A malha renderizada e o SDF de colisão usam a mesma transformação.
+
+A malha visual e a física são representações separadas: a viewport pode mostrar o modelo sólido ou
+seu wireframe, enquanto o solver consulta um campo de distância voxelizado. A BVH acelera a
+construção do campo; as consultas do solver usam interpolação trilinear no SDF. O espaçamento do
+campo é ajustável de 4 a 30 mm e pode aumentar automaticamente até 80 mm para manter a grade abaixo
+de 2,5 milhões de células. O painel informa dimensões, contagem de vértices/triângulos, resolução,
+tempo de importação e tempo de construção do campo.
+
+Malhas fechadas com arestas manifold e orientação consistente recebem classificação assinada de
+interior/exterior. Malhas abertas, não-manifold ou com winding inconsistente são mantidas para
+contato de proximidade, mas usam distância sem sinal; a interface exibe o diagnóstico porque esse
+modo não identifica de forma confiável qual lado é o interior. Se a geração do SDF falhar, o modelo
+continua visível e a colisão volta ao manequim procedural. O usuário pode desligar a colisão do
+avatar sem desligar a auto-colisão do tecido.
+
+Os contatos usam a mesma resolução corporal do solver XPBD, incluindo projeção pelo gradiente do
+campo, atrito e o detector contínuo aproximado já usado para trajetórias rápidas. As métricas por
+passo incluem projeções, verificações e contatos CCD, maior penetração observada e tempo de colisão.
+O espaçamento do SDF é um compromisso entre detalhe, memória e preparação; nenhum limite universal
+de tempo é assumido para modelos diferentes.
+
+A etapa cobre avatares estáticos. Rigging, animação esquelética, atualização de colisão para malha
+deformável e simplificação automática validada por distância permanecem fora do escopo.

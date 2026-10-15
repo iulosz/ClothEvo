@@ -41,6 +41,8 @@ pub enum MeshKind {
 pub struct StaticMeshData {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    /// Arestas para inspeção opcional da malha estática.
+    pub wire_indices: Vec<u32>,
     pub color: [f32; 3],
     pub kind: MeshKind,
 }
@@ -125,7 +127,10 @@ struct StaticMesh {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
+    wire_index_buffer: wgpu::Buffer,
+    wire_index_count: u32,
     slot: DrawSlot,
+    wire_slot: DrawSlot,
     color: [f32; 3],
     kind: MeshKind,
 }
@@ -279,7 +284,10 @@ impl SceneRenderer {
                 }),
                 index_buffer: index_buffer(device, "static indices", &m.indices),
                 index_count: m.indices.len() as u32,
+                wire_index_buffer: index_buffer(device, "static wire indices", &m.wire_indices),
+                wire_index_count: m.wire_indices.len() as u32,
                 slot: DrawSlot::new(device, &self.layout, "static uniforms"),
+                wire_slot: DrawSlot::new(device, &self.layout, "static wire uniforms"),
                 color: m.color,
                 kind: m.kind,
             })
@@ -371,6 +379,8 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             };
             let u = self.uniforms(m.color, m.color, kind, gamma);
             queue.write_buffer(&m.slot.buffer, 0, bytemuck::bytes_of(&u));
+            let wire = self.uniforms(m.color, m.color, KIND_LINE, gamma);
+            queue.write_buffer(&m.wire_slot.buffer, 0, bytemuck::bytes_of(&wire));
         }
 
         if let Some(c) = &r.cloth {
@@ -417,12 +427,24 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             pass.draw_indexed(0..m.index_count, 0, 0..1);
         }
 
+        pass.set_pipeline(&r.line_pipeline);
+        for m in &r.statics {
+            if m.wire_index_count == 0 {
+                continue;
+            }
+            pass.set_bind_group(0, &m.wire_slot.bind_group, &[]);
+            pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
+            pass.set_index_buffer(m.wire_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..m.wire_index_count, 0, 0..1);
+        }
+
         let Some(c) = &r.cloth else {
             return;
         };
         if self.cloth_vertices.len() != c.vertex_count {
             return;
         }
+        pass.set_pipeline(&r.tri_pipeline);
         pass.set_vertex_buffer(0, c.vertex_buffer.slice(..));
 
         if c.tri_count > 0 {
@@ -432,6 +454,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         }
 
         pass.set_pipeline(&r.line_pipeline);
+        pass.set_vertex_buffer(0, c.vertex_buffer.slice(..));
         if self.style.wireframe && c.wire_count > 0 {
             pass.set_bind_group(0, &c.wire.bind_group, &[]);
             pass.set_index_buffer(c.wire_indices.slice(..), wgpu::IndexFormat::Uint32);

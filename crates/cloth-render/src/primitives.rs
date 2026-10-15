@@ -30,7 +30,7 @@ pub fn uv_sphere(center: Vec3, radius: f32, segments: u32, rings: u32, color: [f
             indices.extend_from_slice(&[a, a + 1, b, a + 1, b + 1, b]);
         }
     }
-    StaticMeshData { vertices, indices, color, kind: MeshKind::Shaded }
+    StaticMeshData { vertices, indices, wire_indices: Vec::new(), color, kind: MeshKind::Shaded }
 }
 
 /// Elipsoide suave alinhado aos eixos, usado para exibir o mesmo volume do colisor SDF.
@@ -86,7 +86,7 @@ pub fn cylinder(a: Vec3, b: Vec3, radius: f32, segments: u32, color: [f32; 3]) -
             }
         }
     }
-    StaticMeshData { vertices, indices, color, kind: MeshKind::Shaded }
+    StaticMeshData { vertices, indices, wire_indices: Vec::new(), color, kind: MeshKind::Shaded }
 }
 
 /// Quadrado horizontal em `y`, de lado `2 * half`, com a grade desenhada pelo shader.
@@ -100,7 +100,7 @@ pub fn ground_quad(y: f32, half: f32, color: [f32; 3]) -> StaticMeshData {
     ];
     // anti-horário visto de cima (+Y)
     let indices = vec![0, 2, 1, 0, 3, 2];
-    StaticMeshData { vertices, indices, color, kind: MeshKind::Ground }
+    StaticMeshData { vertices, indices, wire_indices: Vec::new(), color, kind: MeshKind::Ground }
 }
 
 #[cfg(test)]

@@ -1,10 +1,29 @@
 //! Campo de distância assinado (SDF) estático gerado de uma malha triangular.
 //! O BVH acelera a distância ao triângulo mais próximo e a classificação de interior/exterior.
 
+use std::collections::HashMap;
+
 use glam::Vec3;
 
 const LEAF_TRIANGLES: usize = 8;
 const MAX_GRID_CELLS: usize = 2_500_000;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MeshTopologyDiagnostics {
+    pub boundary_edges: usize,
+    pub non_manifold_edges: usize,
+    pub inconsistent_winding_edges: usize,
+    pub degenerate_triangles: usize,
+}
+
+impl MeshTopologyDiagnostics {
+    pub fn has_reliable_inside_outside(self) -> bool {
+        self.boundary_edges == 0
+            && self.non_manifold_edges == 0
+            && self.inconsistent_winding_edges == 0
+            && self.degenerate_triangles == 0
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SignedDistanceField {
@@ -12,6 +31,7 @@ pub struct SignedDistanceField {
     spacing: f32,
     dims: [usize; 3],
     values: Vec<f32>,
+    topology: MeshTopologyDiagnostics,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -222,14 +242,37 @@ impl SignedDistanceField {
         }
 
         let mut triangles = Vec::with_capacity(indices.len() / 3);
+        let mut edge_directions: HashMap<(u32, u32), (usize, i32)> =
+            HashMap::with_capacity(indices.len());
+        let mut topology = MeshTopologyDiagnostics::default();
         for tri in indices.chunks_exact(3) {
-            let a = Vec3::from_array(positions[tri[0] as usize]);
-            let b = Vec3::from_array(positions[tri[1] as usize]);
-            let c = Vec3::from_array(positions[tri[2] as usize]);
-            if (b - a).cross(c - a).length_squared() > 1.0e-16 {
-                triangles.push(Triangle::new(a, b, c));
+            let (ia, ib, ic) = (tri[0], tri[1], tri[2]);
+            let a = Vec3::from_array(positions[ia as usize]);
+            let b = Vec3::from_array(positions[ib as usize]);
+            let c = Vec3::from_array(positions[ic as usize]);
+            if (b - a).cross(c - a).length_squared() <= 1.0e-16 {
+                topology.degenerate_triangles += 1;
+                continue;
+            }
+            triangles.push(Triangle::new(a, b, c));
+            for (from, to) in [(ia, ib), (ib, ic), (ic, ia)] {
+                let key = if from < to { (from, to) } else { (to, from) };
+                let direction = if from < to { 1 } else { -1 };
+                let edge = edge_directions.entry(key).or_insert((0, 0));
+                edge.0 += 1;
+                edge.1 += direction;
             }
         }
+        for (count, orientation) in edge_directions.values() {
+            if *count == 1 {
+                topology.boundary_edges += 1;
+            } else if *count > 2 {
+                topology.non_manifold_edges += 1;
+            } else if *orientation != 0 {
+                topology.inconsistent_winding_edges += 1;
+            }
+        }
+        let signed_distance_valid = topology.has_reliable_inside_outside();
         let bvh = TriangleBvh::new(triangles)?;
 
         let mut mesh_bounds = Aabb::empty();
@@ -271,19 +314,28 @@ impl SignedDistanceField {
                     let mut distance_squared = f32::INFINITY;
                     bvh.nearest_distance_squared(bvh.root, point, &mut distance_squared);
                     let distance = distance_squared.max(0.0).sqrt();
-                    let intersections = bvh.ray_hit_count(bvh.root, point, ray);
-                    values[point_index] = if intersections % 2 == 1 { -distance } else { distance };
+                    let inside = signed_distance_valid
+                        && bvh.ray_hit_count(bvh.root, point, ray) % 2 == 1;
+                    // Malhas abertas/non-manifold continuam disponíveis para contato de
+                    // proximidade em duas faces, sem inventar uma classificação interna.
+                    values[point_index] = if inside { -distance } else { distance };
                     point_index += 1;
                 }
             }
         }
 
-        Ok(Self { origin, spacing, dims, values })
+        Ok(Self { origin, spacing, dims, values, topology })
     }
 
     pub fn voxel_spacing(&self) -> f32 { self.spacing }
 
     pub fn dimensions(&self) -> [usize; 3] { self.dims }
+
+    pub fn topology_diagnostics(&self) -> MeshTopologyDiagnostics { self.topology }
+
+    pub fn has_reliable_inside_outside(&self) -> bool {
+        self.topology.has_reliable_inside_outside()
+    }
 
     /// Amostragem trilinear. Fora da grade o campo é estendido como distância positiva
     /// à borda, evitando que partículas que saiam do volume escapem da colisão.
@@ -405,11 +457,28 @@ mod tests {
     fn mesh_sdf_has_negative_inside_positive_outside_and_outward_gradient() {
         let (positions, indices) = cube();
         let sdf = SignedDistanceField::from_triangle_mesh(&positions, &indices, 0.025).unwrap();
+        assert!(sdf.has_reliable_inside_outside());
+        assert_eq!(sdf.topology_diagnostics().boundary_edges, 0);
         assert!(sdf.sample(Vec3::new(0.0, 0.5, 0.0)) < 0.0);
         assert!(sdf.sample(Vec3::new(0.8, 0.5, 0.0)) > 0.0);
         let normal = sdf.gradient(Vec3::new(0.55, 0.5, 0.0));
         assert!(normal.x > 0.7, "gradiente deveria apontar para fora: {normal:?}");
         assert!(sdf.voxel_spacing() >= 0.004);
+    }
+
+    #[test]
+    fn open_mesh_uses_unsigned_distance_and_reports_unreliable_inside_outside() {
+        let (positions, mut indices) = cube();
+        // Remove a side so ray parity can no longer classify the volume reliably.
+        indices.drain(6..12);
+        let sdf = SignedDistanceField::from_triangle_mesh(&positions, &indices, 0.03).unwrap();
+        let topology = sdf.topology_diagnostics();
+        assert!(topology.boundary_edges > 0);
+        assert!(!sdf.has_reliable_inside_outside());
+        assert!(
+            sdf.sample(Vec3::new(0.0, 0.5, 0.0)) > 0.0,
+            "malha aberta não deve produzir distância assinada negativa"
+        );
     }
 
     #[test]

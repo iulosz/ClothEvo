@@ -18,6 +18,7 @@ use cloth_sim::{
 use eframe::{egui, egui_wgpu};
 use glam::{EulerRot, Quat, Vec2, Vec3};
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use pattern_core::{
     BoundaryCurve, Curve2D, CurveParam, CurveSegment, EdgePath, EdgeRef, FoldKind, FoldLine, GrainLine,
@@ -425,6 +426,15 @@ impl PatternEditTarget {
     }
 }
 
+struct AvatarImportJobResult {
+    path: std::path::PathBuf,
+    refresh_viewport: bool,
+    target_height_m: f32,
+    collision_spacing_m: f32,
+    heading_degrees: f32,
+    result: Result<avatar_import::ImportedAvatar, String>,
+}
+
 struct ClothEvoApp {
     sim: Simulation,
     kind: SceneKind,
@@ -512,12 +522,23 @@ struct ClothEvoApp {
     avatar_guide_texture: Option<egui::TextureHandle>,
     show_avatar_guide: bool,
     avatar_guide_backdrop: f32,
-    /// Mesh visual do avatar importado; os colisores físicos permanecem analíticos.
+    /// Malha visual importada; inclui arestas limitadas para inspeção em wireframe.
     avatar_mesh: Option<StaticMeshData>,
-    /// Campo de colisão estático gerado da própria geometria importada.
+    /// Campo de colisão estático gerado da mesma geometria e transformação visual.
     avatar_sdf: Option<Arc<SignedDistanceField>>,
     avatar_mesh_name: Option<String>,
     avatar_mesh_path: Option<std::path::PathBuf>,
+    avatar_diagnostics: Option<avatar_import::AvatarDiagnostics>,
+    avatar_visible: bool,
+    avatar_wireframe: bool,
+    avatar_collision_enabled: bool,
+    avatar_collision_spacing_m: f32,
+    avatar_heading_degrees: f32,
+    avatar_imported_height_m: Option<f32>,
+    avatar_imported_heading_degrees: Option<f32>,
+    avatar_imported_collision_spacing_m: Option<f32>,
+    avatar_import_receiver: Option<Receiver<AvatarImportJobResult>>,
+    avatar_import_pending_path: Option<std::path::PathBuf>,
     pattern_tool: PatternTool,
     pattern_zoom: f32,
     pattern_pan: egui::Vec2,
@@ -673,6 +694,17 @@ impl ClothEvoApp {
             avatar_sdf: None,
             avatar_mesh_name: None,
             avatar_mesh_path: None,
+            avatar_diagnostics: None,
+            avatar_visible: true,
+            avatar_wireframe: false,
+            avatar_collision_enabled: true,
+            avatar_collision_spacing_m: 0.01,
+            avatar_heading_degrees: 0.0,
+            avatar_imported_height_m: None,
+            avatar_imported_heading_degrees: None,
+            avatar_imported_collision_spacing_m: None,
+            avatar_import_receiver: None,
+            avatar_import_pending_path: None,
             pattern_tool: PatternTool::Draw,
             pattern_zoom: PATTERN_PIXELS_PER_METER,
             pattern_pan: egui::Vec2::ZERO,
@@ -695,31 +727,132 @@ impl ClothEvoApp {
         app
     }
 
-    fn load_avatar_from_path(&mut self, path: &std::path::Path, refresh_viewport: bool) -> Result<(), String> {
-        let imported = avatar_import::load_model(
-            path,
-            self.pattern_project.avatar.height_meters as f32,
-        )?;
-        let display_name = imported.display_name.clone();
-        let has_sdf = imported.collision_sdf.is_some();
-        self.avatar_mesh = Some(imported.mesh);
-        self.avatar_sdf = imported.collision_sdf;
-        self.avatar_mesh_name = Some(display_name.clone());
-        self.avatar_mesh_path = Some(path.to_path_buf());
-        self.pattern_message = if has_sdf {
-            format!(
-                "Avatar '{}' importado. SDF de colisão gerado a partir da malha; o solver usa a superfície 3D do avatar.",
-                display_name
-            )
-        } else {
-            format!(
-                "Avatar '{}' importado para visualização. A malha não permitiu gerar o SDF; a física usará os colisores analíticos aproximados.",
-                display_name
-            )
-        };
-        if refresh_viewport {
-            self.upload_scene();
+    fn schedule_avatar_import(&mut self, path: &std::path::Path, refresh_viewport: bool) {
+        let path = path.to_path_buf();
+        let target_height_m = self.pattern_project.avatar.height_meters as f32;
+        let collision_spacing_m = self.avatar_collision_spacing_m;
+        let heading_degrees = self.avatar_heading_degrees;
+        let worker_path = path.clone();
+        let (sender, receiver) = mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("clothevo-avatar-import".into())
+            .spawn(move || {
+                let result = avatar_import::load_model(
+                    &worker_path,
+                    target_height_m,
+                    collision_spacing_m,
+                    heading_degrees,
+                );
+                let _ = sender.send(AvatarImportJobResult {
+                    path: worker_path,
+                    refresh_viewport,
+                    target_height_m,
+                    collision_spacing_m,
+                    heading_degrees,
+                    result,
+                });
+            });
+        if let Err(error) = worker {
+            self.pattern_message = format!("Não foi possível iniciar a importação do avatar: {error}");
+            return;
         }
+        self.avatar_import_receiver = Some(receiver);
+        self.avatar_import_pending_path = Some(path.clone());
+        self.pattern_message = format!(
+            "Importando {} e preparando a colisão em segundo plano…",
+            path.file_name().and_then(|name| name.to_str()).unwrap_or("avatar")
+        );
+    }
+
+    fn poll_avatar_import(&mut self) {
+        let result = match self.avatar_import_receiver.as_ref() {
+            Some(receiver) => receiver.try_recv(),
+            None => return,
+        };
+        match result {
+            Ok(job) => {
+                self.avatar_import_receiver = None;
+                self.avatar_import_pending_path = None;
+                match job.result {
+                    Ok(imported) => {
+                        let display_name = imported.display_name.clone();
+                        let has_sdf = imported.collision_sdf.is_some();
+                        let warning = imported.collision_warning.clone();
+                        self.avatar_mesh = Some(imported.mesh);
+                        self.avatar_sdf = imported.collision_sdf;
+                        self.avatar_mesh_name = Some(display_name.clone());
+                        self.avatar_mesh_path = Some(job.path);
+                        self.avatar_diagnostics = Some(imported.diagnostics);
+                        self.avatar_imported_height_m = Some(job.target_height_m);
+                        self.avatar_imported_heading_degrees = Some(job.heading_degrees);
+                        self.avatar_imported_collision_spacing_m = Some(job.collision_spacing_m);
+                        self.pattern_message = if has_sdf {
+                            format!("Avatar '{display_name}' importado e preparado para colisão por SDF.")
+                        } else {
+                            format!("Avatar '{display_name}' importado para visualização; a colisão usará o manequim procedural.")
+                        };
+                        if let Some(warning) = warning {
+                            self.pattern_message.push_str(&format!(" Aviso: {warning}"));
+                        }
+                        if let Err(error) = self.sync_pattern_avatar_colliders() {
+                            self.pattern_message.push_str(&format!(" Falha ao atualizar o solver: {error}"));
+                        }
+                        if job.refresh_viewport {
+                            self.upload_scene();
+                        }
+                    }
+                    Err(error) => {
+                        self.pattern_message = error;
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.avatar_import_receiver = None;
+                self.avatar_import_pending_path = None;
+                self.pattern_message = "A tarefa de importação do avatar foi encerrada sem resultado.".into();
+            }
+        }
+    }
+
+    fn avatar_body_colliders(&self) -> Result<Vec<Collider>, String> {
+        if !self.avatar_collision_enabled {
+            return Ok(Vec::new());
+        }
+        if let Some(field) = self.avatar_sdf.as_ref() {
+            return Ok(vec![Collider::TriangleMeshSdf {
+                field: Arc::clone(field),
+            }]);
+        }
+        let avatar = AvatarConfig {
+            height_m: self.pattern_project.avatar.height_meters as f32,
+            shoulder_width_m: self.pattern_project.avatar.shoulder_width_meters as f32,
+            waist_width_m: self.pattern_project.avatar.waist_width_meters as f32,
+            hip_width_m: self.pattern_project.avatar.hip_width_meters as f32,
+        };
+        build_avatar_colliders(&avatar)
+    }
+
+    fn avatar_settings_are_stale(&self) -> bool {
+        if self.avatar_mesh_path.is_none() {
+            return false;
+        }
+        let height = self.pattern_project.avatar.height_meters as f32;
+        self.avatar_imported_height_m
+            .is_none_or(|applied| (applied - height).abs() > 1.0e-4)
+            || self.avatar_imported_heading_degrees
+                .is_none_or(|applied| (applied - self.avatar_heading_degrees).abs() > 1.0e-3)
+            || self.avatar_imported_collision_spacing_m
+                .is_none_or(|applied| (applied - self.avatar_collision_spacing_m).abs() > 1.0e-6)
+    }
+
+    fn sync_pattern_avatar_colliders(&mut self) -> Result<(), String> {
+        if !self.using_pattern_sim {
+            return Ok(());
+        }
+        let mut colliders = vec![Collider::ground()];
+        colliders.extend(self.avatar_body_colliders()?);
+        self.sim.colliders = colliders;
         Ok(())
     }
 
@@ -736,13 +869,10 @@ impl ClothEvoApp {
             candidates.push(directory.join("Sarah.fbx"));
         }
         for candidate in candidates {
-            if !candidate.is_file() { continue; }
-            if let Err(error) = self.load_avatar_from_path(&candidate, false) {
-                self.pattern_message = format!(
-                    "Sarah.fbx foi encontrado, mas não pôde ser importado: {error}"
-                );
+            if candidate.is_file() {
+                self.schedule_avatar_import(&candidate, true);
+                break;
             }
-            break;
         }
     }
 
@@ -754,9 +884,7 @@ impl ClothEvoApp {
             .add_filter("Autodesk FBX", &["fbx"])
             .pick_file();
         let Some(path) = selected else { return; };
-        if let Err(error) = self.load_avatar_from_path(&path, true) {
-            self.pattern_message = error;
-        }
+        self.schedule_avatar_import(&path, true);
     }
 
     /// Reconstrói a cena preservando os parâmetros atuais.
@@ -779,13 +907,20 @@ impl ClothEvoApp {
         };
         let edges = self.sim.mesh_edges();
         let mut statics = statics_from(&self.sim.colliders);
-        if let Some(avatar) = self.avatar_mesh.as_ref() {
-            // Na simulação de moldes, os SDFs do corpo continuam ativos na física,
-            // mas não devem desenhar o boneco primitivo sobre a malha importada.
-            if self.using_pattern_sim {
-                statics.retain(|mesh| mesh.kind == MeshKind::Ground);
+        if self.using_pattern_sim
+            && (self.avatar_sdf.is_some() || !self.avatar_visible)
+        {
+            // O corpo usado pelo solver não precisa ser desenhado como volumes analíticos.
+            statics.retain(|mesh| mesh.kind == MeshKind::Ground);
+        }
+        if self.avatar_visible {
+            if let Some(avatar) = self.avatar_mesh.as_ref() {
+                let mut avatar = avatar.clone();
+                if !self.avatar_wireframe {
+                    avatar.wire_indices.clear();
+                }
+                statics.push(avatar);
             }
-            statics.push(avatar.clone());
         }
         let mut renderer = rs.renderer.write();
         if let Some(r) = renderer.callback_resources.get_mut::<SceneRenderer>() {
@@ -2749,40 +2884,177 @@ impl ClothEvoApp {
         ui.separator();
         let avatar_before = self.pattern_project.avatar.clone();
         let mut avatar_changed = false;
-        ui.collapsing("Avatar 3D e colisão corporal", |ui| {
-            ui.label("Use um modelo OBJ/FBX como representação visual do avatar.");
-            avatar_changed |= ui.add(egui::Slider::new(&mut self.pattern_project.avatar.height_meters, 1.20..=2.20)
-                .text("Altura (m)")).changed();
-            avatar_changed |= ui.add(egui::Slider::new(&mut self.pattern_project.avatar.shoulder_width_meters, 0.25..=0.70)
-                .text("Largura dos ombros (m)")).changed();
-            avatar_changed |= ui.add(egui::Slider::new(&mut self.pattern_project.avatar.waist_width_meters, 0.18..=0.60)
-                .text("Largura da cintura (m)")).changed();
-            avatar_changed |= ui.add(egui::Slider::new(&mut self.pattern_project.avatar.hip_width_meters, 0.22..=0.70)
-                .text("Largura do quadril (m)")).changed();
+        let import_pending = self.avatar_import_pending_path.is_some();
+        let mut avatar_view_changed = false;
+        let mut avatar_collision_changed = false;
+        let mut reprocess_avatar = false;
+        let mut remove_avatar = false;
+        ui.collapsing("Avatar e colisão corporal", |ui| {
+            ui.label("Importe OBJ/FBX estáticos. A leitura e a preparação da colisão rodam em segundo plano.");
+            avatar_changed |= ui.add(egui::Slider::new(
+                &mut self.pattern_project.avatar.height_meters, 1.20..=2.20,
+            ).text("Altura de referência (m)")).changed();
+            avatar_changed |= ui.add(egui::Slider::new(
+                &mut self.pattern_project.avatar.shoulder_width_meters, 0.25..=0.70,
+            ).text("Largura dos ombros (m)")).changed();
+            avatar_changed |= ui.add(egui::Slider::new(
+                &mut self.pattern_project.avatar.waist_width_meters, 0.18..=0.60,
+            ).text("Largura da cintura (m)")).changed();
+            avatar_changed |= ui.add(egui::Slider::new(
+                &mut self.pattern_project.avatar.hip_width_meters, 0.22..=0.70,
+            ).text("Largura do quadril (m)")).changed();
+            ui.add(egui::Slider::new(
+                &mut self.avatar_heading_degrees, -180.0..=180.0,
+            ).text("Giro do avatar em Y (°)"));
+            ui.label("OBJ usa detecção automática de eixo; FBX é convertido para Y-up.");
+            ui.add(egui::Slider::new(
+                &mut self.avatar_collision_spacing_m, 0.004..=0.03,
+            ).text("Precisão da colisão (m)"))
+                .on_hover_text("Espaçamento menor preserva mais detalhes, com maior custo de memória e importação.")
+                .changed();
+
+            avatar_view_changed |= ui.checkbox(&mut self.avatar_visible, "Exibir avatar").changed();
+            avatar_view_changed |= ui.add_enabled(
+                self.avatar_mesh.is_some(),
+                egui::Checkbox::new(&mut self.avatar_wireframe, "Wireframe de inspeção"),
+            ).changed();
+            avatar_collision_changed |= ui.checkbox(
+                &mut self.avatar_collision_enabled,
+                "Usar avatar como superfície de colisão",
+            ).changed();
 
             ui.horizontal(|ui| {
-                if ui.button("Importar avatar OBJ/FBX…").clicked() {
+                if ui.add_enabled(
+                    !import_pending,
+                    egui::Button::new("Importar avatar OBJ/FBX…"),
+                ).clicked() {
                     self.import_avatar_dialog();
                 }
-                if self.avatar_mesh.is_some() && ui.small_button("Remover modelo").clicked() {
-                    self.avatar_mesh = None;
-                    self.avatar_sdf = None;
-                    self.avatar_mesh_name = None;
-                    self.avatar_mesh_path = None;
-                    self.pattern_message = "Modelo visual removido; o manequim procedural voltou a ser exibido.".into();
-                    self.upload_scene();
+                if self.avatar_mesh_path.is_some() {
+                    reprocess_avatar |= ui.add_enabled(
+                        !import_pending,
+                        egui::Button::new("Aplicar escala e colisão"),
+                    ).clicked();
+                }
+                if self.avatar_mesh.is_some() {
+                    remove_avatar |= ui.add_enabled(
+                        !import_pending,
+                        egui::Button::new("Remover modelo"),
+                    ).clicked();
                 }
             });
+            if import_pending {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Preparando malha visual e campo de colisão…");
+                });
+            }
+
             if let Some(name) = self.avatar_mesh_name.as_ref() {
                 ui.colored_label(
                     egui::Color32::from_rgb(100, 220, 170),
-                    format!("Avatar visual: {name}"),
+                    format!("Arquivo: {name}"),
                 );
             } else {
                 ui.weak("Avatar visual atual: manequim procedural.");
             }
-            ui.weak("O modelo é normalizado para a altura definida acima. A colisão do tecido continua usando volumes analíticos aproximados.");
+            if let Some(diag) = self.avatar_diagnostics.as_ref() {
+                ui.label(format!(
+                    "{} vértices · {} triângulos · dimensões {:.2} × {:.2} × {:.2} m",
+                    diag.vertex_count,
+                    diag.triangle_count,
+                    diag.dimensions_meters[0],
+                    diag.dimensions_meters[1],
+                    diag.dimensions_meters[2],
+                ));
+                if let (Some(spacing), Some(dims)) =
+                    (diag.sdf_spacing_meters, diag.sdf_dimensions)
+                {
+                    ui.label(format!(
+                        "Colisão SDF: passo {:.1} mm · grade {} × {} × {} · importação {:.0} ms · colisão {:.0} ms",
+                        spacing * 1000.0,
+                        dims[0],
+                        dims[1],
+                        dims[2],
+                        diag.import_milliseconds,
+                        diag.collision_build_milliseconds,
+                    ));
+                }
+                if let Some(topology) = diag.topology {
+                    if topology.has_reliable_inside_outside() {
+                        ui.colored_label(
+                            egui::Color32::LIGHT_GREEN,
+                            "Malha fechada e orientada: classificação interior/exterior habilitada.",
+                        );
+                    } else {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(255, 180, 80),
+                            format!(
+                                "Sinal não confiável: {} arestas abertas, {} não-manifold, {} com orientação inconsistente.",
+                                topology.boundary_edges,
+                                topology.non_manifold_edges,
+                                topology.inconsistent_winding_edges,
+                            ),
+                        );
+                    }
+                }
+                if diag.discarded_degenerate_triangles > 0 {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 180, 80),
+                        format!(
+                            "{} triângulos degenerados foram removidos.",
+                            diag.discarded_degenerate_triangles,
+                        ),
+                    );
+                }
+                if self.avatar_settings_are_stale() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 180, 80),
+                        "As opções de escala, orientação ou precisão mudaram. Aplique-as antes da simulação.",
+                    );
+                }
+            }
+            if self.avatar_mesh.is_some() {
+                ui.weak(if self.avatar_collision_enabled {
+                    "A colisão usa o SDF da malha; malhas abertas usam distância sem sinal e exibem aviso."
+                } else {
+                    "Colisão do avatar desativada; o tecido ainda pode colidir consigo mesmo."
+                });
+            } else {
+                ui.weak("Sem malha importada, a colisão usa o manequim procedural quando ativada.");
+            }
         });
+        if avatar_view_changed {
+            self.upload_scene();
+        }
+        if avatar_collision_changed {
+            if let Err(error) = self.sync_pattern_avatar_colliders() {
+                self.pattern_message = format!("Não foi possível atualizar a colisão do avatar: {error}");
+            }
+            self.upload_scene();
+        }
+        if remove_avatar {
+            self.avatar_import_receiver = None;
+            self.avatar_import_pending_path = None;
+            self.avatar_mesh = None;
+            self.avatar_sdf = None;
+            self.avatar_mesh_name = None;
+            self.avatar_mesh_path = None;
+            self.avatar_diagnostics = None;
+            self.avatar_imported_height_m = None;
+            self.avatar_imported_heading_degrees = None;
+            self.avatar_imported_collision_spacing_m = None;
+            self.pattern_message = "Avatar importado removido; a colisão volta ao manequim procedural.".into();
+            if let Err(error) = self.sync_pattern_avatar_colliders() {
+                self.pattern_message.push_str(&format!(" {error}"));
+            }
+            self.upload_scene();
+        }
+        if reprocess_avatar {
+            if let Some(path) = self.avatar_mesh_path.clone() {
+                self.schedule_avatar_import(&path, true);
+            }
+        }
         if avatar_changed {
             let mut before = self.editor_snapshot();
             before.project.avatar = avatar_before;
@@ -4986,6 +5258,12 @@ impl ClothEvoApp {
     }
 
     fn start_pattern_simulation(&mut self) -> Result<(), String> {
+        if self.avatar_import_pending_path.is_some() {
+            return Err("A importação do avatar ainda está em andamento.".into());
+        }
+        if self.avatar_settings_are_stale() {
+            return Err("As opções do avatar mudaram. Clique em 'Aplicar escala e colisão' antes de iniciar a simulação.".into());
+        }
         let previous_selection = self.selected_placement_piece;
         self.pattern_project.validate()?;
         if self.pattern_project.pieces.is_empty() {
@@ -5093,13 +5371,9 @@ impl ClothEvoApp {
             waist_width_m: self.pattern_project.avatar.waist_width_meters as f32,
             hip_width_m: self.pattern_project.avatar.hip_width_meters as f32,
         };
-        // A mesma geometria corporal define o ponto inicial dos moldes e a colisão do solver.
-        // Prioriza o SDF do avatar importado; usa as formas analíticas apenas como fallback.
-        let body_colliders: Vec<Collider> = if let Some(field) = self.avatar_sdf.as_ref() {
-            vec![Collider::TriangleMeshSdf { field: Arc::clone(field) }]
-        } else {
-            build_avatar_colliders(&avatar)?
-        };
+        // A malha visual e o SDF usam a mesma altura, orientação e coordenadas.
+        // O SDF do avatar importado tem prioridade; as formas analíticas são o fallback.
+        let body_colliders = self.avatar_body_colliders()?;
         let mut builder = ClothBuilder::new();
         builder.add_collider(Collider::ground());
         for collider in &body_colliders {
@@ -6901,6 +7175,7 @@ fn sampled_edge_indices(
 
 impl eframe::App for ClothEvoApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.poll_avatar_import();
         if let Some(goal) = self.camera_goal {
             let camera_dt = ui.input(|i| i.stable_dt);
             if self.camera.approach(&goal, camera_dt) { self.camera_goal = None; }
@@ -6944,6 +7219,9 @@ impl eframe::App for ClothEvoApp {
         if self.diverged && !diverged_before {
             // O diagnóstico foi definido após renderizar o painel de controles deste frame.
             ui.ctx().request_repaint();
+        }
+        if (self.avatar_import_pending_path.is_some()) {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         }
         if (self.playing && self.workspace.runs_simulation()) || self.capture.is_some() {
             ui.ctx().request_repaint();
