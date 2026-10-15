@@ -18,6 +18,7 @@ mod coloring;
 pub mod mesh;
 pub mod params;
 pub mod scenes;
+mod self_collision;
 pub mod solver;
 
 pub use avatar::{

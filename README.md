@@ -250,6 +250,12 @@ Na viewport de simulação, ajuste **substeps por quadro** e **iterações por s
 
 **Auto-colisão** usa uma hash grid espacial para testar pares de vértices não adjacentes; arestas de malha, vértices do mesmo triângulo e pares ligados por costura são excluídos para reduzir jitter. Está desligada por padrão devido ao custo extra em malhas densas. É uma aproximação vértice-vértice: ainda não resolve todas as interseções triângulo-triângulo nem as colisões entre aresta e face.
 
+A montagem da simulação agora prepara uma topologia estática de colisão: arestas únicas com suas faces
+adjacentes, incidência de faces por vértice, vizinhança da malha e ligações locais por costura. As
+exclusões de costura ficam limitadas à vizinhança imediata dos pares costurados; uma conexão não exclui
+uma manga ou outro painel distante inteiro. Por enquanto, essas estruturas preparam as próximas etapas:
+a resolução ainda é vértice-vértice.
+
 O atrito da seção **Física e montagem 3D por molde** é configurável por tecido e afeta o contato com colisores e outras partes do pano. Os controles globais de atrito e espessura continuam atuando como multiplicadores. As métricas mostram velocidade máxima, deslocamento do último substep, partículas acima do limiar de velocidade e aberturas críticas nas costuras.
 
 Os comandos **Pausar**, **Passo único** e **Reiniciar** são independentes: o passo único pausa antes de avançar exatamente um passo fixo; reiniciar restaura o estado de colocação e mantém a simulação pausada.

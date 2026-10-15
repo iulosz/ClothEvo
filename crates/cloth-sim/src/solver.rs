@@ -8,6 +8,7 @@ use rayon::prelude::*;
 
 use crate::collider::Collider;
 use crate::params::{ConstraintKind, SimParams, KIND_COUNT};
+use crate::self_collision::CollisionTopology;
 
 /// Grupos de cor menores que isso são resolvidos em série (overhead do rayon não compensa).
 const PAR_MIN: usize = 256;
@@ -97,8 +98,8 @@ pub struct Simulation {
     friction_scale: Vec<f32>,
     /// Duração do último substep, usada para estimar carga das costuras pela lambda XPBD.
     last_substep_dt: f32,
-    /// Pares topologicamente adjacentes (ou unidos por costura) que não devem auto-colidir.
-    self_collision_exclusions: HashSet<(u32, u32)>,
+    /// Relações estáticas da superfície usadas para filtrar contatos locais.
+    collision_topology: CollisionTopology,
     /// Contatos de auto-colisão acumulados no passo de simulação atual.
     last_self_collision_contacts: usize,
     /// Maior penetração interna detectada no passo atual, em metros.
@@ -134,20 +135,11 @@ impl Simulation {
         params: SimParams,
     ) -> Self {
         let n = pos.len();
-        let mut self_collision_exclusions: HashSet<(u32, u32)> = HashSet::new();
-        for triangle in &triangles {
-            for k in 0..3 {
-                let a = triangle[k];
-                let b = triangle[(k + 1) % 3];
-                self_collision_exclusions.insert(if a < b { (a, b) } else { (b, a) });
-            }
-        }
-        for constraint in &distance {
-            if constraint.kind == ConstraintKind::Seam {
-                let (a, b) = (constraint.a, constraint.b);
-                self_collision_exclusions.insert(if a < b { (a, b) } else { (b, a) });
-            }
-        }
+        let seam_pairs = distance
+            .iter()
+            .filter(|constraint| constraint.kind == ConstraintKind::Seam)
+            .map(|constraint| (constraint.a, constraint.b));
+        let collision_topology = CollisionTopology::new(n, &triangles, seam_pairs);
         let mut sim = Self {
             prev: pos.clone(),
             rest_pos: pos.clone(),
@@ -165,7 +157,7 @@ impl Simulation {
             thickness_scale,
             friction_scale,
             last_substep_dt: 0.0,
-            self_collision_exclusions,
+            collision_topology,
             last_self_collision_contacts: 0,
             last_self_collision_penetration: 0.0,
             last_stability_corrections: 0,
@@ -447,7 +439,7 @@ impl Simulation {
         let pairs = bounded_self_collision_candidate_pairs(
             &self.pos,
             cell_size,
-            &self.self_collision_exclusions,
+            self.collision_topology.vertex_pair_exclusions(),
         );
 
         let global_mu = self.params.friction.max(0.0);
@@ -734,18 +726,13 @@ impl Simulation {
             .fold(0.0, f32::max)
     }
 
-    /// Arestas únicas da malha (para o overlay de wireframe).
+    /// Arestas únicas da malha (para o overlay de wireframe e a broadphase futura).
     pub fn mesh_edges(&self) -> Vec<[u32; 2]> {
-        let mut edges: Vec<[u32; 2]> = Vec::with_capacity(self.triangles.len() * 3);
-        for t in &self.triangles {
-            for k in 0..3 {
-                let (a, b) = (t[k], t[(k + 1) % 3]);
-                edges.push(if a < b { [a, b] } else { [b, a] });
-            }
-        }
-        edges.sort_unstable();
-        edges.dedup();
-        edges
+        self.collision_topology
+            .edges()
+            .iter()
+            .map(|edge| edge.vertices)
+            .collect()
     }
 }
 
