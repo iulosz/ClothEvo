@@ -2135,8 +2135,9 @@ impl ClothEvoApp {
                     ).text("Atrito estático")).changed();
                     changed |= ui.add(egui::Slider::new(
                         &mut piece.fabric.friction_dynamic_coefficient, 0.0..=1.5,
-                    ).text("Atrito dinâmico")
-                        .on_hover_text("O solver limita o atrito dinâmico para que ele não ultrapasse o estático.")).changed();
+                    ).text("Atrito dinâmico"))
+                        .on_hover_text("O solver limita o atrito dinâmico para que ele não ultrapasse o estático.")
+                        .changed();
                     changed |= ui.add(egui::Slider::new(
                         &mut piece.fabric.particle_distance_meters, 0.01..=0.20,
                     ).text("Distância entre partículas (m)")).changed();
