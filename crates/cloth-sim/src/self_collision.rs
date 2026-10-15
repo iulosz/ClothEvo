@@ -7,6 +7,169 @@ use glam::Vec3;
 type VertexPair = (u32, u32);
 type Cell = (i32, i32, i32);
 
+/// Contact identity remains stable across solver iterations within one substep.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ContactKey {
+    VertexVertex(u32, u32),
+    VertexTriangle(u32, u32),
+    EdgeEdge(u32, u32),
+    BodyCollider(u32, u32),
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ContactFrictionState {
+    normal_lambda_m: f32,
+    tangential_lambda_m: Vec3,
+    active: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ContactFrictionMetrics {
+    pub contacts: usize,
+    pub static_contacts: usize,
+    pub sliding_contacts: usize,
+    pub max_tangential_speed_m_s: f32,
+    /// XPBD positional normal response proxy; this is not a measured force.
+    pub max_normal_correction_m: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FrictionCorrection {
+    pub delta_lambda_m: Vec3,
+    pub sticking: bool,
+    pub tangential_speed_m_s: f32,
+    pub normal_lambda_m: f32,
+}
+
+impl ContactFrictionMetrics {
+    fn record(&mut self, correction: FrictionCorrection) {
+        self.contacts += 1;
+        if correction.sticking {
+            self.static_contacts += 1;
+        } else {
+            self.sliding_contacts += 1;
+        }
+        self.max_tangential_speed_m_s = self
+            .max_tangential_speed_m_s
+            .max(correction.tangential_speed_m_s);
+        self.max_normal_correction_m = self
+            .max_normal_correction_m
+            .max(correction.normal_lambda_m);
+    }
+}
+
+pub(crate) fn begin_contact_iteration(
+    states: &mut HashMap<ContactKey, ContactFrictionState>,
+) {
+    for state in states.values_mut() {
+        state.active = false;
+    }
+}
+
+pub(crate) fn finish_contact_iteration(
+    states: &mut HashMap<ContactKey, ContactFrictionState>,
+) {
+    states.retain(|_, state| state.active);
+    for state in states.values_mut() {
+        state.active = false;
+    }
+}
+
+/// Acumula a resposta de contato normal e limita a resposta tangencial por Coulomb.
+/// Os multiplicadores são correções posicionais, não forças calibradas.
+pub(crate) fn update_contact_friction(
+    key: ContactKey,
+    states: &mut HashMap<ContactKey, ContactFrictionState>,
+    normal: Vec3,
+    relative_motion: Vec3,
+    normal_lambda_delta_m: f32,
+    static_friction: f32,
+    dynamic_friction: f32,
+    dt: f32,
+) -> Option<FrictionCorrection> {
+    if !relative_motion.is_finite()
+        || !normal_lambda_delta_m.is_finite()
+        || !dt.is_finite()
+        || dt <= 0.0
+    {
+        return None;
+    }
+    let normal = normal.try_normalize()?;
+    let state = states.entry(key).or_default();
+    state.active = true;
+    state.normal_lambda_m += normal_lambda_delta_m.max(0.0);
+
+    let tangential_motion = relative_motion - normal * relative_motion.dot(normal);
+    let previous_lambda = state.tangential_lambda_m
+        - normal * state.tangential_lambda_m.dot(normal);
+    let trial_lambda = previous_lambda - tangential_motion;
+    let trial_length = trial_lambda.length();
+    if !trial_length.is_finite() {
+        return None;
+    }
+
+    let static_mu = if static_friction.is_finite() {
+        static_friction.max(0.0)
+    } else {
+        0.0
+    };
+    let dynamic_mu = if dynamic_friction.is_finite() {
+        dynamic_friction.max(0.0).min(static_mu)
+    } else {
+        0.0
+    };
+    let static_limit = static_mu * state.normal_lambda_m;
+    let dynamic_limit = dynamic_mu * state.normal_lambda_m;
+    let sticking = trial_length <= static_limit + 1.0e-7;
+    let next_lambda = if sticking {
+        trial_lambda
+    } else if trial_length > 1.0e-8 {
+        trial_lambda * (dynamic_limit / trial_length)
+    } else {
+        Vec3::ZERO
+    };
+    let delta_lambda_m = next_lambda - previous_lambda;
+    state.tangential_lambda_m = next_lambda;
+
+    Some(FrictionCorrection {
+        delta_lambda_m,
+        sticking,
+        tangential_speed_m_s: tangential_motion.length() / dt,
+        normal_lambda_m: state.normal_lambda_m,
+    })
+}
+
+pub(crate) fn distribute_friction_correction(
+    correction: Vec3,
+    indices: &[u32],
+    gradients: &[f32],
+    inverse_mass: &[f32],
+    positions: &mut [Vec3],
+) -> bool {
+    if indices.len() != gradients.len() || !correction.is_finite() {
+        return false;
+    }
+    let mut denominator = 0.0_f32;
+    for (&index, &gradient) in indices.iter().zip(gradients) {
+        let i = index as usize;
+        let Some(&weight) = inverse_mass.get(i) else {
+            return false;
+        };
+        if i >= positions.len() {
+            return false;
+        }
+        denominator += weight.max(0.0) * gradient * gradient;
+    }
+    if denominator <= 1.0e-12 || !denominator.is_finite() {
+        return false;
+    }
+    for (&index, &gradient) in indices.iter().zip(gradients) {
+        let i = index as usize;
+        positions[i] += correction * (inverse_mass[i].max(0.0) * gradient / denominator);
+    }
+    true
+}
+
 const MAX_CELLS_PER_PRIMITIVE: usize = 4096;
 const MAX_VT_CANDIDATES_PER_VERTEX: usize = 96;
 const MAX_EE_CANDIDATES_PER_EDGE: usize = 96;
@@ -219,6 +382,7 @@ pub(crate) struct SelfCollisionResolution {
     pub(crate) edge_edge_contacts: usize,
     pub(crate) edge_edge_sweep_tests: usize,
     pub(crate) edge_edge_swept_contacts: usize,
+    pub(crate) friction: ContactFrictionMetrics,
     pub(crate) max_penetration_before_m: f32,
 }
 
@@ -296,8 +460,22 @@ fn indexed_swept_bounds(
     Aabb::from_points(&points)
 }
 
-fn effective_thickness(base: f32, scale: f32) -> f32 {
+const CONTACT_SLOP_M: f32 = 1.0e-5;
+
+pub(crate) fn effective_thickness(base: f32, scale: f32) -> f32 {
     base.max(0.0) * scale.max(1.0e-4)
+}
+
+pub(crate) fn pair_contact_distance(thickness_a: f32, thickness_b: f32) -> f32 {
+    (0.5 * (thickness_a.max(0.0) + thickness_b.max(0.0)) - CONTACT_SLOP_M).max(0.0)
+}
+
+pub(crate) fn body_contact_distance(thickness: f32) -> f32 {
+    (thickness.max(0.0) - CONTACT_SLOP_M).max(0.0)
+}
+
+pub(crate) fn combine_friction(global: f32, surface_a: f32, surface_b: f32) -> f32 {
+    global.max(0.0) * 0.5 * (surface_a.max(0.0) + surface_b.max(0.0))
 }
 
 /// Insere AABBs expandidas de faces e arestas; consulta células com chaves e ordem estáveis.
@@ -649,7 +827,7 @@ fn edge_edge_gap(
     let thickness_b =
         (1.0 - t) * effective_thickness(base_thickness, thickness_scale[b[0] as usize])
         + t * effective_thickness(base_thickness, thickness_scale[b[1] as usize]);
-    Some(0.5 * (thickness_a + thickness_b) - (point_a - point_b).length())
+    Some(pair_contact_distance(thickness_a, thickness_b) - (point_a - point_b).length())
 }
 
 #[derive(Clone, Copy)]
@@ -681,8 +859,9 @@ fn minimum_vertex_triangle_thickness(
     let triangle_thickness = (0..3)
         .map(|i| barycentric[i] * effective_thickness(base_thickness, thickness_scale[indices[i] as usize]))
         .sum::<f32>();
-    0.5 * (
-        effective_thickness(base_thickness, thickness_scale[vertex as usize]) + triangle_thickness
+    pair_contact_distance(
+        effective_thickness(base_thickness, thickness_scale[vertex as usize]),
+        triangle_thickness,
     )
 }
 
@@ -796,7 +975,7 @@ fn find_swept_edge_edge_contact(
         let thickness_b =
             (1.0 - t) * effective_thickness(base_thickness, thickness_scale[b[0] as usize])
             + t * effective_thickness(base_thickness, thickness_scale[b[1] as usize]);
-        let minimum_distance = 0.5 * (thickness_a + thickness_b);
+        let minimum_distance = pair_contact_distance(thickness_a, thickness_b);
         let delta = point_a - point_b;
         let distance = delta.length();
         if !distance.is_finite() {
@@ -831,7 +1010,12 @@ pub(crate) fn solve_contacts(
     previous: &mut [Vec3],
     inverse_mass: &[f32],
     thickness_scale: &[f32],
+    friction_static_scale: &[f32],
+    friction_dynamic_scale: &[f32],
     base_thickness: f32,
+    global_friction: f32,
+    substep_dt: f32,
+    friction_states: &mut HashMap<ContactKey, ContactFrictionState>,
 ) -> SelfCollisionResolution {
     let mut result = SelfCollisionResolution::default();
 
@@ -920,6 +1104,50 @@ pub(crate) fn solve_contacts(
             let correction = -normal * (inverse_mass[index].max(0.0) * barycentric[i] * scale);
             apply_correction(index, correction, positions, previous, inverse_mass);
         }
+
+        let triangle_motion = (0..3)
+            .map(|i| {
+                (positions[indices[i] as usize] - previous[indices[i] as usize]) * barycentric[i]
+            })
+            .fold(Vec3::ZERO, |sum, motion| sum + motion);
+        let relative_motion = positions[vertex as usize] - previous[vertex as usize] - triangle_motion;
+        let triangle_static = (0..3)
+            .map(|i| friction_static_scale[indices[i] as usize].max(0.0) * barycentric[i])
+            .sum::<f32>();
+        let triangle_dynamic = (0..3)
+            .map(|i| friction_dynamic_scale[indices[i] as usize].max(0.0) * barycentric[i])
+            .sum::<f32>();
+        let static_mu = combine_friction(
+            global_friction,
+            friction_static_scale[vertex as usize],
+            triangle_static,
+        );
+        let dynamic_mu = combine_friction(
+            global_friction,
+            friction_dynamic_scale[vertex as usize],
+            triangle_dynamic,
+        );
+        if let Some(friction) = update_contact_friction(
+            ContactKey::VertexTriangle(vertex, face),
+            friction_states,
+            normal,
+            relative_motion,
+            penetration,
+            static_mu,
+            dynamic_mu,
+            substep_dt,
+        ) {
+            result.friction.record(friction);
+            let ids = [vertex, indices[0], indices[1], indices[2]];
+            let gradients = [1.0, -barycentric[0], -barycentric[1], -barycentric[2]];
+            distribute_friction_correction(
+                friction.delta_lambda_m,
+                &ids,
+                &gradients,
+                inverse_mass,
+                positions,
+            );
+        }
     }
 
     for &(edge_a, edge_b) in &candidates.edge_edge {
@@ -943,7 +1171,7 @@ pub(crate) fn solve_contacts(
         let thickness_b =
             (1.0 - t) * effective_thickness(base_thickness, thickness_scale[b[0] as usize])
             + t * effective_thickness(base_thickness, thickness_scale[b[1] as usize]);
-        let minimum = 0.5 * (thickness_a + thickness_b);
+        let minimum = pair_contact_distance(thickness_a, thickness_b);
         let delta = point_a - point_b;
         let distance = delta.length();
         if !distance.is_finite() {
@@ -1001,6 +1229,39 @@ pub(crate) fn solve_contacts(
         for i in 0..4 {
             let correction = normal * (inverse_mass[ids[i]].max(0.0) * weights[i] * scale);
             apply_correction(ids[i], correction, positions, previous, inverse_mass);
+        }
+
+        let relative_motion = (0..4)
+            .map(|i| (positions[ids[i]] - previous[ids[i]]) * weights[i])
+            .fold(Vec3::ZERO, |sum, motion| sum + motion);
+        let static_a = (1.0 - s) * friction_static_scale[a[0] as usize].max(0.0)
+            + s * friction_static_scale[a[1] as usize].max(0.0);
+        let static_b = (1.0 - t) * friction_static_scale[b[0] as usize].max(0.0)
+            + t * friction_static_scale[b[1] as usize].max(0.0);
+        let dynamic_a = (1.0 - s) * friction_dynamic_scale[a[0] as usize].max(0.0)
+            + s * friction_dynamic_scale[a[1] as usize].max(0.0);
+        let dynamic_b = (1.0 - t) * friction_dynamic_scale[b[0] as usize].max(0.0)
+            + t * friction_dynamic_scale[b[1] as usize].max(0.0);
+        if let Some(friction) = update_contact_friction(
+            ContactKey::EdgeEdge(edge_a, edge_b),
+            friction_states,
+            normal,
+            relative_motion,
+            penetration,
+            combine_friction(global_friction, static_a, static_b),
+            combine_friction(global_friction, dynamic_a, dynamic_b),
+            substep_dt,
+        ) {
+            result.friction.record(friction);
+            let contact_ids = [a[0], a[1], b[0], b[1]];
+            let gradients = [1.0 - s, s, -(1.0 - t), -t];
+            distribute_friction_correction(
+                friction.delta_lambda_m,
+                &contact_ids,
+                &gradients,
+                inverse_mass,
+                positions,
+            );
         }
     }
 
@@ -1128,7 +1389,14 @@ mod tests {
         let before_velocity = positions[3] - previous[3];
         let result = solve_contacts(
             &candidates, &topology, &mut positions, &mut previous,
-            &[0.0, 0.0, 0.0, 1.0], &[1.0; 4], 0.1,
+            &[0.0, 0.0, 0.0, 1.0],
+            &[1.0; 4],
+            &[0.0; 4],
+            &[0.0; 4],
+            0.1,
+            1.0,
+            1.0 / 60.0,
+            &mut HashMap::new(),
         );
         assert_eq!(result.vertex_triangle_contacts, 1);
         assert!(positions[3].y >= 0.099);
@@ -1189,7 +1457,12 @@ mod tests {
             &mut previous,
             &[1.0; 6],
             &[1.0; 6],
+            &[0.0; 6],
+            &[0.0; 6],
             0.1,
+            1.0,
+            1.0 / 60.0,
+            &mut HashMap::new(),
         );
         assert_eq!(result.edge_edge_contacts, 1);
         let (_, _, point_a, point_b) = closest_segment_segment(
@@ -1237,7 +1510,12 @@ mod tests {
             &mut previous,
             &[0.0, 0.0, 0.0, 1.0],
             &[1.0; 4],
+            &[0.0; 4],
+            &[0.0; 4],
             0.02,
+            1.0,
+            1.0 / 60.0,
+            &mut HashMap::new(),
         );
         assert_eq!(result.vertex_triangle_swept_contacts, 1);
         assert!(positions[3].y < 0.0);
@@ -1266,6 +1544,90 @@ mod tests {
             topology.edges()[a as usize].vertices == [0, 1]
                 && topology.edges()[b as usize].vertices == [3, 4]
         }));
+    }
+
+    #[test]
+    fn friction_uses_static_and_dynamic_coulomb_limits_and_drops_lost_contacts() {
+        let key = ContactKey::VertexVertex(2, 7);
+        let mut states = HashMap::new();
+
+        begin_contact_iteration(&mut states);
+        let sticking = update_contact_friction(
+            key,
+            &mut states,
+            Vec3::Z,
+            Vec3::new(0.02, 0.0, 0.0),
+            0.1,
+            0.5,
+            0.25,
+            0.1,
+        ).unwrap();
+        assert!(sticking.sticking);
+        assert!((sticking.delta_lambda_m.x + 0.02).abs() < 1.0e-6);
+        finish_contact_iteration(&mut states);
+
+        begin_contact_iteration(&mut states);
+        let sliding = update_contact_friction(
+            key,
+            &mut states,
+            Vec3::Z,
+            Vec3::new(0.1, 0.0, 0.0),
+            0.0,
+            0.5,
+            0.25,
+            0.1,
+        ).unwrap();
+        assert!(!sliding.sticking);
+        assert!((sliding.delta_lambda_m.x + 0.005).abs() < 1.0e-6);
+        finish_contact_iteration(&mut states);
+        assert_eq!(states.len(), 1);
+
+        begin_contact_iteration(&mut states);
+        finish_contact_iteration(&mut states);
+        assert!(states.is_empty(), "contato perdido não deve manter atrito aderente");
+    }
+
+    #[test]
+    fn vertex_triangle_friction_responds_to_material_coefficients() {
+        let run = |tangent_motion: f32| {
+            let topology = CollisionTopology::new(4, &[[0, 1, 2]], std::iter::empty());
+            let mut positions = [
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(0.2, 0.2, 0.005),
+            ];
+            let mut previous = positions;
+            previous[3].x -= tangent_motion;
+            let candidates = SelfCollisionCandidates {
+                vertex_triangle: vec![(3, 0)],
+                ..SelfCollisionCandidates::default()
+            };
+            let result = solve_contacts(
+                &candidates,
+                &topology,
+                &mut positions,
+                &mut previous,
+                &[0.0, 0.0, 0.0, 1.0],
+                &[1.0; 4],
+                &[2.0; 4],
+                &[1.0; 4],
+                0.02,
+                1.0,
+                1.0 / 60.0,
+                &mut HashMap::new(),
+            );
+            (positions[3].x - 0.2, result.friction)
+        };
+
+        let (sticking_correction, sticking_metrics) = run(0.01);
+        assert!((sticking_correction + 0.01).abs() < 1.0e-5);
+        assert_eq!(sticking_metrics.static_contacts, 1);
+
+        let (sliding_correction, sliding_metrics) = run(0.1);
+        assert!((sliding_correction + 0.015).abs() < 2.0e-4);
+        assert_eq!(sliding_metrics.sliding_contacts, 1);
+        assert!(sliding_metrics.max_tangential_speed_m_s > 5.9);
     }
 
 }

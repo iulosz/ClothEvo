@@ -324,3 +324,16 @@ A auto-colisão examina até 96 candidatos por partícula, com um orçamento glo
 A preparação da malha recusa contornos com mais de 4.096 vértices, grades acima de 2 milhões de candidatos, custo estimado acima de 25 milhões de verificações ponto-contorno ou malhas acima de 500 mil vértices. Quando um limite é ultrapassado, aumente o espaçamento entre partículas ou simplifique o contorno.
 
 Transformações 3D importadas são limitadas a translações entre -100 m e 100 m, rotações até ±360.000 graus e escala entre (0, 100]. Valores fora desses limites são rejeitados antes de serem convertidos para o solver em f32.
+
+
+## Etapa 4 — contato, materiais e costuras no mesmo ciclo
+
+A simulação resolve as restrições de estiramento, cisalhamento, flexão e costura e, em cada iteração, atualiza os contatos entre camadas e com o avatar. A montagem usa o campo `layer` para posicionar os moldes; durante a simulação, essa camada não desativa colisões nem aplica uma força de afastamento permanente.
+
+A espessura efetiva por superfície é a espessura global multiplicada pelo fator do material. Para dois tecidos, o solver usa metade da soma das espessuras, com uma pequena margem numérica aplicada uma única vez. No avatar, o tecido usa sua espessura como afastamento da superfície do colisor. As rotinas vértice–vértice, vértice–triângulo e aresta–aresta compartilham a regra entre tecidos.
+
+O atrito normal e tangencial é resolvido separadamente. O atrito estático tenta remover o movimento tangencial relativo; ao exceder seu limite de Coulomb, a correção passa ao limite dinâmico. O coeficiente entre materiais é a média dos dois coeficientes por superfície multiplicada pelo controle global. O solver limita o coeficiente dinâmico ao estático. A resposta normal acumulada é uma medida posicional XPBD usada como suporte do limite de atrito, não uma força calibrada. O histórico do atrito é descartado quando o contato desaparece.
+
+Projetos antigos mantêm o campo existente como coeficiente estático e recebem `0,32` como padrão para o novo coeficiente dinâmico. O painel de propriedades permite ajustar ambos; os diagnósticos da simulação mostram contatos estáticos e deslizantes, velocidade tangencial relativa e a maior resposta normal posicional.
+
+As regressões do solver verificam os limites estático e dinâmico, o deslizamento vértice–triângulo, o atrito tecido–avatar e a remoção do histórico após a separação. As cenas de camadas, costuras e cruzamento rápido continuam exercitando o ciclo de restrições e contatos.

@@ -1071,6 +1071,15 @@ impl ClothEvoApp {
             sim.stats.self_collision_ee_swept_contacts,
         ));
         ui.label(format!(
+            "contato tangencial: {} contatos · {} estáticos · {} deslizando · v relativa máx. {:.2} m/s · resposta normal posicional máx. {:.2} mm",
+            sim.stats.contact_friction_contacts,
+            sim.stats.contact_friction_static_contacts,
+            sim.stats.contact_friction_sliding_contacts,
+            sim.stats.contact_max_tangential_speed_m_s,
+            sim.stats.contact_max_normal_correction_m * 1000.0,
+        ));
+        ui.weak("A resposta normal mostrada é um multiplicador posicional XPBD, não uma força experimental calibrada.");
+        ui.label(format!(
             "auto-colisão: {} candidatos descartados · {} primitivas sobrecarregadas · penetração {:.2} → {:.2} mm · broadphase {:.2} ms · resolução {:.2} ms · total {:.2} ms",
             sim.stats.self_collision_dropped_candidates,
             sim.stats.self_collision_overflowed_primitives,
@@ -2123,7 +2132,11 @@ impl ClothEvoApp {
                     ).text("Espessura (m)")).changed();
                     changed |= ui.add(egui::Slider::new(
                         &mut piece.fabric.friction_coefficient, 0.0..=1.5,
-                    ).text("Atrito deste tecido")).changed();
+                    ).text("Atrito estático")).changed();
+                    changed |= ui.add(egui::Slider::new(
+                        &mut piece.fabric.friction_dynamic_coefficient, 0.0..=1.5,
+                    ).text("Atrito dinâmico")
+                        .on_hover_text("O solver limita o atrito dinâmico para que ele não ultrapasse o estático.")).changed();
                     changed |= ui.add(egui::Slider::new(
                         &mut piece.fabric.particle_distance_meters, 0.01..=0.20,
                     ).text("Distância entre partículas (m)")).changed();
@@ -5213,6 +5226,7 @@ impl ClothEvoApp {
                 bend_nm: fabric.bend_nm as f32,
                 thickness_meters: fabric.thickness_meters as f32,
                 friction_coefficient: fabric.friction_coefficient as f32,
+                friction_dynamic_coefficient: fabric.friction_dynamic_coefficient as f32,
             };
             let handle = builder.add_panel_with_grain_and_material(
                 &panel_mesh,

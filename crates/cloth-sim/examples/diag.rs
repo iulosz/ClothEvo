@@ -58,6 +58,14 @@ fn main() {
                 sim.stats.body_swept_contacts,
                 worst
             );
+            println!(
+                "  atrito: {} contatos · {} estáticos/{} deslizando · v_t máx. {:.3} m/s · resposta normal posicional máx. {:.3} mm",
+                sim.stats.contact_friction_contacts,
+                sim.stats.contact_friction_static_contacts,
+                sim.stats.contact_friction_sliding_contacts,
+                sim.stats.contact_max_tangential_speed_m_s,
+                sim.stats.contact_max_normal_correction_m * 1000.0,
+            );
             if sim.params.self_collision {
                 println!(
                     "  auto: VV {} cand/{} contatos · VT {} cand/{} verif/{} contatos · CCD VT {}/{} · EE {} cand/{} verif/{} contatos · CCD EE {}/{} · descartados {} ({} primitivas) · penetração {:.3} → {:.3} mm · broadphase {:.3} ms · resolução {:.3} ms",

@@ -275,6 +275,7 @@ pub struct Pleat {
 
 /// Propriedades físicas específicas do molde, em unidades SI.
 fn default_fabric_friction() -> f64 { 0.4 }
+fn default_fabric_dynamic_friction() -> f64 { 0.32 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FabricProperties {
@@ -284,9 +285,12 @@ pub struct FabricProperties {
     pub shear_n_m: f64,
     pub bend_nm: f64,
     pub thickness_meters: f64,
-    /// Atrito do tecido em contato com avatar e outras partes do próprio tecido.
+    /// Coeficiente de atrito estático; o controle global do solver atua como multiplicador.
     #[serde(default = "default_fabric_friction")]
     pub friction_coefficient: f64,
+    /// Coeficiente dinâmico. Projetos legados recebem 0,32 e o solver limita-o ao estático.
+    #[serde(default = "default_fabric_dynamic_friction")]
+    pub friction_dynamic_coefficient: f64,
     pub particle_distance_meters: f64,
 }
 
@@ -300,6 +304,7 @@ impl Default for FabricProperties {
             bend_nm: 0.0001,
             thickness_meters: 0.001,
             friction_coefficient: default_fabric_friction(),
+            friction_dynamic_coefficient: default_fabric_dynamic_friction(),
             particle_distance_meters: 0.04,
         }
     }
@@ -746,8 +751,10 @@ impl PatternProject {
             }
             if !piece.fabric.friction_coefficient.is_finite()
                 || !(0.0..=5.0).contains(&piece.fabric.friction_coefficient)
+                || !piece.fabric.friction_dynamic_coefficient.is_finite()
+                || !(0.0..=5.0).contains(&piece.fabric.friction_dynamic_coefficient)
             {
-                return Err(format!("O atrito do tecido '{}' precisa estar entre 0 e 5.", piece.name));
+                return Err(format!("Os atritos estático e dinâmico do tecido '{}' precisam estar entre 0 e 5.", piece.name));
             }
             if piece.assembly.translation_meters.iter()
                 .any(|value| !value.is_finite() || value.abs() > 100.0)
@@ -1198,6 +1205,7 @@ mod tests {
         assert_eq!(project.pieces[0].assembly, AssemblyTransform::default());
         // Novos parâmetros físicos de versões posteriores assumem seus defaults em projetos legados.
         assert_eq!(project.pieces[0].fabric.friction_coefficient, 0.4);
+        assert_eq!(project.pieces[0].fabric.friction_dynamic_coefficient, 0.32);
     }
 
     #[test]
@@ -1234,6 +1242,9 @@ mod tests {
         project.pieces[0].fabric.friction_coefficient = 0.0;
         assert!(project.validate().is_ok());
         project.pieces[0].fabric.friction_coefficient = -0.01;
+        assert!(project.validate().is_err());
+        project.pieces[0].fabric.friction_coefficient = 0.4;
+        project.pieces[0].fabric.friction_dynamic_coefficient = -0.01;
         assert!(project.validate().is_err());
     }
 

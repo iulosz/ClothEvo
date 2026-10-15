@@ -42,7 +42,7 @@ pub struct SimParams {
     pub seam_pull_speed: f32,
     /// Espessura de colisão (m): distância mínima entre o tecido e o colisor.
     pub thickness: f32,
-    /// Coeficiente de atrito de Coulomb com os colisores.
+    /// Multiplicador global para os atritos estático e dinâmico dos contatos.
     pub friction: f32,
     /// Habilita auto-colisão aproximada partícula-partícula via hash espacial.
     /// Desligada por padrão para preservar desempenho em malhas densas.
@@ -142,8 +142,10 @@ pub struct PanelMaterial {
     pub shear_n_m: f32,
     pub bend_nm: f32,
     pub thickness_meters: f32,
-    /// Atrito por tecido; o controle global de atrito atua como multiplicador.
+    /// Atrito estático por tecido; o controle global atua como multiplicador.
     pub friction_coefficient: f32,
+    /// Atrito dinâmico por tecido. A simulação limita este valor ao atrito estático.
+    pub friction_dynamic_coefficient: f32,
 }
 
 impl Default for PanelMaterial {
@@ -156,6 +158,7 @@ impl Default for PanelMaterial {
             bend_nm: 5.0e-5,
             thickness_meters: 0.005,
             friction_coefficient: 0.4,
+            friction_dynamic_coefficient: 0.32,
         }
     }
 }
@@ -173,8 +176,12 @@ impl PanelMaterial {
         if values.iter().any(|value| !value.is_finite() || *value <= 0.0) {
             return Err("As propriedades físicas do painel precisam ser finitas e positivas.");
         }
-        if !self.friction_coefficient.is_finite() || !(0.0..=5.0).contains(&self.friction_coefficient) {
-            return Err("O atrito do painel precisa estar entre 0 e 5.");
+        if !self.friction_coefficient.is_finite()
+            || !(0.0..=5.0).contains(&self.friction_coefficient)
+            || !self.friction_dynamic_coefficient.is_finite()
+            || !(0.0..=5.0).contains(&self.friction_dynamic_coefficient)
+        {
+            return Err("Os atritos estático e dinâmico do painel precisam estar entre 0 e 5.");
         }
         Ok(self)
     }
@@ -201,5 +208,11 @@ mod panel_material_validation_tests {
         assert!(no_friction.validate().is_ok());
         let negative = PanelMaterial { friction_coefficient: -0.1, ..PanelMaterial::default() };
         assert!(negative.validate().is_err());
+        let negative_dynamic = PanelMaterial {
+            friction_dynamic_coefficient: -0.1,
+            ..PanelMaterial::default()
+        };
+        assert!(negative_dynamic.validate().is_err());
+        assert!((PanelMaterial::default().friction_dynamic_coefficient - 0.32).abs() < 1e-6);
     }
 }

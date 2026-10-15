@@ -9,8 +9,11 @@ use rayon::prelude::*;
 use crate::collider::Collider;
 use crate::params::{ConstraintKind, SimParams, KIND_COUNT};
 use crate::self_collision::{
-    build_candidates as build_self_collision_candidates, residual_penetration,
-    solve_contacts as solve_self_collision_contacts, CollisionTopology,
+    begin_contact_iteration, body_contact_distance, build_candidates as build_self_collision_candidates,
+    combine_friction, distribute_friction_correction, effective_thickness, finish_contact_iteration,
+    pair_contact_distance, residual_penetration, solve_contacts as solve_self_collision_contacts,
+    update_contact_friction, CollisionTopology, ContactFrictionMetrics, ContactFrictionState,
+    ContactKey,
 };
 
 /// Grupos de cor menores que isso são resolvidos em série (overhead do rayon não compensa).
@@ -59,6 +62,16 @@ pub struct Stats {
     pub body_swept_contacts: usize,
     /// Maior penetração relativa à espessura configurada, medida antes da correção, em metros.
     pub body_max_penetration_m: f32,
+    /// Contatos em que a resposta tangencial foi calculada no último passo.
+    pub contact_friction_contacts: usize,
+    /// Contatos que permaneceram no regime estático de Coulomb.
+    pub contact_friction_static_contacts: usize,
+    /// Contatos que excederam o limite estático e deslizaram.
+    pub contact_friction_sliding_contacts: usize,
+    /// Maior velocidade tangencial relativa observada nos contatos, em m/s.
+    pub contact_max_tangential_speed_m_s: f32,
+    /// Maior multiplicador normal posicional acumulado, não uma força calibrada.
+    pub contact_max_normal_correction_m: f32,
     /// Candidatos vértice-vértice encontrados pela hash grid no último passo.
     pub self_collision_vv_candidates: usize,
     /// Contatos vértice-vértice projetados no último passo.
@@ -100,6 +113,18 @@ pub struct Stats {
     pub steps: u64,
 }
 
+fn record_contact_friction(stats: &mut Stats, metrics: ContactFrictionMetrics) {
+    stats.contact_friction_contacts += metrics.contacts;
+    stats.contact_friction_static_contacts += metrics.static_contacts;
+    stats.contact_friction_sliding_contacts += metrics.sliding_contacts;
+    stats.contact_max_tangential_speed_m_s = stats
+        .contact_max_tangential_speed_m_s
+        .max(metrics.max_tangential_speed_m_s);
+    stats.contact_max_normal_correction_m = stats
+        .contact_max_normal_correction_m
+        .max(metrics.max_normal_correction_m);
+}
+
 /// Ponteiro compartilhável entre threads. Só é seguro porque a coloração garante que
 /// restrições do mesmo grupo nunca tocam a mesma partícula.
 struct SharedPtr<T>(*mut T);
@@ -135,8 +160,9 @@ pub struct Simulation {
     mass_scale: Vec<f32>,
     /// Multiplicador da espessura de colisão por partícula.
     thickness_scale: Vec<f32>,
-    /// Multiplicador de atrito atribuído ao tecido de cada partícula.
+    /// Multiplicadores de atrito estático e dinâmico por partícula.
     friction_scale: Vec<f32>,
+    friction_dynamic_scale: Vec<f32>,
     /// Duração do último substep, usada para estimar carga das costuras pela lambda XPBD.
     last_substep_dt: f32,
     /// Relações estáticas da superfície usadas para filtrar contatos locais.
@@ -168,6 +194,7 @@ impl Simulation {
         mass_scale: Vec<f32>,
         thickness_scale: Vec<f32>,
         friction_scale: Vec<f32>,
+        friction_dynamic_scale: Vec<f32>,
         distance: Vec<DistanceConstraint>,
         dist_colors: Vec<Range<usize>>,
         bending: Vec<BendConstraint>,
@@ -197,6 +224,7 @@ impl Simulation {
             mass_scale,
             thickness_scale,
             friction_scale,
+            friction_dynamic_scale,
             last_substep_dt: 0.0,
             collision_topology,
             last_self_collision_contacts: 0,
@@ -361,6 +389,11 @@ impl Simulation {
         self.stats.body_sweep_tests = 0;
         self.stats.body_swept_contacts = 0;
         self.stats.body_max_penetration_m = 0.0;
+        self.stats.contact_friction_contacts = 0;
+        self.stats.contact_friction_static_contacts = 0;
+        self.stats.contact_friction_sliding_contacts = 0;
+        self.stats.contact_max_tangential_speed_m_s = 0.0;
+        self.stats.contact_max_normal_correction_m = 0.0;
         self.stats.self_collision_vv_candidates = 0;
         self.stats.self_collision_vv_contacts = 0;
         self.stats.self_collision_vt_candidates = 0;
@@ -380,8 +413,10 @@ impl Simulation {
         self.last_self_collision_contacts = 0;
         self.last_self_collision_penetration = 0.0;
         self.last_stability_corrections = 0;
+        let mut friction_states = HashMap::new();
 
         for _ in 0..substeps {
+            friction_states.clear();
             // 1. Predição de posições.
             for i in 0..self.pos.len() {
                 self.prev[i] = self.pos[i];
@@ -395,6 +430,7 @@ impl Simulation {
             self.dist_lambda.fill(0.0);
             self.bend_lambda.fill(0.0);
             for _ in 0..iterations {
+                begin_contact_iteration(&mut friction_states);
                 let constraint_start = Instant::now();
                 for r in &self.dist_colors {
                     solve_distance(
@@ -425,7 +461,8 @@ impl Simulation {
                 // podem aproximar superfícies que ainda não eram candidatas.
                 if self.params.self_collision {
                     let vv_start = Instant::now();
-                    let (vv_candidates, vv_dropped) = self.collide_self();
+                    let (vv_candidates, vv_dropped) =
+                        self.collide_self(&mut friction_states, h);
                     self_collision_solve_elapsed_ms += vv_start.elapsed().as_secs_f32() * 1000.0;
                     self.stats.self_collision_vv_candidates += vv_candidates;
                     self.stats.self_collision_dropped_candidates += vv_dropped;
@@ -452,7 +489,12 @@ impl Simulation {
                         &mut self.prev,
                         &self.inv_mass,
                         &self.thickness_scale,
+                        &self.friction_scale,
+                        &self.friction_dynamic_scale,
                         self.params.thickness,
+                        self.params.friction,
+                        h,
+                        &mut friction_states,
                     );
                     self_collision_solve_elapsed_ms += solve_start.elapsed().as_secs_f32() * 1000.0;
                     self.stats.self_collision_vt_verified += resolved.vertex_triangle_verified;
@@ -463,6 +505,7 @@ impl Simulation {
                     self.stats.self_collision_ee_contacts += resolved.edge_edge_contacts;
                     self.stats.self_collision_ee_sweep_tests += resolved.edge_edge_sweep_tests;
                     self.stats.self_collision_ee_swept_contacts += resolved.edge_edge_swept_contacts;
+                    record_contact_friction(&mut self.stats, resolved.friction);
                     self.stats.self_collision_penetration_before_m = self.stats
                         .self_collision_penetration_before_m
                         .max(resolved.max_penetration_before_m);
@@ -473,8 +516,9 @@ impl Simulation {
                 }
 
                 let body_collision_start = Instant::now();
-                self.collide();
+                self.collide(&mut friction_states, h);
                 body_collision_elapsed_ms += body_collision_start.elapsed().as_secs_f32() * 1000.0;
+                finish_contact_iteration(&mut friction_states);
             }
 
             if self.params.self_collision {
@@ -557,37 +601,46 @@ impl Simulation {
 
     /// Auto-colisão aproximada vértice-vértice acelerada por uma grade espacial uniforme.
     /// Pares ligados por arestas/triângulos ou por costura são excluídos para evitar jitter.
-    fn collide_self(&mut self) -> (usize, usize) {
+    fn collide_self(
+        &mut self,
+        friction_states: &mut HashMap<ContactKey, ContactFrictionState>,
+        substep_dt: f32,
+    ) -> (usize, usize) {
         let count = self.pos.len();
-        if count < 2 { return (0, 0); }
-        let effective_thickness = |i: usize, params: &SimParams, scales: &[f32]| {
-            params.thickness.max(0.0) * scales[i].max(1.0e-4)
-        };
+        if count < 2 {
+            return (0, 0);
+        }
         let max_thickness = (0..count)
-            .map(|i| effective_thickness(i, &self.params, &self.thickness_scale))
+            .map(|i| effective_thickness(self.params.thickness, self.thickness_scale[i]))
             .fold(0.0_f32, f32::max);
-        if max_thickness <= 1.0e-6 { return (0, 0); }
+        if max_thickness <= 1.0e-6 {
+            return (0, 0);
+        }
         let cell_size = (2.0 * max_thickness).max(0.005);
-
         let batch = bounded_self_collision_candidate_pairs(
             &self.pos,
             cell_size,
             self.collision_topology.vertex_pair_exclusions(),
         );
 
-        let global_mu = self.params.friction.max(0.0);
-        for (ia, ib) in batch.pairs {
+        for (ia, ib) in batch.pairs.iter().copied() {
             let (i, j) = (ia as usize, ib as usize);
             let (wi, wj) = (self.inv_mass[i], self.inv_mass[j]);
             let weight = wi + wj;
-            if weight <= 0.0 { continue; }
-            let ti = effective_thickness(i, &self.params, &self.thickness_scale);
-            let tj = effective_thickness(j, &self.params, &self.thickness_scale);
-            let min_distance = 0.5 * (ti + tj);
-            if min_distance <= 1.0e-6 { continue; }
+            if weight <= 0.0 {
+                continue;
+            }
+            let ti = effective_thickness(self.params.thickness, self.thickness_scale[i]);
+            let tj = effective_thickness(self.params.thickness, self.thickness_scale[j]);
+            let min_distance = pair_contact_distance(ti, tj);
+            if min_distance <= 1.0e-6 {
+                continue;
+            }
             let delta = self.pos[i] - self.pos[j];
             let distance = delta.length();
-            if !distance.is_finite() || distance >= min_distance { continue; }
+            if !distance.is_finite() || distance >= min_distance {
+                continue;
+            }
             let normal = if distance > 1.0e-7 {
                 delta / distance
             } else {
@@ -605,29 +658,59 @@ impl Simulation {
             self.stats.self_collision_penetration_before_m = self.stats
                 .self_collision_penetration_before_m
                 .max(penetration);
-            let correction = normal * penetration;
-            let ci = correction * (wi / weight);
-            let cj = -correction * (wj / weight);
-            self.pos[i] += ci;
-            self.pos[j] += cj;
-            self.prev[i] += ci;
-            self.prev[j] += cj;
 
-            let relative_motion = (self.pos[i] - self.prev[i]) - (self.pos[j] - self.prev[j]);
-            let tangent = relative_motion - normal * relative_motion.dot(normal);
-            let tangent_len = tangent.length();
-            let mu = global_mu * 0.5 * (self.friction_scale[i].max(0.0) + self.friction_scale[j].max(0.0));
-            let max_friction = mu * penetration;
-            if tangent_len > 1.0e-8 && max_friction > 0.0 {
-                let friction = tangent * (max_friction.min(tangent_len) / tangent_len);
-                self.pos[i] -= friction * (wi / weight);
-                self.pos[j] += friction * (wj / weight);
+            let correction = normal * penetration;
+            self.pos[i] += correction * (wi / weight);
+            self.pos[j] -= correction * (wj / weight);
+            // A separação normal não cria velocidade artificial.
+            self.prev[i] += correction * (wi / weight);
+            self.prev[j] -= correction * (wj / weight);
+
+            let relative_motion =
+                (self.pos[i] - self.prev[i]) - (self.pos[j] - self.prev[j]);
+            let friction = update_contact_friction(
+                ContactKey::VertexVertex(ia.min(ib), ia.max(ib)),
+                friction_states,
+                normal,
+                relative_motion,
+                penetration,
+                combine_friction(
+                    self.params.friction,
+                    self.friction_scale[i],
+                    self.friction_scale[j],
+                ),
+                combine_friction(
+                    self.params.friction,
+                    self.friction_dynamic_scale[i],
+                    self.friction_dynamic_scale[j],
+                ),
+                substep_dt,
+            );
+            if let Some(friction) = friction {
+                record_contact_friction(&mut self.stats, ContactFrictionMetrics {
+                    contacts: 1,
+                    static_contacts: if friction.sticking { 1 } else { 0 },
+                    sliding_contacts: if !friction.sticking { 1 } else { 0 },
+                    max_tangential_speed_m_s: friction.tangential_speed_m_s,
+                    max_normal_correction_m: friction.normal_lambda_m,
+                });
+                distribute_friction_correction(
+                    friction.delta_lambda_m,
+                    &[ia, ib],
+                    &[1.0, -1.0],
+                    &self.inv_mass,
+                    &mut self.pos,
+                );
             }
         }
         (batch.candidate_count, batch.dropped_candidates)
     }
 
-    fn collide(&mut self) {
+    fn collide(
+        &mut self,
+        friction_states: &mut HashMap<ContactKey, ContactFrictionState>,
+        substep_dt: f32,
+    ) {
         if self.colliders.is_empty() {
             return;
         }
@@ -635,55 +718,69 @@ impl Simulation {
             if self.inv_mass[i] <= 0.0 {
                 continue;
             }
-            let mu = self.params.friction.max(0.0) * self.friction_scale[i].max(0.0);
-            let thickness = self.params.thickness.max(0.0) * self.thickness_scale[i].max(1.0e-4);
+            let static_mu =
+                self.params.friction.max(0.0) * self.friction_scale[i].max(0.0);
+            let dynamic_mu = self.params.friction.max(0.0)
+                * self.friction_dynamic_scale[i].max(0.0)
+                .min(self.friction_scale[i].max(0.0));
+            let clearance = body_contact_distance(effective_thickness(
+                self.params.thickness,
+                self.thickness_scale[i],
+            ));
             let mut p = self.pos[i];
             let mut q = self.prev[i];
 
             // Captura cruzamentos mesmo quando o início e o fim estão fora do corpo.
-            if body_sweep_is_needed(q, p, thickness) {
+            if body_sweep_is_needed(q, p, clearance) {
                 self.stats.body_sweep_tests += 1;
-                if let Some((swept_position, normal, penetration)) = swept_body_contact(q, p, thickness, &self.colliders) {
+                if let Some((swept_position, normal, penetration)) =
+                    swept_body_contact(q, p, clearance, &self.colliders)
+                {
                     p = swept_position;
                     self.stats.body_swept_contacts += 1;
-                    self.stats.body_max_penetration_m = self.stats.body_max_penetration_m.max(penetration);
+                    self.stats.body_max_penetration_m =
+                        self.stats.body_max_penetration_m.max(penetration);
                     let normal_delta = (p - q).dot(normal);
                     q += normal * normal_delta;
                 }
             }
 
-            // Colisores se sobrepõem nas juntas (ombro/braço, pelve/coxa). Sair de um
-            // pode levar a partícula para dentro de outro que já foi processado; repetir
-            // a passada estabiliza essas junções sem um custo grande por partícula.
+            // Costuras e restrições internas são resolvidas antes desta passada; o
+            // contato do corpo corrige a geometria em cada iteração do mesmo substep.
             for _pass in 0..3 {
                 let mut touched = false;
-                for collider in &self.colliders {
-                    let d = collider.sdf(p) - thickness;
+                for (collider_index, collider) in self.colliders.iter().enumerate() {
+                    let d = collider.sdf(p) - clearance;
                     if d < 0.0 {
                         touched = true;
                         self.stats.body_contact_projections += 1;
                         self.stats.body_max_penetration_m =
                             self.stats.body_max_penetration_m.max(-d);
-                        let n = collider.normal(p);
-                        p -= n * d; // empurra para fora
+                        let normal = collider.normal(p);
+                        p -= normal * d;
 
-                        // A projeção geométrica não deve converter a correção numa velocidade
-                        // artificial explosiva. Ajusta a posição anterior na direção normal.
-                        let normal_delta = (p - q).dot(n);
-                        q += n * normal_delta;
-
-                        // Atrito de Coulomb em posição.
-                        let dx = p - q;
-                        let tangent = dx - n * dx.dot(n);
-                        let tangent_length = tangent.length();
-                        if tangent_length > 1e-9 {
-                            let max_friction = mu * (-d);
-                            let friction_scale = if tangent_length <= max_friction {
-                                1.0
-                            } else {
-                                max_friction / tangent_length
-                            };
-                            p -= tangent * friction_scale;
+                        // A correção normal preserva a velocidade de entrada. A resposta
+                        // tangencial tem um acumulador separado e só vive enquanto há contato.
+                        let normal_delta = (p - q).dot(normal);
+                        q += normal * normal_delta;
+                        if let Some(friction) = update_contact_friction(
+                            ContactKey::BodyCollider(i as u32, collider_index as u32),
+                            friction_states,
+                            normal,
+                            p - q,
+                            -d,
+                            static_mu,
+                            dynamic_mu,
+                            substep_dt,
+                        ) {
+                            record_contact_friction(&mut self.stats, ContactFrictionMetrics {
+                                contacts: 1,
+                                static_contacts: if friction.sticking { 1 } else { 0 },
+                                sliding_contacts: if friction.sticking { 0 } else { 1 },
+                                max_tangential_speed_m_s: friction.tangential_speed_m_s,
+                                max_normal_correction_m: friction.normal_lambda_m,
+                            });
+                            p += friction.delta_lambda_m;
                         }
                     }
                 }
@@ -1251,6 +1348,7 @@ mod tests {
             bend_nm: 2.0e-4,
             thickness_meters: 0.002,
             friction_coefficient: 0.8,
+            friction_dynamic_coefficient: 0.3,
         };
         let mut builder = ClothBuilder::new();
         let a = builder.add_panel_with_grain_and_material(
@@ -1269,6 +1367,7 @@ mod tests {
         assert!((sim.thickness_scale[0] - 1.0).abs() < 1.0e-6);
         assert!((sim.thickness_scale[4] - 0.4).abs() < 1.0e-5);
         assert!((sim.friction_scale[4] - 2.0).abs() < 1.0e-5);
+        assert!((sim.friction_dynamic_scale[4] - 0.75).abs() < 1.0e-5);
 
         let edge_a = sim.distance.iter()
             .find(|constraint| {
@@ -1619,6 +1718,7 @@ mod stability_tests {
             vec![1.0; 6],
             vec![1.0; 6],
             vec![1.0; 6],
+            vec![0.8; 6],
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -1694,6 +1794,38 @@ mod stability_tests {
         assert!(sim.stability_corrections() > 0);
         assert_eq!(sim.vel[0], Vec3::ZERO);
     }
+    #[test]
+    fn body_friction_uses_material_dynamic_limit_and_drops_after_separation() {
+        let run = |dynamic_scale: f32| {
+            let mut sim = minimal_simulation(false, 0.0);
+            sim.params.gravity = Vec3::ZERO;
+            sim.params.damping = 0.0;
+            sim.params.substeps = 1;
+            sim.params.iterations = 1;
+            sim.params.thickness = 0.02;
+            sim.params.friction = 1.0;
+            sim.colliders.push(Collider::ground());
+            sim.friction_scale.fill(0.0);
+            sim.friction_dynamic_scale.fill(0.0);
+            sim.friction_scale[0] = 1.0;
+            sim.friction_dynamic_scale[0] = dynamic_scale;
+            sim.vel[0] = Vec3::X * 6.0;
+            sim.step(1.0 / 60.0);
+            let tangential_speed = sim.vel[0].x;
+            (sim, tangential_speed)
+        };
+
+        let (_, no_dynamic_friction_speed) = run(0.0);
+        let (mut sim, dynamic_friction_speed) = run(0.5);
+        assert!(dynamic_friction_speed < no_dynamic_friction_speed - 0.5);
+        assert!(sim.stats.contact_friction_sliding_contacts > 0);
+        assert!(sim.stats.contact_max_tangential_speed_m_s >= 5.9);
+
+        sim.pos[0].y = 0.2;
+        sim.vel[0] = Vec3::X;
+        sim.step(1.0 / 60.0);
+        assert!((sim.vel[0].x - 1.0).abs() < 1.0e-5, "atrito persistiu sem contato");
+    }
 }
 
 #[cfg(test)]
@@ -1709,6 +1841,7 @@ mod placement_transform_tests {
             vec![1.0; 3],
             vec![1.0; 3],
             vec![1.0; 3],
+            vec![0.8; 3],
             Vec::new(),
             Vec::new(),
             Vec::new(),

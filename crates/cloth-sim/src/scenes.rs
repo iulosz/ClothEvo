@@ -194,14 +194,25 @@ mod self_collision_scene_tests {
 
     #[test]
     fn layered_panels_exercise_surface_contacts_without_non_finite_positions() {
-        let mut params = SimParams::default();
-        params.substeps = 1;
-        params.iterations = 4;
-        let mut simulation = build_scene(SceneKind::SelfCollisionLayers, 12, params);
-        simulation.step(1.0 / 60.0);
-        assert!(simulation.is_finite());
-        assert!(simulation.stats.self_collision_vt_candidates > 0);
-        assert!(simulation.stats.self_collision_ee_candidates > 0);
+        for resolution in [8, 12, 16] {
+            for iterations in [1, 4] {
+                let mut params = SimParams::default();
+                params.substeps = 1;
+                params.iterations = iterations;
+                let mut simulation =
+                    build_scene(SceneKind::SelfCollisionLayers, resolution, params);
+                simulation.step(1.0 / 60.0);
+                assert!(simulation.is_finite(), "res={resolution}, iters={iterations}");
+                assert!(
+                    simulation.stats.self_collision_vt_candidates > 0,
+                    "res={resolution}, iters={iterations}"
+                );
+                assert!(
+                    simulation.stats.self_collision_ee_candidates > 0,
+                    "res={resolution}, iters={iterations}"
+                );
+            }
+        }
     }
     #[test]
     fn sewn_panels_remain_finite_when_surface_self_collision_is_enabled() {
