@@ -248,13 +248,17 @@ SDF, tecidos e movimentos antes de ser considerada suficiente para produção.
 
 Na viewport de simulação, ajuste **substeps por quadro** e **iterações por substep**: aumentar substeps costuma estabilizar movimentos rápidos; aumentar iterações melhora a convergência das restrições, com custo adicional. O limite de velocidade por partícula atua como salvaguarda contra deslocamentos extremos. Se forem encontrados valores não finitos, a simulação pausa e retorna ao estado inicial da cena para impedir que geometria inválida continue sendo propagada.
 
-**Auto-colisão** usa uma hash grid espacial para testar pares de vértices não adjacentes; arestas de malha, vértices do mesmo triângulo e pares ligados por costura são excluídos para reduzir jitter. Está desligada por padrão devido ao custo extra em malhas densas. É uma aproximação vértice-vértice: ainda não resolve todas as interseções triângulo-triângulo nem as colisões entre aresta e face.
+**Auto-colisão** continua desligada por padrão devido ao custo em malhas densas. Além dos pares
+vértice-vértice, o solver discreto agora busca contatos vértice-triângulo e aresta-aresta dentro de uma
+grade espacial de AABBs, atualizada a cada iteração XPBD. Os contatos respeitam as espessuras por
+material, massas inversas e partículas fixadas; as projeções são seriais para evitar escritas
+concorrentes. A topologia estática é montada uma vez, com arestas únicas, faces adjacentes, incidência
+por vértice e exclusões locais em torno de costuras.
 
-A montagem da simulação agora prepara uma topologia estática de colisão: arestas únicas com suas faces
-adjacentes, incidência de faces por vértice, vizinhança da malha e ligações locais por costura. As
-exclusões de costura ficam limitadas à vizinhança imediata dos pares costurados; uma conexão não exclui
-uma manga ou outro painel distante inteiro. Por enquanto, essas estruturas preparam as próximas etapas:
-a resolução ainda é vértice-vértice.
+Os diagnósticos mostram candidatos, verificações, contatos, candidatos descartados, sobrecarga de
+primitivas, penetração antes/depois e tempos separados de broadphase e resolução. A cena 6 do exemplo
+`diag` sobrepõe dois painéis para exercitar contatos entre superfícies. A versão atual usa contatos
+discretos; ainda não cobre travessias rápidas de auto-colisão entre dois painéis móveis.
 
 O atrito da seção **Física e montagem 3D por molde** é configurável por tecido e afeta o contato com colisores e outras partes do pano. Os controles globais de atrito e espessura continuam atuando como multiplicadores. As métricas mostram velocidade máxima, deslocamento do último substep, partículas acima do limiar de velocidade e aberturas críticas nas costuras.
 

@@ -1,6 +1,6 @@
 //! Diagnóstico de estabilidade: imprime deformação máxima e energia cinética ao longo do tempo.
 //!
-//! `cargo run --release -p cloth-sim --example diag -- [cena 1-5] [res] [substeps] [iterações] [segundos]`
+//! `cargo run --release -p cloth-sim --example diag -- [cena 1-6] [res] [substeps] [iterações] [segundos]`
 
 use cloth_sim::{build_scene, SceneKind, SimParams};
 
@@ -58,6 +58,24 @@ fn main() {
                 sim.stats.body_swept_contacts,
                 worst
             );
+            if sim.params.self_collision {
+                println!(
+                    "  auto: VV {} candidatos/{} contatos · VT {} candidatos/{} verificados/{} contatos · EE {} candidatos/{} verificados/{} contatos · descartados {} · penetração {:.3} → {:.3} mm · broadphase {:.3} ms · resolução {:.3} ms",
+                    sim.stats.self_collision_vv_candidates,
+                    sim.stats.self_collision_vv_contacts,
+                    sim.stats.self_collision_vt_candidates,
+                    sim.stats.self_collision_vt_verified,
+                    sim.stats.self_collision_vt_contacts,
+                    sim.stats.self_collision_ee_candidates,
+                    sim.stats.self_collision_ee_verified,
+                    sim.stats.self_collision_ee_contacts,
+                    sim.stats.self_collision_dropped_candidates,
+                    sim.stats.self_collision_penetration_before_m * 1000.0,
+                    sim.stats.self_collision_penetration_after_m * 1000.0,
+                    sim.stats.self_collision_broadphase_ms,
+                    sim.stats.self_collision_solve_ms,
+                );
+            }
         }
         sim.step(dt);
         if !sim.is_finite() {

@@ -8,7 +8,10 @@ use rayon::prelude::*;
 
 use crate::collider::Collider;
 use crate::params::{ConstraintKind, SimParams, KIND_COUNT};
-use crate::self_collision::CollisionTopology;
+use crate::self_collision::{
+    build_candidates as build_self_collision_candidates, residual_penetration,
+    solve_contacts as solve_self_collision_contacts, CollisionTopology,
+};
 
 /// Grupos de cor menores que isso são resolvidos em série (overhead do rayon não compensa).
 const PAR_MIN: usize = 256;
@@ -56,6 +59,36 @@ pub struct Stats {
     pub body_swept_contacts: usize,
     /// Maior penetração relativa à espessura configurada, medida antes da correção, em metros.
     pub body_max_penetration_m: f32,
+    /// Candidatos vértice-vértice encontrados pela hash grid no último passo.
+    pub self_collision_vv_candidates: usize,
+    /// Contatos vértice-vértice projetados no último passo.
+    pub self_collision_vv_contacts: usize,
+    /// Candidatos vértice-triângulo gerados antes do filtro geométrico.
+    pub self_collision_vt_candidates: usize,
+    /// Candidatos vértice-triângulo que passaram pela fase geométrica.
+    pub self_collision_vt_verified: usize,
+    /// Contatos vértice-triângulo projetados nas iterações.
+    pub self_collision_vt_contacts: usize,
+    /// Candidatos aresta-aresta gerados antes do filtro geométrico.
+    pub self_collision_ee_candidates: usize,
+    /// Candidatos aresta-aresta que passaram pela fase geométrica.
+    pub self_collision_ee_verified: usize,
+    /// Contatos aresta-aresta projetados nas iterações.
+    pub self_collision_ee_contacts: usize,
+    /// Pares potencialmente válidos omitidos pelos limites do broadphase/geradores.
+    pub self_collision_dropped_candidates: usize,
+    /// Primitivas ignoradas porque sua AABB excedeu o orçamento de células.
+    pub self_collision_overflowed_primitives: usize,
+    /// Maior penetração interna antes das correções, em metros.
+    pub self_collision_penetration_before_m: f32,
+    /// Maior penetração de superfície que restou após a última iteração, em metros.
+    pub self_collision_penetration_after_m: f32,
+    /// Média móvel do custo de atualizar as grades e gerar candidatos, em ms.
+    pub self_collision_broadphase_ms: f32,
+    /// Média móvel do custo de projetar os contatos, em ms.
+    pub self_collision_solve_ms: f32,
+    /// Média móvel total da auto-colisão, em ms.
+    pub self_collision_ms: f32,
     pub steps: u64,
 }
 
@@ -314,10 +347,24 @@ impl Simulation {
         let parallel = self.params.parallel;
         let mut constraint_elapsed_ms = 0.0_f32;
         let mut body_collision_elapsed_ms = 0.0_f32;
+        let mut self_collision_broadphase_elapsed_ms = 0.0_f32;
+        let mut self_collision_solve_elapsed_ms = 0.0_f32;
         self.stats.body_contact_projections = 0;
         self.stats.body_sweep_tests = 0;
         self.stats.body_swept_contacts = 0;
         self.stats.body_max_penetration_m = 0.0;
+        self.stats.self_collision_vv_candidates = 0;
+        self.stats.self_collision_vv_contacts = 0;
+        self.stats.self_collision_vt_candidates = 0;
+        self.stats.self_collision_vt_verified = 0;
+        self.stats.self_collision_vt_contacts = 0;
+        self.stats.self_collision_ee_candidates = 0;
+        self.stats.self_collision_ee_verified = 0;
+        self.stats.self_collision_ee_contacts = 0;
+        self.stats.self_collision_dropped_candidates = 0;
+        self.stats.self_collision_overflowed_primitives = 0;
+        self.stats.self_collision_penetration_before_m = 0.0;
+        self.stats.self_collision_penetration_after_m = 0.0;
         self.last_self_collision_contacts = 0;
         self.last_self_collision_penetration = 0.0;
         self.last_stability_corrections = 0;
@@ -361,16 +408,78 @@ impl Simulation {
                     );
                 }
                 constraint_elapsed_ms += constraint_start.elapsed().as_secs_f32() * 1000.0;
+
+                // A lista é reconstruída em cada iteração porque as restrições anteriores
+                // podem aproximar superfícies que ainda não eram candidatas.
+                if self.params.self_collision {
+                    let vv_start = Instant::now();
+                    let (vv_candidates, vv_dropped) = self.collide_self();
+                    self_collision_solve_elapsed_ms += vv_start.elapsed().as_secs_f32() * 1000.0;
+                    self.stats.self_collision_vv_candidates += vv_candidates;
+                    self.stats.self_collision_dropped_candidates += vv_dropped;
+
+                    let broadphase_start = Instant::now();
+                    let candidates = build_self_collision_candidates(
+                        &self.pos,
+                        &self.thickness_scale,
+                        self.params.thickness,
+                        &self.collision_topology,
+                    );
+                    self_collision_broadphase_elapsed_ms += broadphase_start.elapsed().as_secs_f32() * 1000.0;
+                    self.stats.self_collision_vt_candidates += candidates.vertex_triangle_candidates;
+                    self.stats.self_collision_ee_candidates += candidates.edge_edge_candidates;
+                    self.stats.self_collision_dropped_candidates += candidates.dropped_candidates;
+                    self.stats.self_collision_overflowed_primitives += candidates.overflowed_primitives;
+
+                    let solve_start = Instant::now();
+                    let resolved = solve_self_collision_contacts(
+                        &candidates,
+                        &self.collision_topology,
+                        &mut self.pos,
+                        &mut self.prev,
+                        &self.inv_mass,
+                        &self.thickness_scale,
+                        self.params.thickness,
+                    );
+                    self_collision_solve_elapsed_ms += solve_start.elapsed().as_secs_f32() * 1000.0;
+                    self.stats.self_collision_vt_verified += resolved.vertex_triangle_verified;
+                    self.stats.self_collision_vt_contacts += resolved.vertex_triangle_contacts;
+                    self.stats.self_collision_ee_verified += resolved.edge_edge_verified;
+                    self.stats.self_collision_ee_contacts += resolved.edge_edge_contacts;
+                    self.stats.self_collision_penetration_before_m = self.stats
+                        .self_collision_penetration_before_m
+                        .max(resolved.max_penetration_before_m);
+                    self.last_self_collision_contacts +=
+                        resolved.vertex_triangle_contacts + resolved.edge_edge_contacts;
+                    self.last_self_collision_penetration = self.last_self_collision_penetration
+                        .max(resolved.max_penetration_before_m);
+                }
+
                 let body_collision_start = Instant::now();
                 self.collide();
                 body_collision_elapsed_ms += body_collision_start.elapsed().as_secs_f32() * 1000.0;
             }
-            // Auto-colisão pode alterar posições; reimpõe o contato corporal depois dela.
+
             if self.params.self_collision {
-                self.collide_self();
-                let body_collision_start = Instant::now();
-                self.collide();
-                body_collision_elapsed_ms += body_collision_start.elapsed().as_secs_f32() * 1000.0;
+                let broadphase_start = Instant::now();
+                let residual_candidates = build_self_collision_candidates(
+                    &self.pos,
+                    &self.thickness_scale,
+                    self.params.thickness,
+                    &self.collision_topology,
+                );
+                self_collision_broadphase_elapsed_ms += broadphase_start.elapsed().as_secs_f32() * 1000.0;
+                self.stats.self_collision_vt_candidates += residual_candidates.vertex_triangle_candidates;
+                self.stats.self_collision_ee_candidates += residual_candidates.edge_edge_candidates;
+                self.stats.self_collision_dropped_candidates += residual_candidates.dropped_candidates;
+                self.stats.self_collision_overflowed_primitives += residual_candidates.overflowed_primitives;
+                self.stats.self_collision_penetration_after_m = residual_penetration(
+                    &residual_candidates,
+                    &self.collision_topology,
+                    &self.pos,
+                    &self.thickness_scale,
+                    self.params.thickness,
+                );
             }
 
             // 4. Reconstrói velocidades, recuperando estados não finitos e limitando picos.
@@ -417,33 +526,39 @@ impl Simulation {
         self.stats.step_ms = blend(self.stats.step_ms, ms);
         self.stats.constraint_ms = blend(self.stats.constraint_ms, constraint_elapsed_ms);
         self.stats.body_collision_ms = blend(self.stats.body_collision_ms, body_collision_elapsed_ms);
+        self.stats.self_collision_broadphase_ms =
+            blend(self.stats.self_collision_broadphase_ms, self_collision_broadphase_elapsed_ms);
+        self.stats.self_collision_solve_ms =
+            blend(self.stats.self_collision_solve_ms, self_collision_solve_elapsed_ms);
+        self.stats.self_collision_ms = blend(
+            self.stats.self_collision_ms,
+            self_collision_broadphase_elapsed_ms + self_collision_solve_elapsed_ms,
+        );
         self.stats.steps += 1;
     }
 
     /// Auto-colisão aproximada vértice-vértice acelerada por uma grade espacial uniforme.
     /// Pares ligados por arestas/triângulos ou por costura são excluídos para evitar jitter.
-    fn collide_self(&mut self) {
+    fn collide_self(&mut self) -> (usize, usize) {
         let count = self.pos.len();
-        if count < 2 { return; }
+        if count < 2 { return (0, 0); }
         let effective_thickness = |i: usize, params: &SimParams, scales: &[f32]| {
             params.thickness.max(0.0) * scales[i].max(1.0e-4)
         };
         let max_thickness = (0..count)
             .map(|i| effective_thickness(i, &self.params, &self.thickness_scale))
             .fold(0.0_f32, f32::max);
-        if max_thickness <= 1.0e-6 { return; }
+        if max_thickness <= 1.0e-6 { return (0, 0); }
         let cell_size = (2.0 * max_thickness).max(0.005);
 
-        // O helper constrói uma única grade espacial e limita o número de pares
-        // antes de resolvê-los, evitando alocação redundante em malhas densas.
-        let pairs = bounded_self_collision_candidate_pairs(
+        let batch = bounded_self_collision_candidate_pairs(
             &self.pos,
             cell_size,
             self.collision_topology.vertex_pair_exclusions(),
         );
 
         let global_mu = self.params.friction.max(0.0);
-        for (ia, ib) in pairs {
+        for (ia, ib) in batch.pairs {
             let (i, j) = (ia as usize, ib as usize);
             let (wi, wj) = (self.inv_mass[i], self.inv_mass[j]);
             let weight = wi + wj;
@@ -458,7 +573,6 @@ impl Simulation {
             let normal = if distance > 1.0e-7 {
                 delta / distance
             } else {
-                // Deterministic separation direction for exactly coincident vertices.
                 match (i.wrapping_mul(31) ^ j) % 3 {
                     0 => Vec3::X,
                     1 => Vec3::Y,
@@ -467,18 +581,20 @@ impl Simulation {
             };
             let penetration = min_distance - distance;
             self.last_self_collision_contacts += 1;
+            self.stats.self_collision_vv_contacts += 1;
             self.last_self_collision_penetration =
                 self.last_self_collision_penetration.max(penetration);
+            self.stats.self_collision_penetration_before_m = self.stats
+                .self_collision_penetration_before_m
+                .max(penetration);
             let correction = normal * penetration;
             let ci = correction * (wi / weight);
             let cj = -correction * (wj / weight);
             self.pos[i] += ci;
             self.pos[j] += cj;
-            // Do not convert the positional separation into a huge artificial normal velocity.
             self.prev[i] += ci;
             self.prev[j] += cj;
 
-            // Approximate Coulomb friction: damp relative tangential displacement at contact.
             let relative_motion = (self.pos[i] - self.prev[i]) - (self.pos[j] - self.prev[j]);
             let tangent = relative_motion - normal * relative_motion.dot(normal);
             let tangent_len = tangent.length();
@@ -490,6 +606,7 @@ impl Simulation {
                 self.pos[j] += friction * (wj / weight);
             }
         }
+        (batch.candidate_count, batch.dropped_candidates)
     }
 
     fn collide(&mut self) {
@@ -737,12 +854,20 @@ impl Simulation {
 }
 
 
+#[derive(Default)]
+struct BoundedSelfCollisionCandidatePairs {
+    pairs: Vec<(u32, u32)>,
+    candidate_count: usize,
+    dropped_candidates: usize,
+}
+
 fn bounded_self_collision_candidate_pairs(
     positions: &[Vec3],
     cell_size: f32,
     exclusions: &HashSet<(u32, u32)>,
-) -> Vec<(u32, u32)> {
-    if positions.len() < 2 { return Vec::new(); }
+) -> BoundedSelfCollisionCandidatePairs {
+    let mut output = BoundedSelfCollisionCandidatePairs::default();
+    if positions.len() < 2 { return output; }
     let cell_size = cell_size.max(1.0e-5);
     let cell_of = |p: Vec3| -> (i32, i32, i32) {
         ((p.x / cell_size).floor() as i32,
@@ -757,35 +882,52 @@ fn bounded_self_collision_candidate_pairs(
     }
     let per_particle_budget = (MAX_SELF_COLLISION_CANDIDATE_PAIRS_TOTAL / positions.len())
         .min(MAX_SELF_COLLISION_CANDIDATES_PER_PARTICLE);
-    if per_particle_budget == 0 {
-        return Vec::new();
-    }
-    // Não reserva capacidade proporcional ao número de vértices: malhas sem vizinhos
-    // próximos não devem pagar por pares que nunca serão gerados.
-    let mut pairs = Vec::new();
+    let mut total_inspected = 0usize;
+
     for (i, position) in positions.iter().enumerate() {
         if !position.is_finite() { continue; }
         let (cx, cy, cz) = cell_of(*position);
-        let mut candidates = 0usize;
+        let mut total_candidates = 0usize;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    if let Some(neighbours) = grid.get(&(cx + dx, cy + dy, cz + dz)) {
+                        let first_after_i = neighbours.partition_point(|&j| (j as usize) <= i);
+                        total_candidates = total_candidates.saturating_add(neighbours.len() - first_after_i);
+                    }
+                }
+            }
+        }
+        output.candidate_count = output.candidate_count.saturating_add(total_candidates);
+        let remaining_global = MAX_SELF_COLLISION_CANDIDATE_PAIRS_TOTAL - total_inspected;
+        let inspect_limit = total_candidates.min(per_particle_budget).min(remaining_global);
+        output.dropped_candidates = output
+            .dropped_candidates
+            .saturating_add(total_candidates - inspect_limit);
+        if inspect_limit == 0 { continue; }
+
+        let mut inspected = 0usize;
         'neighbor_cells: for dx in -1..=1 {
             for dy in -1..=1 {
                 for dz in -1..=1 {
                     let Some(neighbours) = grid.get(&(cx + dx, cy + dy, cz + dz)) else { continue; };
                     let first_after_i = neighbours.partition_point(|&j| (j as usize) <= i);
                     for &j in &neighbours[first_after_i..] {
-                        if candidates >= per_particle_budget {
+                        if inspected >= inspect_limit {
                             break 'neighbor_cells;
                         }
-                        candidates += 1;
+                        inspected += 1;
                         let pair = (i as u32, j);
-                        if exclusions.contains(&pair) { continue; }
-                        pairs.push(pair);
+                        if !exclusions.contains(&pair) {
+                            output.pairs.push(pair);
+                        }
                     }
                 }
             }
         }
+        total_inspected += inspected;
     }
-    pairs
+    output
 }
 
 #[cfg(test)]
@@ -795,31 +937,33 @@ mod self_collision_candidate_tests {
     #[test]
     fn candidate_pairs_are_bounded_when_all_particles_collapse_into_one_cell() {
         let positions = vec![Vec3::ZERO; 800];
-        let pairs = bounded_self_collision_candidate_pairs(&positions, 0.01, &HashSet::new());
-        assert!(!pairs.is_empty());
-        assert!(pairs.len() <= positions.len() * MAX_SELF_COLLISION_CANDIDATES_PER_PARTICLE);
-        assert!(pairs.iter().all(|&(a, b)| a < b));
-        let unique = pairs.iter().copied().collect::<HashSet<_>>();
-        assert_eq!(unique.len(), pairs.len());
+        let batch = bounded_self_collision_candidate_pairs(&positions, 0.01, &HashSet::new());
+        assert!(!batch.pairs.is_empty());
+        assert!(batch.pairs.len() <= positions.len() * MAX_SELF_COLLISION_CANDIDATES_PER_PARTICLE);
+        assert!(batch.pairs.iter().all(|&(a, b)| a < b));
+        assert!(batch.dropped_candidates > 0);
+        let unique = batch.pairs.iter().copied().collect::<HashSet<_>>();
+        assert_eq!(unique.len(), batch.pairs.len());
     }
 
     #[test]
     fn candidate_pairs_obey_global_memory_budget_on_large_collapsed_mesh() {
         let positions = vec![Vec3::ZERO; 25_000];
-        let pairs = bounded_self_collision_candidate_pairs(&positions, 0.01, &HashSet::new());
-        assert!(!pairs.is_empty());
-        assert!(pairs.len() <= MAX_SELF_COLLISION_CANDIDATE_PAIRS_TOTAL);
-        assert!(pairs.len() < positions.len() * MAX_SELF_COLLISION_CANDIDATES_PER_PARTICLE);
+        let batch = bounded_self_collision_candidate_pairs(&positions, 0.01, &HashSet::new());
+        assert!(!batch.pairs.is_empty());
+        assert!(batch.pairs.len() <= MAX_SELF_COLLISION_CANDIDATE_PAIRS_TOTAL);
+        assert!(batch.pairs.len() < positions.len() * MAX_SELF_COLLISION_CANDIDATES_PER_PARTICLE);
+        assert!(batch.dropped_candidates > 0);
     }
 
     #[test]
     fn candidate_pairs_skip_excluded_and_non_finite_particles() {
         let positions = vec![Vec3::ZERO, Vec3::ZERO, Vec3::splat(f32::NAN), Vec3::ZERO];
         let exclusions = HashSet::from([(0_u32, 1_u32)]);
-        let pairs = bounded_self_collision_candidate_pairs(&positions, 0.01, &exclusions);
-        assert!(pairs.iter().all(|&(a, b)| a != 2 && b != 2));
-        assert!(!pairs.contains(&(0, 1)));
-        assert!(pairs.contains(&(0, 3)));
+        let batch = bounded_self_collision_candidate_pairs(&positions, 0.01, &exclusions);
+        assert!(batch.pairs.iter().all(|&(a, b)| a != 2 && b != 2));
+        assert!(!batch.pairs.contains(&(0, 1)));
+        assert!(batch.pairs.contains(&(0, 3)));
     }
 }
 

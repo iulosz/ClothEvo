@@ -22,19 +22,22 @@ pub enum SceneKind {
     SdfAvatarDrop,
     /// Travessia rápida do torso em um único substep para validar a detecção contínua aproximada.
     FastSdfCrossing,
+    /// Dois painéis sobrepostos para medir contatos internos vértice-face e aresta-aresta.
+    SelfCollisionLayers,
 }
 
 impl SceneKind {
     /// Cenas disponibilizadas no seletor interativo do app.
     pub const ALL: [SceneKind; 3] = [Self::HangingCloth, Self::SphereDrop, Self::SewnTube];
 
-    /// Cenários fixos do diagnóstico/benchmark de colisão, incluindo SDF e movimento rápido.
-    pub const DIAGNOSTIC: [SceneKind; 5] = [
+    /// Cenários fixos do diagnóstico/benchmark de colisão, SDF, movimento rápido e auto-colisão.
+    pub const DIAGNOSTIC: [SceneKind; 6] = [
         Self::HangingCloth,
         Self::SphereDrop,
         Self::SewnTube,
         Self::SdfAvatarDrop,
         Self::FastSdfCrossing,
+        Self::SelfCollisionLayers,
     ];
 
     pub fn name(self) -> &'static str {
@@ -44,6 +47,7 @@ impl SceneKind {
             Self::SewnTube => "3. Tubo costurado",
             Self::SdfAvatarDrop => "4. Tecido sobre torso (SDF)",
             Self::FastSdfCrossing => "5. Travessia rápida do torso (SDF)",
+            Self::SelfCollisionLayers => "6. Painéis sobrepostos (auto-colisão)",
         }
     }
 }
@@ -91,6 +95,14 @@ pub fn build_scene(kind: SceneKind, res: u32, params: SimParams) -> Simulation {
             b.add_collider(Collider::TriangleMeshSdf { field: avatar_torso_sdf() });
             b.perturb(0.002);
         }
+        SceneKind::SelfCollisionLayers => {
+            let cells = ((0.6 * res as f32).round() as u32).max(4);
+            let panel = GridPanel::new(0.6, 0.6, cells, cells);
+            let placement = Placement::at(Vec3::new(-0.3, 0.8, 0.0));
+            // Superfícies desconectadas na topologia, coincidentes no espaço.
+            b.add_panel(&panel.mesh, placement);
+            b.add_panel(&panel.mesh, placement);
+        }
         SceneKind::SewnTube => {
             let nx = ((0.6 * res as f32).round() as u32).max(4);
             let ny = ((0.9 * res as f32).round() as u32).max(4);
@@ -123,6 +135,10 @@ pub fn build_scene(kind: SceneKind, res: u32, params: SimParams) -> Simulation {
         simulation.params.max_particle_speed = 100.0;
         simulation.vel.fill(Vec3::NEG_Y * 100.0);
     }
+    if kind == SceneKind::SelfCollisionLayers {
+        simulation.params.self_collision = true;
+        simulation.params.gravity = Vec3::ZERO;
+    }
     simulation
 }
 
@@ -143,4 +159,22 @@ fn avatar_torso_sdf() -> Arc<SignedDistanceField> {
     ];
     Arc::new(SignedDistanceField::from_triangle_mesh(&positions, &indices, 0.015)
         .expect("o torso interno deve ser uma malha fechada válida"))
+}
+
+
+#[cfg(test)]
+mod self_collision_scene_tests {
+    use super::*;
+
+    #[test]
+    fn layered_panels_exercise_surface_contacts_without_non_finite_positions() {
+        let mut params = SimParams::default();
+        params.substeps = 1;
+        params.iterations = 4;
+        let mut simulation = build_scene(SceneKind::SelfCollisionLayers, 12, params);
+        simulation.step(1.0 / 60.0);
+        assert!(simulation.is_finite());
+        assert!(simulation.stats.self_collision_vt_candidates > 0);
+        assert!(simulation.stats.self_collision_ee_candidates > 0);
+    }
 }

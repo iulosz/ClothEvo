@@ -1014,7 +1014,7 @@ impl ClothEvoApp {
             }
         });
         ui.checkbox(&mut p.self_collision, "Auto-colisão (mais custo)");
-        ui.weak("A auto-colisão usa hash espacial vértice-vértice; vértices vizinhos e costuras são excluídos.");
+        ui.weak("A auto-colisão combina contatos vértice-vértice, vértice-triângulo e aresta-aresta; o processamento é serial e mostra quando limites descartam candidatos.");
         ui.checkbox(&mut p.parallel, "paralelo (rayon)");
             });
 
@@ -1054,6 +1054,27 @@ impl ClothEvoApp {
             sim.stats.body_swept_contacts,
             sim.stats.body_max_penetration_m * 1000.0,
             sim.stats.body_collision_ms,
+        ));
+        ui.label(format!(
+            "auto-colisão: VV {} candidatos/{} contatos · VT {} candidatos/{} verificados/{} contatos · EE {} candidatos/{} verificados/{} contatos",
+            sim.stats.self_collision_vv_candidates,
+            sim.stats.self_collision_vv_contacts,
+            sim.stats.self_collision_vt_candidates,
+            sim.stats.self_collision_vt_verified,
+            sim.stats.self_collision_vt_contacts,
+            sim.stats.self_collision_ee_candidates,
+            sim.stats.self_collision_ee_verified,
+            sim.stats.self_collision_ee_contacts,
+        ));
+        ui.label(format!(
+            "auto-colisão: {} candidatos descartados · {} primitivas sobrecarregadas · penetração {:.2} → {:.2} mm · broadphase {:.2} ms · resolução {:.2} ms · total {:.2} ms",
+            sim.stats.self_collision_dropped_candidates,
+            sim.stats.self_collision_overflowed_primitives,
+            sim.stats.self_collision_penetration_before_m * 1000.0,
+            sim.stats.self_collision_penetration_after_m * 1000.0,
+            sim.stats.self_collision_broadphase_ms,
+            sim.stats.self_collision_solve_ms,
+            sim.stats.self_collision_ms,
         ));
         let speed_limit = self.sim.params.max_particle_speed.clamp(1.0, 100.0);
         let unstable = sim.unstable_particle_count(speed_limit);
