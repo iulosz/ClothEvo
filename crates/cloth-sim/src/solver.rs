@@ -1619,49 +1619,6 @@ mod tests {
     }
 
     #[test]
-    fn imported_mesh_sdf_projects_tissue_and_reports_collision_metrics() {
-        let positions = vec![
-            [-0.5, 0.0, -0.5], [0.5, 0.0, -0.5], [0.5, 1.0, -0.5], [-0.5, 1.0, -0.5],
-            [-0.5, 0.0, 0.5], [0.5, 0.0, 0.5], [0.5, 1.0, 0.5], [-0.5, 1.0, 0.5],
-        ];
-        let indices = vec![
-            0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7,
-            0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2,
-            0, 4, 7, 0, 7, 3, 1, 2, 6, 1, 6, 5,
-        ];
-        let field = crate::sdf::SignedDistanceField::from_triangle_mesh(
-            &positions, &indices, 0.025,
-        ).unwrap();
-        assert!(field.has_reliable_inside_outside());
-
-        let mut sim = minimal_simulation(false, 0.0);
-        sim.colliders = vec![Collider::TriangleMeshSdf {
-            field: std::sync::Arc::new(field.clone()),
-        }];
-        for (index, position) in sim.pos.iter_mut().enumerate() {
-            *position = Vec3::splat(3.0 + index as f32);
-        }
-        sim.pos[0] = Vec3::new(0.49, 0.5, 0.0);
-        sim.prev_pos.clone_from(&sim.pos);
-        sim.params.gravity = Vec3::ZERO;
-        sim.params.thickness = 0.02;
-        sim.params.substeps = 1;
-        sim.params.iterations = 2;
-
-        sim.step(1.0 / 60.0);
-
-        assert!(sim.is_finite());
-        assert!(sim.stats.body_contact_projections > 0);
-        assert!(
-            field.sample(sim.pos[0]) >= sim.params.thickness - 0.002,
-            "o tecido deveria terminar fora da superfície: pos={:?}, distância={}",
-            sim.pos[0],
-            field.sample(sim.pos[0]),
-        );
-        assert!(sim.stats.body_collision_ms.is_finite());
-    }
-
-    #[test]
     fn swept_contact_stops_an_outside_to_outside_sphere_crossing() {
         let sphere = Collider::Sphere { center: Vec3::ZERO, radius: 1.0 };
         let (position, normal, penetration) = swept_body_contact(
@@ -1769,6 +1726,49 @@ mod stability_tests {
             Vec::new(),
             params,
         )
+    }
+
+    #[test]
+    fn imported_mesh_sdf_projects_tissue_and_reports_collision_metrics() {
+        let positions = vec![
+            [-0.5, 0.0, -0.5], [0.5, 0.0, -0.5], [0.5, 1.0, -0.5], [-0.5, 1.0, -0.5],
+            [-0.5, 0.0, 0.5], [0.5, 0.0, 0.5], [0.5, 1.0, 0.5], [-0.5, 1.0, 0.5],
+        ];
+        let indices = vec![
+            0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7,
+            0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2,
+            0, 4, 7, 0, 7, 3, 1, 2, 6, 1, 6, 5,
+        ];
+        let field = crate::sdf::SignedDistanceField::from_triangle_mesh(
+            &positions, &indices, 0.025,
+        ).unwrap();
+        assert!(field.has_reliable_inside_outside());
+
+        let mut sim = minimal_simulation(false, 0.0);
+        sim.colliders = vec![Collider::TriangleMeshSdf {
+            field: std::sync::Arc::new(field.clone()),
+        }];
+        for (index, position) in sim.pos.iter_mut().enumerate() {
+            *position = Vec3::splat(3.0 + index as f32);
+        }
+        sim.pos[0] = Vec3::new(0.49, 0.5, 0.0);
+        sim.prev_pos.clone_from(&sim.pos);
+        sim.params.gravity = Vec3::ZERO;
+        sim.params.thickness = 0.02;
+        sim.params.substeps = 1;
+        sim.params.iterations = 2;
+
+        sim.step(1.0 / 60.0);
+
+        assert!(sim.is_finite());
+        assert!(sim.stats.body_contact_projections > 0);
+        assert!(
+            field.sample(sim.pos[0]) >= sim.params.thickness - 0.002,
+            "o tecido deveria terminar fora da superfície: pos={:?}, distância={}",
+            sim.pos[0],
+            field.sample(sim.pos[0]),
+        );
+        assert!(sim.stats.body_collision_ms.is_finite());
     }
 
     #[test]
