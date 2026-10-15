@@ -1219,9 +1219,9 @@ mod tests {
     fn swept_vertex_triangle_contact_catches_a_fast_crossing() {
         let topology = CollisionTopology::new(4, &[[0, 1, 2]], std::iter::empty());
         let mut positions = [
-            Vec3::new(-1.0, 0.0, -1.0),
-            Vec3::new(1.0, 0.0, -1.0),
-            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(-0.1, 0.0, -0.1),
+            Vec3::new(0.1, 0.0, -0.1),
+            Vec3::new(0.0, 0.0, 0.1),
             Vec3::new(0.0, 0.1, 0.0),
         ];
         let mut previous = positions;
