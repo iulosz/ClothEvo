@@ -1056,15 +1056,19 @@ impl ClothEvoApp {
             sim.stats.body_collision_ms,
         ));
         ui.label(format!(
-            "auto-colisão: VV {} candidatos/{} contatos · VT {} candidatos/{} verificados/{} contatos · EE {} candidatos/{} verificados/{} contatos",
+            "auto-colisão: VV {} cand/{} contatos · VT {} cand/{} verif/{} contatos · CCD VT {}/{} · EE {} cand/{} verif/{} contatos · CCD EE {}/{}",
             sim.stats.self_collision_vv_candidates,
             sim.stats.self_collision_vv_contacts,
             sim.stats.self_collision_vt_candidates,
             sim.stats.self_collision_vt_verified,
             sim.stats.self_collision_vt_contacts,
+            sim.stats.self_collision_vt_sweep_tests,
+            sim.stats.self_collision_vt_swept_contacts,
             sim.stats.self_collision_ee_candidates,
             sim.stats.self_collision_ee_verified,
             sim.stats.self_collision_ee_contacts,
+            sim.stats.self_collision_ee_sweep_tests,
+            sim.stats.self_collision_ee_swept_contacts,
         ));
         ui.label(format!(
             "auto-colisão: {} candidatos descartados · {} primitivas sobrecarregadas · penetração {:.2} → {:.2} mm · broadphase {:.2} ms · resolução {:.2} ms · total {:.2} ms",

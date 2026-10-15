@@ -257,8 +257,18 @@ por vértice e exclusões locais em torno de costuras.
 
 Os diagnósticos mostram candidatos, verificações, contatos, candidatos descartados, sobrecarga de
 primitivas, penetração antes/depois e tempos separados de broadphase e resolução. A cena 6 do exemplo
-`diag` sobrepõe dois painéis para exercitar contatos entre superfícies. A versão atual usa contatos
-discretos; ainda não cobre travessias rápidas de auto-colisão entre dois painéis móveis.
+`diag` sobrepõe dois painéis para exercitar contatos entre superfícies. A broadphase inclui as caixas de movimento entre posições anteriores e previstas. Para candidatos
+VT/EE sem contato na posição final, o solver usa avanço conservador aproximado ao longo das trajetórias
+relativas e projeta o contato encontrado; não é CCD exato de triângulos deformáveis. As cenas 6 e 7 do
+exemplo `diag` exercitam, respectivamente, painéis sobrepostos e uma travessia em um substep:
+
+```bash
+cargo run --release -p cloth-sim --example diag -- 6 12 1 4 0.1
+cargo run --release -p cloth-sim --example diag -- 7 12 1 1 0.1
+```
+
+A cena rápida mede cruzamentos interceptados; os resultados ainda precisam ser comparados em diferentes
+resoluções, espessuras e velocidades antes de considerar a detecção suficiente para produção.
 
 O atrito da seção **Física e montagem 3D por molde** é configurável por tecido e afeta o contato com colisores e outras partes do pano. Os controles globais de atrito e espessura continuam atuando como multiplicadores. As métricas mostram velocidade máxima, deslocamento do último substep, partículas acima do limiar de velocidade e aberturas críticas nas costuras.
 

@@ -213,8 +213,12 @@ pub(crate) struct SelfCollisionCandidates {
 pub(crate) struct SelfCollisionResolution {
     pub(crate) vertex_triangle_verified: usize,
     pub(crate) vertex_triangle_contacts: usize,
+    pub(crate) vertex_triangle_sweep_tests: usize,
+    pub(crate) vertex_triangle_swept_contacts: usize,
     pub(crate) edge_edge_verified: usize,
     pub(crate) edge_edge_contacts: usize,
+    pub(crate) edge_edge_sweep_tests: usize,
+    pub(crate) edge_edge_swept_contacts: usize,
     pub(crate) max_penetration_before_m: f32,
 }
 
@@ -279,11 +283,16 @@ fn cells_for_aabb(bounds: Aabb, cell_size: f32) -> Option<Vec<Cell>> {
     Some(cells)
 }
 
-fn indexed_bounds(indices: &[u32], positions: &[Vec3]) -> Option<Aabb> {
-    let points = indices
-        .iter()
-        .map(|&index| positions.get(index as usize).copied())
-        .collect::<Option<Vec<_>>>()?;
+fn indexed_swept_bounds(
+    indices: &[u32],
+    positions: &[Vec3],
+    previous: &[Vec3],
+) -> Option<Aabb> {
+    let mut points = Vec::with_capacity(indices.len() * 2);
+    for &index in indices {
+        points.push(*positions.get(index as usize)?);
+        points.push(*previous.get(index as usize)?);
+    }
     Aabb::from_points(&points)
 }
 
@@ -294,12 +303,13 @@ fn effective_thickness(base: f32, scale: f32) -> f32 {
 /// Insere AABBs expandidas de faces e arestas; consulta células com chaves e ordem estáveis.
 pub(crate) fn build_candidates(
     positions: &[Vec3],
+    previous: &[Vec3],
     thickness_scale: &[f32],
     base_thickness: f32,
     topology: &CollisionTopology,
 ) -> SelfCollisionCandidates {
     let mut output = SelfCollisionCandidates::default();
-    if positions.len() < 2 || positions.len() != thickness_scale.len() {
+    if positions.len() < 2 || positions.len() != previous.len() || positions.len() != thickness_scale.len() {
         return output;
     }
     let max_thickness = thickness_scale
@@ -317,7 +327,7 @@ pub(crate) fn build_candidates(
     let mut edge_grid_entries = 0usize;
 
     for (face, triangle) in topology.triangles().iter().enumerate() {
-        let Some(bounds) = indexed_bounds(triangle, positions).map(|aabb| aabb.expanded(expansion)) else {
+        let Some(bounds) = indexed_swept_bounds(triangle, positions, previous).map(|aabb| aabb.expanded(expansion)) else {
             continue;
         };
         let Some(cells) = cells_for_aabb(bounds, cell_size) else {
@@ -337,7 +347,7 @@ pub(crate) fn build_candidates(
     }
 
     for (edge_index, edge) in topology.edges().iter().enumerate() {
-        let Some(bounds) = indexed_bounds(&edge.vertices, positions).map(|aabb| aabb.expanded(expansion)) else {
+        let Some(bounds) = indexed_swept_bounds(&edge.vertices, positions, previous).map(|aabb| aabb.expanded(expansion)) else {
             continue;
         };
         let Some(cells) = cells_for_aabb(bounds, cell_size) else {
@@ -357,27 +367,50 @@ pub(crate) fn build_candidates(
     }
 
     for (vertex, &position) in positions.iter().enumerate() {
-        if !position.is_finite() {
+        if !position.is_finite() || !previous[vertex].is_finite() {
             continue;
         }
-        let Some(face_ids) = triangle_grid.get(&cell_of(position, cell_size)) else {
+        let Some(path_bounds) = Aabb::from_points(&[previous[vertex], position]) else {
             continue;
         };
-        let mut accepted_for_vertex = 0usize;
-        for (candidate_index, face) in face_ids.iter().copied().enumerate() {
-            if candidate_index >= MAX_BROADPHASE_SCAN_PER_PRIMITIVE {
-                output.dropped_candidates += face_ids.len() - candidate_index;
-                break;
-            }
-            if topology.is_local_vertex_triangle(vertex as u32, face) {
+        let Some(cells) = cells_for_aabb(path_bounds, cell_size) else {
+            output.overflowed_primitives += 1;
+            output.dropped_candidates += 1;
+            continue;
+        };
+        let mut face_ids = BTreeSet::new();
+        let mut seen_faces = BTreeSet::new();
+        let mut scan_overflow = false;
+        'vertex_cells: for cell in cells {
+            let Some(cell_faces) = triangle_grid.get(&cell) else {
                 continue;
+            };
+            for &face in cell_faces {
+                if !seen_faces.insert(face) {
+                    continue;
+                }
+                if seen_faces.len() > MAX_BROADPHASE_SCAN_PER_PRIMITIVE {
+                    output.dropped_candidates += 1;
+                    output.overflowed_primitives += 1;
+                    scan_overflow = true;
+                    break;
+                }
+                if !topology.is_local_vertex_triangle(vertex as u32, face) {
+                    face_ids.insert(face);
+                }
             }
-            output.vertex_triangle_candidates += 1;
+            if scan_overflow {
+                break 'vertex_cells;
+            }
+        }
+        output.vertex_triangle_candidates += face_ids.len();
+        let mut accepted_for_vertex = 0usize;
+        for face in face_ids {
             if accepted_for_vertex >= MAX_VT_CANDIDATES_PER_VERTEX
                 || output.vertex_triangle.len() >= MAX_SELF_COLLISION_CANDIDATES_TOTAL
             {
-                output.dropped_candidates += face_ids.len() - candidate_index;
-                break;
+                output.dropped_candidates += 1;
+                continue;
             }
             output.vertex_triangle.push((vertex as u32, face));
             accepted_for_vertex += 1;
@@ -385,7 +418,7 @@ pub(crate) fn build_candidates(
     }
 
     for (edge_index, edge) in topology.edges().iter().enumerate() {
-        let Some(bounds) = indexed_bounds(&edge.vertices, positions).map(|aabb| aabb.expanded(expansion)) else {
+        let Some(bounds) = indexed_swept_bounds(&edge.vertices, positions, previous).map(|aabb| aabb.expanded(expansion)) else {
             continue;
         };
         let Some(cells) = cells_for_aabb(bounds, cell_size) else {
@@ -394,12 +427,13 @@ pub(crate) fn build_candidates(
         let mut neighbors = BTreeSet::new();
         let mut scan_overflow = false;
         let mut scanned = 0usize;
+        let mut accepted_for_edge = 0usize;
         'edge_cells: for cell in cells {
             let Some(edge_ids) = edge_grid.get(&cell) else {
                 continue;
             };
             for &other in edge_ids {
-                if other as usize <= edge_index {
+                if other as usize <= edge_index || !neighbors.insert(other) {
                     continue;
                 }
                 scanned += 1;
@@ -411,19 +445,15 @@ pub(crate) fn build_candidates(
                 if topology.edges_are_local(edge_index, other as usize) {
                     continue;
                 }
-                if !neighbors.insert(other) {
-                    continue;
-                }
                 output.edge_edge_candidates += 1;
-                if neighbors.len() > MAX_EE_CANDIDATES_PER_EDGE
+                if accepted_for_edge >= MAX_EE_CANDIDATES_PER_EDGE
                     || output.edge_edge.len() >= MAX_SELF_COLLISION_CANDIDATES_TOTAL
                 {
-                    neighbors.remove(&other);
                     output.dropped_candidates += 1;
-                    scan_overflow = true;
-                    break;
+                    continue;
                 }
                 output.edge_edge.push((edge_index as u32, other));
+                accepted_for_edge += 1;
             }
             if scan_overflow {
                 break 'edge_cells;
@@ -622,6 +652,177 @@ fn edge_edge_gap(
     Some(0.5 * (thickness_a + thickness_b) - (point_a - point_b).length())
 }
 
+#[derive(Clone, Copy)]
+struct VertexTriangleSweepHit {
+    normal: Vec3,
+    barycentric: [f32; 3],
+    minimum_distance: f32,
+}
+
+#[derive(Clone, Copy)]
+struct EdgeEdgeSweepHit {
+    normal: Vec3,
+    s: f32,
+    t: f32,
+    minimum_distance: f32,
+}
+
+fn lerp_position(previous: Vec3, current: Vec3, time: f32) -> Vec3 {
+    previous + (current - previous) * time
+}
+
+fn minimum_vertex_triangle_thickness(
+    vertex: u32,
+    indices: [u32; 3],
+    barycentric: [f32; 3],
+    thickness_scale: &[f32],
+    base_thickness: f32,
+) -> f32 {
+    let triangle_thickness = (0..3)
+        .map(|i| barycentric[i] * effective_thickness(base_thickness, thickness_scale[indices[i] as usize]))
+        .sum::<f32>();
+    0.5 * (
+        effective_thickness(base_thickness, thickness_scale[vertex as usize]) + triangle_thickness
+    )
+}
+
+fn find_swept_vertex_triangle_contact(
+    vertex: u32,
+    face: u32,
+    positions: &[Vec3],
+    previous: &[Vec3],
+    thickness_scale: &[f32],
+    base_thickness: f32,
+    topology: &CollisionTopology,
+) -> Option<VertexTriangleSweepHit> {
+    let (indices, _) = triangle_for(topology, face, positions)?;
+    let point_speed = (positions[vertex as usize] - previous[vertex as usize]).length();
+    let triangle_speed = indices.iter()
+        .map(|&index| (positions[index as usize] - previous[index as usize]).length())
+        .fold(0.0_f32, f32::max);
+    let speed_bound = point_speed + triangle_speed;
+    let max_scale = thickness_scale[vertex as usize]
+        .max(thickness_scale[indices[0] as usize])
+        .max(thickness_scale[indices[1] as usize])
+        .max(thickness_scale[indices[2] as usize]);
+    let no_crossing_distance = 2.0 * effective_thickness(base_thickness, max_scale);
+    if !speed_bound.is_finite() || speed_bound <= no_crossing_distance.max(1.0e-8) {
+        return None;
+    }
+
+    let mut time = 0.0_f32;
+    for _ in 0..48 {
+        let point = lerp_position(previous[vertex as usize], positions[vertex as usize], time);
+        let triangle_points = [
+            lerp_position(previous[indices[0] as usize], positions[indices[0] as usize], time),
+            lerp_position(previous[indices[1] as usize], positions[indices[1] as usize], time),
+            lerp_position(previous[indices[2] as usize], positions[indices[2] as usize], time),
+        ];
+        let closest = closest_point_triangle(
+            point, triangle_points[0], triangle_points[1], triangle_points[2],
+        )?;
+        let minimum_distance = minimum_vertex_triangle_thickness(
+            vertex, indices, closest.barycentric, thickness_scale, base_thickness,
+        );
+        let delta = point - closest.point;
+        let distance = delta.length();
+        if !distance.is_finite() {
+            return None;
+        }
+        if distance <= minimum_distance + 1.0e-5 {
+            let relative_previous = previous[vertex as usize]
+                - previous[indices[0] as usize] * closest.barycentric[0]
+                - previous[indices[1] as usize] * closest.barycentric[1]
+                - previous[indices[2] as usize] * closest.barycentric[2];
+            let normal = if distance > 1.0e-7 {
+                Some(delta / distance)
+            } else {
+                (triangle_points[1] - triangle_points[0])
+                    .cross(triangle_points[2] - triangle_points[0])
+                    .try_normalize()
+                    .or_else(|| relative_previous.try_normalize())
+            }?;
+            return Some(VertexTriangleSweepHit {
+                normal,
+                barycentric: closest.barycentric,
+                minimum_distance,
+            });
+        }
+        if time >= 1.0 {
+            return None;
+        }
+        let step = ((distance - minimum_distance).max(0.0) / speed_bound * 0.8)
+            .clamp(1.0e-5, 0.25);
+        time = (time + step).min(1.0);
+    }
+    None
+}
+
+fn find_swept_edge_edge_contact(
+    edge_a: u32,
+    edge_b: u32,
+    positions: &[Vec3],
+    previous: &[Vec3],
+    thickness_scale: &[f32],
+    base_thickness: f32,
+    topology: &CollisionTopology,
+) -> Option<EdgeEdgeSweepHit> {
+    let a = topology.edges().get(edge_a as usize)?.vertices;
+    let b = topology.edges().get(edge_b as usize)?.vertices;
+    let speed_a = (positions[a[0] as usize] - previous[a[0] as usize]).length()
+        .max((positions[a[1] as usize] - previous[a[1] as usize]).length());
+    let speed_b = (positions[b[0] as usize] - previous[b[0] as usize]).length()
+        .max((positions[b[1] as usize] - previous[b[1] as usize]).length());
+    let speed_bound = speed_a + speed_b;
+    let max_scale = thickness_scale[a[0] as usize]
+        .max(thickness_scale[a[1] as usize])
+        .max(thickness_scale[b[0] as usize])
+        .max(thickness_scale[b[1] as usize]);
+    let no_crossing_distance = 2.0 * effective_thickness(base_thickness, max_scale);
+    if !speed_bound.is_finite() || speed_bound <= no_crossing_distance.max(1.0e-8) {
+        return None;
+    }
+
+    let mut time = 0.0_f32;
+    for _ in 0..48 {
+        let a0 = lerp_position(previous[a[0] as usize], positions[a[0] as usize], time);
+        let a1 = lerp_position(previous[a[1] as usize], positions[a[1] as usize], time);
+        let b0 = lerp_position(previous[b[0] as usize], positions[b[0] as usize], time);
+        let b1 = lerp_position(previous[b[1] as usize], positions[b[1] as usize], time);
+        let (s, t, point_a, point_b) = closest_segment_segment(a0, a1, b0, b1)?;
+        let thickness_a =
+            (1.0 - s) * effective_thickness(base_thickness, thickness_scale[a[0] as usize])
+            + s * effective_thickness(base_thickness, thickness_scale[a[1] as usize]);
+        let thickness_b =
+            (1.0 - t) * effective_thickness(base_thickness, thickness_scale[b[0] as usize])
+            + t * effective_thickness(base_thickness, thickness_scale[b[1] as usize]);
+        let minimum_distance = 0.5 * (thickness_a + thickness_b);
+        let delta = point_a - point_b;
+        let distance = delta.length();
+        if !distance.is_finite() {
+            return None;
+        }
+        if distance <= minimum_distance + 1.0e-5 {
+            let history_a = previous[a[0] as usize] * (1.0 - s) + previous[a[1] as usize] * s;
+            let history_b = previous[b[0] as usize] * (1.0 - t) + previous[b[1] as usize] * t;
+            let normal = if distance > 1.0e-7 {
+                Some(delta / distance)
+            } else {
+                (history_a - history_b).try_normalize()
+                    .or_else(|| (a1 - a0).cross(b1 - b0).try_normalize())
+            }?;
+            return Some(EdgeEdgeSweepHit { normal, s, t, minimum_distance });
+        }
+        if time >= 1.0 {
+            return None;
+        }
+        let step = ((distance - minimum_distance).max(0.0) / speed_bound * 0.8)
+            .clamp(1.0e-5, 0.25);
+        time = (time + step).min(1.0);
+    }
+    None
+}
+
 /// Projeta todos os contatos discretos com Gauss-Seidel serial; cada par é unilateral.
 pub(crate) fn solve_contacts(
     candidates: &SelfCollisionCandidates,
@@ -645,57 +846,78 @@ pub(crate) fn solve_contacts(
         let Some(closest) = closest_point_triangle(point, points[0], points[1], points[2]) else {
             continue;
         };
-        let thickness_at_face = (0..3)
-            .map(|i| closest.barycentric[i] * effective_thickness(base_thickness, thickness_scale[indices[i] as usize]))
-            .sum::<f32>();
-        let minimum = 0.5 * (
-            effective_thickness(base_thickness, thickness_scale[vertex as usize]) + thickness_at_face
+        let minimum = minimum_vertex_triangle_thickness(
+            vertex, indices, closest.barycentric, thickness_scale, base_thickness,
         );
         let delta = point - closest.point;
         let distance = delta.length();
-        if !distance.is_finite() || distance >= minimum {
+        if !distance.is_finite() {
             continue;
         }
-        let penetration = minimum - distance;
+
+        let (barycentric, normal, penetration) = if distance < minimum {
+            let normal = if distance > 1.0e-7 {
+                Some(delta / distance)
+            } else {
+                let previous_triangle = indices
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &index)| previous[index as usize] * closest.barycentric[i])
+                    .fold(Vec3::ZERO, |sum, point| sum + point);
+                let history = previous[vertex as usize] - previous_triangle;
+                let face_normal = (points[1] - points[0]).cross(points[2] - points[0]);
+                face_normal.try_normalize().map(|mut normal| {
+                    if history.is_finite() && history.length_squared() > 1.0e-12 && history.dot(normal) < 0.0 {
+                        normal = -normal;
+                    }
+                    normal
+                }).or_else(|| history.try_normalize())
+            };
+            let Some(normal) = normal else {
+                continue;
+            };
+            (closest.barycentric, normal, minimum - distance)
+        } else {
+            result.vertex_triangle_sweep_tests += 1;
+            let Some(hit) = find_swept_vertex_triangle_contact(
+                vertex, face, positions, previous, thickness_scale, base_thickness, topology,
+            ) else {
+                continue;
+            };
+            let surface_end = points[0] * hit.barycentric[0]
+                + points[1] * hit.barycentric[1]
+                + points[2] * hit.barycentric[2];
+            let signed_distance = (point - surface_end).dot(hit.normal);
+            let penetration = hit.minimum_distance - signed_distance;
+            if !penetration.is_finite() || penetration <= 0.0 {
+                continue;
+            }
+            result.vertex_triangle_swept_contacts += 1;
+            (hit.barycentric, hit.normal, penetration)
+        };
+
         result.vertex_triangle_contacts += 1;
         result.max_penetration_before_m = result.max_penetration_before_m.max(penetration);
-
-        let normal = if distance > 1.0e-7 {
-            Some(delta / distance)
-        } else {
-            let previous_triangle = indices
-                .iter()
-                .enumerate()
-                .map(|(i, &index)| previous[index as usize] * closest.barycentric[i])
-                .fold(Vec3::ZERO, |sum, point| sum + point);
-            let history = previous[vertex as usize] - previous_triangle;
-            let face_normal = (points[1] - points[0]).cross(points[2] - points[0]);
-            face_normal.try_normalize().map(|mut normal| {
-                if history.is_finite() && history.length_squared() > 1.0e-12 && history.dot(normal) < 0.0 {
-                    normal = -normal;
-                }
-                normal
-            }).or_else(|| history.try_normalize())
-        };
-        let Some(normal) = normal else {
-            continue;
-        };
-
-        let weights = closest.barycentric;
         let wp = inverse_mass[vertex as usize].max(0.0);
         let wa = inverse_mass[indices[0] as usize].max(0.0);
         let wb = inverse_mass[indices[1] as usize].max(0.0);
         let wc = inverse_mass[indices[2] as usize].max(0.0);
-        let denominator = wp + wa * weights[0] * weights[0]
-            + wb * weights[1] * weights[1] + wc * weights[2] * weights[2];
+        let denominator = wp + wa * barycentric[0] * barycentric[0]
+            + wb * barycentric[1] * barycentric[1] + wc * barycentric[2] * barycentric[2];
         if denominator <= 1.0e-12 || !denominator.is_finite() {
             continue;
         }
         let scale = penetration / denominator;
-        apply_correction(vertex as usize, normal * (wp * scale), positions, previous, inverse_mass);
+        apply_correction(
+            vertex as usize,
+            normal * (wp * scale),
+            positions,
+            previous,
+            inverse_mass,
+        );
         for i in 0..3 {
             let index = indices[i] as usize;
-            let correction = -normal * (inverse_mass[index].max(0.0) * weights[i] * scale);
+            let correction = -normal * (inverse_mass[index].max(0.0) * barycentric[i] * scale);
             apply_correction(index, correction, positions, previous, inverse_mass);
         }
     }
@@ -724,34 +946,51 @@ pub(crate) fn solve_contacts(
         let minimum = 0.5 * (thickness_a + thickness_b);
         let delta = point_a - point_b;
         let distance = delta.length();
-        if !distance.is_finite() || distance >= minimum {
+        if !distance.is_finite() {
             continue;
         }
-        let penetration = minimum - distance;
+
+        let (s, t, normal, penetration) = if distance < minimum {
+            let history_a = previous[a[0] as usize] * (1.0 - s) + previous[a[1] as usize] * s;
+            let history_b = previous[b[0] as usize] * (1.0 - t) + previous[b[1] as usize] * t;
+            let normal = if distance > 1.0e-7 {
+                Some(delta / distance)
+            } else {
+                (history_a - history_b).try_normalize()
+                    .or_else(|| {
+                        let tangent_a = positions[a[1] as usize] - positions[a[0] as usize];
+                        let tangent_b = positions[b[1] as usize] - positions[b[0] as usize];
+                        tangent_a.cross(tangent_b).try_normalize()
+                    })
+            };
+            let Some(normal) = normal else {
+                continue;
+            };
+            (s, t, normal, minimum - distance)
+        } else {
+            result.edge_edge_sweep_tests += 1;
+            let Some(hit) = find_swept_edge_edge_contact(
+                edge_a, edge_b, positions, previous, thickness_scale, base_thickness, topology,
+            ) else {
+                continue;
+            };
+            let point_a_end = positions[a[0] as usize] * (1.0 - hit.s)
+                + positions[a[1] as usize] * hit.s;
+            let point_b_end = positions[b[0] as usize] * (1.0 - hit.t)
+                + positions[b[1] as usize] * hit.t;
+            let signed_distance = (point_a_end - point_b_end).dot(hit.normal);
+            let penetration = hit.minimum_distance - signed_distance;
+            if !penetration.is_finite() || penetration <= 0.0 {
+                continue;
+            }
+            result.edge_edge_swept_contacts += 1;
+            (hit.s, hit.t, hit.normal, penetration)
+        };
+
         result.edge_edge_contacts += 1;
         result.max_penetration_before_m = result.max_penetration_before_m.max(penetration);
-
-        let wa = [1.0 - s, s];
-        let wb = [1.0 - t, t];
-        let history_a = previous[a[0] as usize] * wa[0] + previous[a[1] as usize] * wa[1];
-        let history_b = previous[b[0] as usize] * wb[0] + previous[b[1] as usize] * wb[1];
-        let normal = if distance > 1.0e-7 {
-            Some(delta / distance)
-        } else {
-            (history_a - history_b).try_normalize().or_else(|| {
-                let tangent_a = positions[a[1] as usize] - positions[a[0] as usize];
-                let tangent_b = positions[b[1] as usize] - positions[b[0] as usize];
-                tangent_a.cross(tangent_b).try_normalize()
-            })
-        };
-        let Some(normal) = normal else {
-            continue;
-        };
-
-        let ids_a = [a[0] as usize, a[1] as usize];
-        let ids_b = [b[0] as usize, b[1] as usize];
-        let weights = [wa[0], wa[1], -wb[0], -wb[1]];
-        let ids = [ids_a[0], ids_a[1], ids_b[0], ids_b[1]];
+        let ids = [a[0] as usize, a[1] as usize, b[0] as usize, b[1] as usize];
+        let weights = [1.0 - s, s, -(1.0 - t), -t];
         let denominator = (0..4)
             .map(|i| inverse_mass[ids[i]].max(0.0) * weights[i] * weights[i])
             .sum::<f32>();
@@ -870,7 +1109,7 @@ mod tests {
             Vec3::new(0.0, 0.0, 1.0),
             Vec3::new(0.0, 0.05, 0.0),
         ];
-        let candidates = build_candidates(&positions, &[1.0; 4], 0.1, &topology);
+        let candidates = build_candidates(&positions, &positions, &[1.0; 4], 0.1, &topology);
         assert!(candidates.vertex_triangle.contains(&(3, 0)));
     }
 
@@ -885,7 +1124,7 @@ mod tests {
         ];
         let mut previous = positions;
         previous[3].y = 0.04;
-        let candidates = build_candidates(&positions, &[1.0; 4], 0.1, &topology);
+        let candidates = build_candidates(&positions, &positions, &[1.0; 4], 0.1, &topology);
         let before_velocity = positions[3] - previous[3];
         let result = solve_contacts(
             &candidates, &topology, &mut positions, &mut previous,
@@ -912,7 +1151,7 @@ mod tests {
             Vec3::new(0.0, 1.0, 0.0),
             Vec3::new(1.0, 1.0, 0.0),
         ];
-        let candidates = build_candidates(&positions, &[1.0; 6], 0.1, &topology);
+        let candidates = build_candidates(&positions, &positions, &[1.0; 6], 0.1, &topology);
         let crossing = candidates.edge_edge.iter().filter(|&&(a, b)| {
             topology.edges()[a as usize].vertices == [0, 1]
                 && topology.edges()[b as usize].vertices == [3, 4]
@@ -970,10 +1209,63 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let topology = CollisionTopology::new(positions.len(), &triangles, std::iter::empty());
-        let candidates = build_candidates(&positions, &vec![1.0; positions.len()], 0.01, &topology);
+        let candidates = build_candidates(&positions, &positions, &vec![1.0; positions.len()], 0.01, &topology);
         assert!(candidates.vertex_triangle_candidates > candidates.vertex_triangle.len());
         assert!(candidates.dropped_candidates > 0);
         assert!(candidates.edge_edge.len() <= MAX_SELF_COLLISION_CANDIDATES_TOTAL);
+    }
+
+    #[test]
+    fn swept_vertex_triangle_contact_catches_a_fast_crossing() {
+        let topology = CollisionTopology::new(4, &[[0, 1, 2]], std::iter::empty());
+        let mut positions = [
+            Vec3::new(-1.0, 0.0, -1.0),
+            Vec3::new(1.0, 0.0, -1.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, 0.1, 0.0),
+        ];
+        let mut previous = positions;
+        previous[3].y = -0.1;
+        let candidates = build_candidates(
+            &positions, &previous, &[1.0; 4], 0.02, &topology,
+        );
+        assert!(candidates.vertex_triangle.contains(&(3, 0)));
+        let result = solve_contacts(
+            &candidates,
+            &topology,
+            &mut positions,
+            &mut previous,
+            &[0.0, 0.0, 0.0, 1.0],
+            &[1.0; 4],
+            0.02,
+        );
+        assert_eq!(result.vertex_triangle_swept_contacts, 1);
+        assert!(positions[3].y < 0.0);
+    }
+
+    #[test]
+    fn swept_edge_broadphase_catches_a_segment_crossing_between_frames() {
+        let topology = CollisionTopology::new(
+            6, &[[0, 1, 2], [3, 4, 5]], std::iter::empty(),
+        );
+        let positions = [
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(-1.0, -1.0, 0.0),
+            Vec3::new(0.0, -1.0, 0.1),
+            Vec3::new(0.0, 1.0, 0.1),
+            Vec3::new(1.0, 1.0, 0.1),
+        ];
+        let mut previous = positions;
+        previous[3].z = -0.1;
+        previous[4].z = -0.1;
+        let candidates = build_candidates(
+            &positions, &previous, &[1.0; 6], 0.02, &topology,
+        );
+        assert!(candidates.edge_edge.iter().any(|&(a, b)| {
+            topology.edges()[a as usize].vertices == [0, 1]
+                && topology.edges()[b as usize].vertices == [3, 4]
+        }));
     }
 
 }

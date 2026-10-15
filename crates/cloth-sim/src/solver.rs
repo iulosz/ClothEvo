@@ -69,12 +69,20 @@ pub struct Stats {
     pub self_collision_vt_verified: usize,
     /// Contatos vértice-triângulo projetados nas iterações.
     pub self_collision_vt_contacts: usize,
+    /// Trajetórias vértice-triângulo examinadas pelo CCD aproximado.
+    pub self_collision_vt_sweep_tests: usize,
+    /// Cruzamentos vértice-triângulo interceptados entre os extremos do substep.
+    pub self_collision_vt_swept_contacts: usize,
     /// Candidatos aresta-aresta gerados antes do filtro geométrico.
     pub self_collision_ee_candidates: usize,
     /// Candidatos aresta-aresta que passaram pela fase geométrica.
     pub self_collision_ee_verified: usize,
     /// Contatos aresta-aresta projetados nas iterações.
     pub self_collision_ee_contacts: usize,
+    /// Trajetórias aresta-aresta examinadas pelo CCD aproximado.
+    pub self_collision_ee_sweep_tests: usize,
+    /// Cruzamentos aresta-aresta interceptados entre os extremos do substep.
+    pub self_collision_ee_swept_contacts: usize,
     /// Pares potencialmente válidos omitidos pelos limites do broadphase/geradores.
     pub self_collision_dropped_candidates: usize,
     /// Primitivas ignoradas porque sua AABB excedeu o orçamento de células.
@@ -358,9 +366,13 @@ impl Simulation {
         self.stats.self_collision_vt_candidates = 0;
         self.stats.self_collision_vt_verified = 0;
         self.stats.self_collision_vt_contacts = 0;
+        self.stats.self_collision_vt_sweep_tests = 0;
+        self.stats.self_collision_vt_swept_contacts = 0;
         self.stats.self_collision_ee_candidates = 0;
         self.stats.self_collision_ee_verified = 0;
         self.stats.self_collision_ee_contacts = 0;
+        self.stats.self_collision_ee_sweep_tests = 0;
+        self.stats.self_collision_ee_swept_contacts = 0;
         self.stats.self_collision_dropped_candidates = 0;
         self.stats.self_collision_overflowed_primitives = 0;
         self.stats.self_collision_penetration_before_m = 0.0;
@@ -421,6 +433,7 @@ impl Simulation {
                     let broadphase_start = Instant::now();
                     let candidates = build_self_collision_candidates(
                         &self.pos,
+                        &self.prev,
                         &self.thickness_scale,
                         self.params.thickness,
                         &self.collision_topology,
@@ -444,8 +457,12 @@ impl Simulation {
                     self_collision_solve_elapsed_ms += solve_start.elapsed().as_secs_f32() * 1000.0;
                     self.stats.self_collision_vt_verified += resolved.vertex_triangle_verified;
                     self.stats.self_collision_vt_contacts += resolved.vertex_triangle_contacts;
+                    self.stats.self_collision_vt_sweep_tests += resolved.vertex_triangle_sweep_tests;
+                    self.stats.self_collision_vt_swept_contacts += resolved.vertex_triangle_swept_contacts;
                     self.stats.self_collision_ee_verified += resolved.edge_edge_verified;
                     self.stats.self_collision_ee_contacts += resolved.edge_edge_contacts;
+                    self.stats.self_collision_ee_sweep_tests += resolved.edge_edge_sweep_tests;
+                    self.stats.self_collision_ee_swept_contacts += resolved.edge_edge_swept_contacts;
                     self.stats.self_collision_penetration_before_m = self.stats
                         .self_collision_penetration_before_m
                         .max(resolved.max_penetration_before_m);
@@ -464,6 +481,7 @@ impl Simulation {
                 let broadphase_start = Instant::now();
                 let residual_candidates = build_self_collision_candidates(
                     &self.pos,
+                    &self.prev,
                     &self.thickness_scale,
                     self.params.thickness,
                     &self.collision_topology,

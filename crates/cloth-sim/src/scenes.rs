@@ -24,6 +24,8 @@ pub enum SceneKind {
     FastSdfCrossing,
     /// Dois painéis sobrepostos para medir contatos internos vértice-face e aresta-aresta.
     SelfCollisionLayers,
+    /// Um painel atravessa outro durante um único substep para exercitar o CCD aproximado.
+    FastSelfCollisionCrossing,
 }
 
 impl SceneKind {
@@ -31,13 +33,14 @@ impl SceneKind {
     pub const ALL: [SceneKind; 3] = [Self::HangingCloth, Self::SphereDrop, Self::SewnTube];
 
     /// Cenários fixos do diagnóstico/benchmark de colisão, SDF, movimento rápido e auto-colisão.
-    pub const DIAGNOSTIC: [SceneKind; 6] = [
+    pub const DIAGNOSTIC: [SceneKind; 7] = [
         Self::HangingCloth,
         Self::SphereDrop,
         Self::SewnTube,
         Self::SdfAvatarDrop,
         Self::FastSdfCrossing,
         Self::SelfCollisionLayers,
+        Self::FastSelfCollisionCrossing,
     ];
 
     pub fn name(self) -> &'static str {
@@ -48,6 +51,7 @@ impl SceneKind {
             Self::SdfAvatarDrop => "4. Tecido sobre torso (SDF)",
             Self::FastSdfCrossing => "5. Travessia rápida do torso (SDF)",
             Self::SelfCollisionLayers => "6. Painéis sobrepostos (auto-colisão)",
+            Self::FastSelfCollisionCrossing => "7. Travessia rápida entre painéis",
         }
     }
 }
@@ -57,6 +61,7 @@ impl SceneKind {
 pub fn build_scene(kind: SceneKind, res: u32, params: SimParams) -> Simulation {
     let res = res.max(8);
     let mut b = ClothBuilder::new();
+    let mut self_collision_velocity_range = None;
     if !matches!(kind, SceneKind::SdfAvatarDrop | SceneKind::FastSdfCrossing) {
         b.add_collider(Collider::ground());
     }
@@ -103,6 +108,19 @@ pub fn build_scene(kind: SceneKind, res: u32, params: SimParams) -> Simulation {
             b.add_panel(&panel.mesh, placement);
             b.add_panel(&panel.mesh, placement);
         }
+        SceneKind::FastSelfCollisionCrossing => {
+            let cells = ((0.6 * res as f32).round() as u32).max(4);
+            let panel = GridPanel::new(0.6, 0.6, cells, cells);
+            let rotation = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+            let fixed = Placement::new(Vec3::new(-0.3, 0.78, 0.3), rotation);
+            let moving = Placement::new(Vec3::new(-0.3, 0.72, 0.3), rotation);
+            b.add_panel(&panel.mesh, fixed);
+            let moving_panel = b.add_panel(&panel.mesh, moving);
+            self_collision_velocity_range = Some((
+                moving_panel.first as usize,
+                (moving_panel.first + moving_panel.count) as usize,
+            ));
+        }
         SceneKind::SewnTube => {
             let nx = ((0.6 * res as f32).round() as u32).max(4);
             let ny = ((0.9 * res as f32).round() as u32).max(4);
@@ -138,6 +156,14 @@ pub fn build_scene(kind: SceneKind, res: u32, params: SimParams) -> Simulation {
     if kind == SceneKind::SelfCollisionLayers {
         simulation.params.self_collision = true;
         simulation.params.gravity = Vec3::ZERO;
+    }
+    if let Some((start, end)) = self_collision_velocity_range {
+        simulation.params.self_collision = true;
+        simulation.params.gravity = Vec3::ZERO;
+        simulation.params.substeps = 1;
+        simulation.params.iterations = 1;
+        simulation.params.max_particle_speed = 10.0;
+        simulation.vel[start..end].fill(Vec3::Y * 10.0);
     }
     simulation
 }
@@ -177,4 +203,30 @@ mod self_collision_scene_tests {
         assert!(simulation.stats.self_collision_vt_candidates > 0);
         assert!(simulation.stats.self_collision_ee_candidates > 0);
     }
+    #[test]
+    fn sewn_panels_remain_finite_when_surface_self_collision_is_enabled() {
+        let mut params = SimParams::default();
+        params.substeps = 1;
+        params.iterations = 2;
+        let mut simulation = build_scene(SceneKind::SewnTube, 10, params);
+        simulation.params.self_collision = true;
+        simulation.step(1.0 / 60.0);
+        assert!(simulation.is_finite());
+        assert!(simulation.seam_gap_max().is_finite());
+    }
+
+    #[test]
+    fn fast_layer_crossing_is_intercepted_and_remains_finite() {
+        let mut params = SimParams::default();
+        params.substeps = 1;
+        params.iterations = 1;
+        let mut simulation = build_scene(SceneKind::FastSelfCollisionCrossing, 12, params);
+        simulation.step(1.0 / 60.0);
+        assert!(simulation.is_finite());
+        assert!(
+            simulation.stats.self_collision_vt_swept_contacts
+                + simulation.stats.self_collision_ee_swept_contacts > 0
+        );
+    }
+
 }
