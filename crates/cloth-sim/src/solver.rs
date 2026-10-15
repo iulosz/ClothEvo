@@ -1752,7 +1752,7 @@ mod stability_tests {
             *position = Vec3::splat(3.0 + index as f32);
         }
         sim.pos[0] = Vec3::new(0.49, 0.5, 0.0);
-        sim.prev_pos.clone_from(&sim.pos);
+        sim.prev.clone_from(&sim.pos);
         sim.params.gravity = Vec3::ZERO;
         sim.params.thickness = 0.02;
         sim.params.substeps = 1;
