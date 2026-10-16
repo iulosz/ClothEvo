@@ -1373,20 +1373,16 @@ impl ClothEvoApp {
         ui.heading("Posicionamento 3D");
         ui.label("Organize os moldes ao redor do manequim antes de iniciar a simulação.");
         ui.label("Selecione um gizmo e arraste o eixo/anel/quadrado diretamente na viewport.");
-        ui.horizontal_wrapped(|ui| {
-            for (mode, label) in [
-                (GizmoMode::Move, "Mover"),
-                (GizmoMode::Rotate, "Girar"),
-                (GizmoMode::Scale, "Escalar"),
-                (GizmoMode::Transform, "Transformar"),
-            ] {
-                if ui.selectable_label(self.gizmo_mode == mode, label).clicked() {
-                    self.gizmo_mode = mode;
-                    self.placement_gizmo_drag = None;
-                }
-            }
+        ui.horizontal(|ui| {
+            ui.label("Ferramenta ativa:");
+            ui.strong(match self.gizmo_mode {
+                GizmoMode::Move => "Mover",
+                GizmoMode::Rotate => "Girar",
+                GizmoMode::Scale => "Escalar",
+                GizmoMode::Transform => "Transformar",
+            });
         });
-        ui.weak("Mover: setas X/Y/Z · Girar: anéis · Escalar: quadrados nos eixos · Transformar: controles combinados.");
+        ui.weak("Selecione a ferramenta pelos ícones na barra vertical da viewport.");
         ui.horizontal(|ui| {
             if ui.button("Voltar aos moldes 2D").clicked() {
                 self.workspace = WorkspaceMode::Pattern;
@@ -1869,6 +1865,75 @@ impl ClothEvoApp {
         }
         painter.circle_filled(center, 4.5, egui::Color32::WHITE);
         painter.circle_stroke(center, 6.5, egui::Stroke::new(1.5, egui::Color32::from_gray(30)));
+    }
+
+    fn draw_placement_toolbar(&mut self, ui: &mut egui::Ui, viewport_rect: egui::Rect) {
+        let panel_rect = placement_toolbar_bounds(viewport_rect);
+        let painter = ui.painter();
+        painter.rect_filled(
+            panel_rect,
+            6.0,
+            egui::Color32::from_rgba_unmultiplied(19, 21, 26, 242),
+        );
+        painter.rect_stroke(
+            panel_rect,
+            6.0,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(62, 65, 74)),
+            egui::StrokeKind::Inside,
+        );
+
+        let tools = [
+            (GizmoMode::Rotate, "Girar", "Girar o molde usando os anéis dos eixos."),
+            (GizmoMode::Move, "Mover", "Mover o molde pelos eixos X, Y e Z."),
+            (GizmoMode::Scale, "Escalar", "Escalar o molde pelos controles nas extremidades."),
+            (GizmoMode::Transform, "Transformar", "Combinar mover, girar e escalar."),
+        ];
+        let button_side = 36.0;
+        let gap = 7.0;
+        for (index, (mode, _label, tooltip)) in tools.iter().enumerate() {
+            let button_rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    panel_rect.center().x - button_side * 0.5,
+                    panel_rect.top() + 7.0 + index as f32 * (button_side + gap),
+                ),
+                egui::vec2(button_side, button_side),
+            );
+            let response = ui.interact(
+                button_rect,
+                ui.make_persistent_id(("placement_gizmo_toolbar", index)),
+                egui::Sense::click(),
+            );
+            let active = self.gizmo_mode == *mode;
+            let fill = if active {
+                egui::Color32::from_rgb(111, 48, 111)
+            } else if response.hovered() {
+                egui::Color32::from_rgb(48, 57, 74)
+            } else {
+                egui::Color32::from_rgb(29, 31, 37)
+            };
+            let icon_color = if active {
+                egui::Color32::WHITE
+            } else {
+                egui::Color32::from_rgb(211, 214, 220)
+            };
+            painter.rect_filled(button_rect, 5.0, fill);
+            if active {
+                painter.rect_stroke(
+                    button_rect,
+                    5.0,
+                    egui::Stroke::new(1.2, egui::Color32::from_rgb(218, 175, 91)),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            paint_placement_tool_icon(&painter, button_rect, *mode, icon_color);
+            let clicked = response.clicked();
+            let _ = response.on_hover_text(*tooltip);
+            if clicked {
+                self.gizmo_mode = *mode;
+                self.placement_gizmo_drag = None;
+                self.placement_drag_piece = None;
+            }
+        }
     }
 
     fn rotate_selected_placement(&mut self, axis: usize, degrees: f64) {
@@ -5743,6 +5808,10 @@ impl ClothEvoApp {
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         let placement_mode = self.workspace == WorkspaceMode::Placement && self.using_pattern_sim;
+        let toolbar_bounds = placement_mode.then(|| placement_toolbar_bounds(rect));
+        let pointer_over_toolbar = toolbar_bounds
+            .map(|bounds| ui.input(|i| i.pointer.hover_pos().is_some_and(|pointer| bounds.contains(pointer))))
+            .unwrap_or(false);
         let aspect = rect.width() / rect.height().max(1.0);
         if response.hovered() {
             let preset = ui.input(|i| -> Option<CameraPreset> {
@@ -5758,7 +5827,7 @@ impl ClothEvoApp {
         // Isso evita que um clique no eixo seja interpretado como arraste livre do tecido.
         let pointer_delta = ui.input(|i| i.pointer.delta());
         if placement_mode {
-            if response.drag_started_by(egui::PointerButton::Primary) {
+            if response.drag_started_by(egui::PointerButton::Primary) && !pointer_over_toolbar {
                 if let Some(pointer) = response.interact_pointer_pos() {
                     let view_proj = self.camera.view_proj(aspect);
                     if let Some(gizmo) = self.hit_test_placement_gizmo(pointer, rect, view_proj) {
@@ -5780,7 +5849,7 @@ impl ClothEvoApp {
                     }
                 }
             }
-            if response.dragged_by(egui::PointerButton::Primary) {
+            if response.dragged_by(egui::PointerButton::Primary) && !pointer_over_toolbar {
                 if let Some(mut gizmo) = self.placement_gizmo_drag {
                     let pointer = response.interact_pointer_pos()
                         .unwrap_or(gizmo.last_pointer + pointer_delta);
@@ -5821,7 +5890,7 @@ impl ClothEvoApp {
                     self.camera.orbit(pointer_delta.x, pointer_delta.y);
                 }
             }
-            if response.clicked() {
+            if response.clicked() && !pointer_over_toolbar {
                 if let Some(pointer) = response.interact_pointer_pos() {
                     let view_proj = self.camera.view_proj(aspect);
                     if self.hit_test_placement_gizmo(pointer, rect, view_proj).is_none() {
@@ -5864,12 +5933,12 @@ impl ClothEvoApp {
         } else if response.dragged_by(egui::PointerButton::Primary) {
             self.camera.orbit(pointer_delta.x, pointer_delta.y);
         }
-        if response.dragged_by(egui::PointerButton::Secondary)
-            || response.dragged_by(egui::PointerButton::Middle)
+        if !pointer_over_toolbar && (response.dragged_by(egui::PointerButton::Secondary)
+            || response.dragged_by(egui::PointerButton::Middle))
         {
             self.camera.pan(pointer_delta.x, pointer_delta.y, rect.height());
         }
-        if response.hovered() {
+        if response.hovered() && !pointer_over_toolbar {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll != 0.0 {
                 self.camera.zoom(scroll);
@@ -5922,6 +5991,7 @@ impl ClothEvoApp {
                 }
             }
             self.draw_placement_gizmo(ui.painter(), rect, view_proj);
+            self.draw_placement_toolbar(ui, rect);
         }
     }
 
@@ -7378,6 +7448,71 @@ fn gizmo_axis_color(axis: usize) -> egui::Color32 {
         0 => egui::Color32::from_rgb(245, 86, 83),
         1 => egui::Color32::from_rgb(103, 220, 125),
         _ => egui::Color32::from_rgb(83, 164, 255),
+    }
+}
+
+fn placement_toolbar_bounds(viewport_rect: egui::Rect) -> egui::Rect {
+    const BUTTON_SIDE: f32 = 36.0;
+    const BUTTON_GAP: f32 = 7.0;
+    const PANEL_WIDTH: f32 = 50.0;
+    const PANEL_PADDING: f32 = 7.0;
+    let panel_height = PANEL_PADDING * 2.0 + BUTTON_SIDE * 4.0 + BUTTON_GAP * 3.0;
+    egui::Rect::from_min_size(
+        viewport_rect.left_top() + egui::vec2(12.0, 12.0),
+        egui::vec2(PANEL_WIDTH, panel_height),
+    )
+}
+
+fn paint_placement_tool_icon(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    mode: GizmoMode,
+    color: egui::Color32,
+) {
+    let center = rect.center();
+    let stroke = egui::Stroke::new(2.0, color);
+    let arrow = |tip: egui::Pos2, direction: egui::Vec2| {
+        let direction = direction.normalized();
+        if direction.length_sq() < 1.0e-6 { return; }
+        let base = tip - direction * 4.5;
+        let perpendicular = egui::vec2(-direction.y, direction.x) * 2.8;
+        painter.line_segment([tip, base + perpendicular], stroke);
+        painter.line_segment([tip, base - perpendicular], stroke);
+    };
+
+    match mode {
+        GizmoMode::Rotate => {
+            painter.circle_stroke(center, 8.0, stroke);
+            let tip = center + egui::vec2(6.5, -5.0);
+            arrow(tip, egui::vec2(1.0, -0.35));
+        }
+        GizmoMode::Move => {
+            painter.line_segment([center - egui::vec2(10.0, 0.0), center + egui::vec2(10.0, 0.0)], stroke);
+            painter.line_segment([center - egui::vec2(0.0, 10.0), center + egui::vec2(0.0, 10.0)], stroke);
+            arrow(center + egui::vec2(12.0, 0.0), egui::vec2(1.0, 0.0));
+            arrow(center - egui::vec2(12.0, 0.0), egui::vec2(-1.0, 0.0));
+            arrow(center + egui::vec2(0.0, 12.0), egui::vec2(0.0, 1.0));
+            arrow(center - egui::vec2(0.0, 12.0), egui::vec2(0.0, -1.0));
+        }
+        GizmoMode::Scale => {
+            let start = center + egui::vec2(-9.0, 9.0);
+            let end = center + egui::vec2(9.0, -9.0);
+            painter.line_segment([start, end], stroke);
+            arrow(start, egui::vec2(-1.0, 1.0));
+            arrow(end, egui::vec2(1.0, -1.0));
+        }
+        GizmoMode::Transform => {
+            let origin = center + egui::vec2(-6.5, 6.5);
+            let x_end = origin + egui::vec2(13.5, 0.0);
+            let y_end = origin + egui::vec2(0.0, -13.5);
+            let z_end = origin + egui::vec2(9.0, -9.0);
+            painter.line_segment([origin, x_end], stroke);
+            painter.line_segment([origin, y_end], stroke);
+            painter.line_segment([origin, z_end], stroke);
+            arrow(x_end, egui::vec2(1.0, 0.0));
+            arrow(y_end, egui::vec2(0.0, -1.0));
+            arrow(z_end, egui::vec2(1.0, -1.0));
+        }
     }
 }
 
