@@ -1065,8 +1065,8 @@ impl ClothEvoApp {
     }
 
     fn top_navigation(&mut self, ui: &mut egui::Ui) {
-        const ORANGE: egui::Color32 = egui::Color32::from_rgb(255, 170, 53);
-        const PAPER: egui::Color32 = egui::Color32::from_rgb(247, 239, 215);
+        let accent = ui_rgb(self.ui_customization.theme.accent);
+        let brand_text = ui_rgb(self.ui_customization.theme.text);
 
         ui.set_min_height(58.0);
         let mut render_changed = false;
@@ -1074,7 +1074,7 @@ impl ClothEvoApp {
         ui.horizontal(|ui| {
             ui.add_space(2.0);
             ui.vertical(|ui| {
-                ui.label(egui::RichText::new("CLOTHEVO").size(23.0).strong().color(PAPER));
+                ui.label(egui::RichText::new("CLOTHEVO").size(23.0).strong().color(brand_text));
             });
             ui.add_space(16.0);
             ui.separator();
@@ -1115,7 +1115,7 @@ impl ClothEvoApp {
             }
 
             ui.menu_button(
-                egui::RichText::new("View  ↘").strong().color(ORANGE),
+                egui::RichText::new("View  ↘").strong().color(accent),
                 |ui| {
                     if ui.selectable_label(self.workspace == WorkspaceMode::Split, "3D + 2D").clicked() {
                         self.workspace = WorkspaceMode::Split;
@@ -1131,7 +1131,7 @@ impl ClothEvoApp {
             );
 
             ui.menu_button(
-                egui::RichText::new("Preferences  ↘").strong().color(ORANGE),
+                egui::RichText::new("Preferences  ↘").strong().color(accent),
                 |ui| {
                     if ui.button("Personalizar interface…").clicked() {
                         open_ui_customizer = true;
@@ -7885,15 +7885,15 @@ impl eframe::App for ClothEvoApp {
 
         egui::Panel::top("main_navigation")
             .frame(egui::Frame::new()
-                .fill(egui::Color32::from_rgb(18, 54, 150))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 170, 53)))
+                .fill(ui_rgb(self.ui_customization.theme.window_bg))
+                .stroke(egui::Stroke::new(1.0, ui_rgb(self.ui_customization.theme.border)))
                 .inner_margin(egui::Margin::symmetric(14, 8)))
             .show(ui, |ui| self.top_navigation(ui));
 
         egui::Panel::top("global_toolbar")
             .frame(egui::Frame::new()
-                .fill(egui::Color32::from_rgb(20, 25, 39))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(54, 63, 91)))
+                .fill(ui_rgb(self.ui_customization.theme.panel_bg))
+                .stroke(egui::Stroke::new(1.0, ui_rgb(self.ui_customization.theme.border)))
                 .inner_margin(egui::Margin::symmetric(14, 5)))
             .show(ui, |ui| self.global_toolbar(ui));
 
@@ -7910,8 +7910,8 @@ impl eframe::App for ClothEvoApp {
                 .resizable(true)
                 .default_size(155.0)
                 .frame(egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(12, 16, 29))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(54, 63, 91)))
+                    .fill(ui_rgb(self.ui_customization.theme.deep_bg))
+                    .stroke(egui::Stroke::new(1.0, ui_rgb(self.ui_customization.theme.border)))
                     .inner_margin(egui::Margin::same(10)))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
