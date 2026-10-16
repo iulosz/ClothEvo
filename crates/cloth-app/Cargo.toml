@@ -17,6 +17,8 @@ pattern-core = { path = "../pattern-core" }
 pattern-geom = { path = "../pattern-geom" }
 pattern-mesh = { path = "../pattern-mesh" }
 glam = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "x11", "wayland"] }
 rfd = "0.17.2"

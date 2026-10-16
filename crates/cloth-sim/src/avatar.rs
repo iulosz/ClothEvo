@@ -48,8 +48,8 @@ fn capsule(a: Vec3, b: Vec3, radius: f32) -> Collider {
     Collider::Capsule { a, b, radius }
 }
 
-/// Cria 18 volumes de colisão: cabeça, pescoço, tronco, braços, mãos,
-/// coxas, canelas e pés. A mesma lista alimenta a física e a visualização.
+/// Cria 18 volumes de colisão: cabeça, pescoço, tronco, braços em T-pose,
+/// mãos, coxas, canelas e pés. A mesma lista alimenta a física e a visualização.
 pub fn build_avatar_colliders(config: &AvatarConfig) -> Result<Vec<Collider>, String> {
     config.validate()?;
     let h = config.height_m;
@@ -72,11 +72,11 @@ pub fn build_avatar_colliders(config: &AvatarConfig) -> Result<Vec<Collider>, St
     out.push(ellipsoid(Vec3::new(0.0, h * 0.94, 0.0),
         Vec3::new(0.087 * scale, h * 0.06, 0.094 * scale))); // cabeça
 
-    // Braços e antebraços inclinados para baixo, sem tampas rígidas nas juntas.
+    // Braços estendidos horizontalmente em T-pose, sem tampas rígidas nas juntas.
     for sign in [-1.0_f32, 1.0_f32] {
         let shoulder = Vec3::new(sign * shoulders * 0.43, h * 0.785, 0.0);
-        let elbow = Vec3::new(sign * shoulders * 0.66, h * 0.625, 0.0);
-        let wrist = Vec3::new(sign * shoulders * 0.76, h * 0.445, 0.015 * scale);
+        let elbow = Vec3::new(sign * shoulders * 1.08, h * 0.785, 0.0);
+        let wrist = Vec3::new(sign * shoulders * 1.72, h * 0.780, 0.015 * scale);
         out.push(capsule(shoulder, elbow, 0.052 * scale));
         out.push(capsule(elbow, wrist, 0.038 * scale));
         out.push(ellipsoid(wrist, Vec3::new(0.035 * scale, 0.043 * scale, 0.032 * scale)));
@@ -139,8 +139,8 @@ pub fn arrangement_points(config: &AvatarConfig) -> Vec<ArrangementPoint> {
 
     for (sign, side_id, side_name) in [(1.0_f32, "esq", "esquerdo"), (-1.0_f32, "dir", "direito")] {
         let shoulder = Vec3::new(sign * shoulders * 0.43, h * 0.785, 0.0);
-        let elbow = Vec3::new(sign * shoulders * 0.66, h * 0.625, 0.0);
-        let wrist = Vec3::new(sign * shoulders * 0.76, h * 0.445, 0.015 * scale);
+        let elbow = Vec3::new(sign * shoulders * 1.08, h * 0.785, 0.0);
+        let wrist = Vec3::new(sign * shoulders * 1.72, h * 0.780, 0.015 * scale);
         push_front_back(&mut out, &format!("braco_{side_id}"), &format!("Braço {side_name}"),
             (shoulder + elbow) * 0.5);
         push_front_back(&mut out, &format!("antebraco_{side_id}"), &format!("Antebraço {side_name}"),
