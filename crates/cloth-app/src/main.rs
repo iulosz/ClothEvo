@@ -1380,7 +1380,9 @@ impl ClothEvoApp {
     }
 
     fn library_panel(&mut self, ui: &mut egui::Ui) {
+        let mut selected_template: Option<String> = None;
         let mut import_avatar = false;
+
         ui.horizontal(|ui| {
             ui.heading("Library");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1388,26 +1390,66 @@ impl ClothEvoApp {
             });
         });
         ui.separator();
+
         egui::ScrollArea::vertical().show(ui, |ui| {
             egui::CollapsingHeader::new("Garment")
                 .default_open(true)
                 .show(ui, |ui| {
-                    let pieces: Vec<(usize, String)> = self.pattern_project.pieces.iter()
-                        .enumerate()
-                        .map(|(index, piece)| (index, piece.name.clone()))
-                        .collect();
-                    if pieces.is_empty() {
-                        ui.weak("No garment presets installed.");
-                        ui.label("Create a pattern using 2D Pattern → Add Rectangle.");
-                    } else {
-                        for (index, name) in pieces {
-                            if ui.selectable_label(self.selected_piece == index, name).clicked() {
-                                self.selected_piece = index;
-                                self.selected_target = Some(PatternEditTarget::Piece { piece: index });
+                    ui.label(egui::RichText::new("Starter patterns").size(10.0).color(egui::Color32::GRAY));
+                    egui::Grid::new("garment_library_grid")
+                        .num_columns(2)
+                        .spacing(egui::vec2(5.0, 7.0))
+                        .show(ui, |ui| {
+                            let templates = ["Jacket", "Hoodie", "T-Shirt", "Pants", "Skirt", "Dress", "Bag", "Cap", "Shoes"];
+                            for (index, template) in templates.iter().enumerate() {
+                                ui.vertical_centered(|ui| {
+                                    let width = ((ui.available_width() - 5.0) * 0.5).clamp(48.0, 78.0);
+                                    let (rect, response) = ui.allocate_exact_size(
+                                        egui::vec2(width, 56.0),
+                                        egui::Sense::click(),
+                                    );
+                                    let active = self.pattern_project.name.starts_with(template)
+                                        || (*template == "Jacket" && self.pattern_project.name.contains("Techwear_Jacket"));
+                                    let painter = ui.painter_at(rect);
+                                    painter.rect_filled(
+                                        rect,
+                                        3.0,
+                                        if active {
+                                            egui::Color32::from_rgb(43, 62, 63)
+                                        } else {
+                                            egui::Color32::from_rgb(33, 34, 35)
+                                        },
+                                    );
+                                    painter.rect_stroke(
+                                        rect,
+                                        3.0,
+                                        egui::Stroke::new(
+                                            1.0,
+                                            if active { egui::Color32::from_rgb(16, 166, 160) }
+                                            else { egui::Color32::from_rgb(54, 56, 58) },
+                                        ),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                    paint_garment_thumbnail(&painter, rect.shrink(3.0), template);
+                                    let _ = response.clone().on_hover_text(format!("Load {template} starter patterns"));
+                                    if response.clicked() {
+                                        selected_template = Some((*template).to_owned());
+                                    }
+                                    if ui.add(
+                                        egui::Button::new(egui::RichText::new(*template).size(10.0))
+                                            .min_size(egui::vec2(width, 18.0)),
+                                    ).clicked() {
+                                        selected_template = Some((*template).to_owned());
+                                    }
+                                });
+                                if index % 2 == 1 {
+                                    ui.end_row();
+                                }
                             }
-                        }
-                    }
+                        });
+                    ui.weak("Starter panels are editable. Add seam pairs before final garment simulation.");
                 });
+
             egui::CollapsingHeader::new("Avatar")
                 .default_open(false)
                 .show(ui, |ui| {
@@ -1416,24 +1458,33 @@ impl ClothEvoApp {
                     } else {
                         ui.weak("Procedural mannequin");
                     }
-                    if ui.button("Import OBJ / FBX…").clicked() { import_avatar = true; }
+                    if ui.button("Import OBJ / FBX…").clicked() {
+                        import_avatar = true;
+                    }
                 });
+
             for category in ["Hanger", "Fabric", "Hardware", "Material", "Stage"] {
                 egui::CollapsingHeader::new(category)
                     .default_open(false)
                     .show(ui, |ui| {
                         let message = match category {
-                            "Fabric" => "Choose a simulation preset in the Fabric panel.",
-                            "Material" => "Material asset library is not implemented yet.",
-                            "Hanger" => "Hanger asset library is not implemented yet.",
-                            "Hardware" => "Hardware asset library is not implemented yet.",
-                            _ => "Stage asset library is not implemented yet.",
+                            "Fabric" => "Fabric assets are listed in the Fabric panel.",
+                            "Material" => "Material asset editing is not implemented yet.",
+                            "Hanger" => "Hanger assets are not implemented yet.",
+                            "Hardware" => "Hardware assets are not implemented yet.",
+                            _ => "Stage assets are not implemented yet.",
                         };
-                        ui.weak(message);
+                        ui.label(egui::RichText::new(message).size(10.0).color(egui::Color32::GRAY));
                     });
             }
-            if import_avatar { self.import_avatar_dialog(); }
         });
+
+        if import_avatar {
+            self.import_avatar_dialog();
+        }
+        if let Some(template) = selected_template {
+            self.load_library_template(&template, true);
+        }
     }
 
     fn inspector_panel(&mut self, ui: &mut egui::Ui) {
