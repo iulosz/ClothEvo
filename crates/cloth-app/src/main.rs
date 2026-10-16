@@ -483,7 +483,6 @@ struct ClothEvoApp {
     pattern_symmetry_axis_x: f64,
     pattern_show_mesh: bool,
     selected_piece: usize,
-    selected_material_asset: usize,
     seam_a_piece: usize,
     seam_b_piece: usize,
     seam_sides_a: Vec<EdgePath>,
@@ -579,139 +578,6 @@ struct ClothEvoApp {
     pattern_fit_pending: bool,
 }
 
-fn paint_garment_thumbnail(painter: &egui::Painter, rect: egui::Rect, name: &str) {
-    let fill = egui::Color32::from_rgb(116, 121, 125);
-    let edge = egui::Stroke::new(1.2, egui::Color32::from_rgb(16, 166, 160));
-    let cx = rect.center().x;
-    let top = rect.top() + 7.0;
-    let bottom = rect.bottom() - 5.0;
-    let polygon = |points: Vec<egui::Pos2>| {
-        painter.add(egui::Shape::convex_polygon(points, fill, edge));
-    };
-
-    match name {
-        "Pants" => {
-            polygon(vec![egui::pos2(cx-14.0,top+5.0),egui::pos2(cx-1.0,top+5.0),egui::pos2(cx-3.0,bottom),egui::pos2(cx-12.0,bottom)]);
-            polygon(vec![egui::pos2(cx+1.0,top+5.0),egui::pos2(cx+14.0,top+5.0),egui::pos2(cx+12.0,bottom),egui::pos2(cx+3.0,bottom)]);
-        }
-        "Skirt" => polygon(vec![egui::pos2(cx-8.0,top+9.0),egui::pos2(cx+8.0,top+9.0),egui::pos2(cx+19.0,bottom),egui::pos2(cx-19.0,bottom)]),
-        "Dress" => polygon(vec![egui::pos2(cx-8.0,top+4.0),egui::pos2(cx+8.0,top+4.0),egui::pos2(cx+10.0,top+18.0),egui::pos2(cx+19.0,bottom),egui::pos2(cx-19.0,bottom),egui::pos2(cx-10.0,top+18.0)]),
-        "Bag" => {
-            painter.rect_stroke(egui::Rect::from_min_max(egui::pos2(cx-17.0,top+15.0),egui::pos2(cx+17.0,bottom)),4.0,edge,egui::StrokeKind::Inside);
-            painter.line_segment([egui::pos2(cx-10.0, top+18.0), egui::pos2(cx-8.0, top+9.0)], edge);
-            painter.line_segment([egui::pos2(cx-8.0, top+9.0), egui::pos2(cx, top+6.0)], edge);
-            painter.line_segment([egui::pos2(cx, top+6.0), egui::pos2(cx+8.0, top+9.0)], edge);
-            painter.line_segment([egui::pos2(cx+8.0, top+9.0), egui::pos2(cx+10.0, top+18.0)], edge);
-        }
-        "Cap" => polygon(vec![egui::pos2(cx-15.0,top+17.0),egui::pos2(cx-9.0,top+5.0),egui::pos2(cx+7.0,top+5.0),egui::pos2(cx+15.0,top+17.0),egui::pos2(cx+23.0,top+23.0),egui::pos2(cx-7.0,top+23.0)]),
-        "Shoes" => {
-            painter.rect_filled(egui::Rect::from_min_max(egui::pos2(cx-22.0,top+22.0),egui::pos2(cx-1.0,bottom)),5.0,fill);
-            painter.rect_filled(egui::Rect::from_min_max(egui::pos2(cx+1.0,top+22.0),egui::pos2(cx+22.0,bottom)),5.0,fill);
-            painter.line_segment([egui::pos2(cx-22.0,bottom),egui::pos2(cx-1.0,bottom)],edge);
-            painter.line_segment([egui::pos2(cx+1.0,bottom),egui::pos2(cx+22.0,bottom)],edge);
-        }
-        _ => {
-            // Simplified front silhouette for jackets, hoodies and shirts.
-            polygon(vec![egui::pos2(cx-8.0,top+5.0),egui::pos2(cx+8.0,top+5.0),egui::pos2(cx+12.0,top+15.0),egui::pos2(cx+9.0,bottom),egui::pos2(cx-9.0,bottom),egui::pos2(cx-12.0,top+15.0)]);
-            polygon(vec![egui::pos2(cx-8.0,top+7.0),egui::pos2(cx-15.0,top+9.0),egui::pos2(cx-24.0,top+27.0),egui::pos2(cx-18.0,top+31.0),egui::pos2(cx-8.0,top+18.0)]);
-            polygon(vec![egui::pos2(cx+8.0,top+7.0),egui::pos2(cx+15.0,top+9.0),egui::pos2(cx+24.0,top+27.0),egui::pos2(cx+18.0,top+31.0),egui::pos2(cx+8.0,top+18.0)]);
-            if name == "Jacket" || name == "Hoodie" {
-                painter.line_segment([egui::pos2(cx,top+10.0),egui::pos2(cx, bottom-1.0)], egui::Stroke::new(1.0,egui::Color32::from_rgb(32,33,34)));
-            }
-            if name == "Hoodie" {
-                painter.circle_stroke(egui::pos2(cx,top+3.0),5.0,edge);
-            }
-        }
-    }
-}
-
-fn template_shape(name: &str, coordinates: &[(f64, f64)]) -> (String, Vec<PatternPoint2>) {
-    (
-        name.to_owned(),
-        coordinates.iter().map(|(x, y)| PatternPoint2::new(*x, *y)).collect(),
-    )
-}
-
-/// Moldes-base leves para a Library. São contornos editáveis, não um pacote industrial
-/// completo: as relações de costura precisam ser definidas antes de uma simulação final.
-fn built_in_garment_shapes(template: &str) -> Vec<(String, Vec<PatternPoint2>)> {
-    let p = template_shape;
-    match template {
-        "Jacket" => vec![
-            p("Hood - Left", &[(0.20,1.55),(0.24,1.76),(0.38,1.82),(0.50,1.72),(0.50,1.52),(0.37,1.49)]),
-            p("Hood - Right", &[(0.58,1.52),(0.58,1.72),(0.70,1.82),(0.84,1.76),(0.88,1.55),(0.70,1.49)]),
-            p("Front - Left", &[(0.08,0.72),(0.40,0.72),(0.43,1.10),(0.36,1.34),(0.20,1.40),(0.06,1.20)]),
-            p("Front - Right", &[(0.47,0.72),(0.80,0.72),(0.88,1.20),(0.75,1.40),(0.56,1.34),(0.47,1.10)]),
-            p("Back", &[(0.87,0.72),(1.26,0.72),(1.29,1.14),(1.18,1.39),(0.98,1.43),(0.85,1.17)]),
-            p("Sleeve - Left", &[(0.08,0.12),(0.25,0.14),(0.34,0.58),(0.23,0.70),(0.13,0.48),(0.05,0.20)]),
-            p("Sleeve - Right", &[(0.79,0.12),(0.96,0.14),(1.07,0.58),(0.96,0.70),(0.85,0.48),(0.76,0.20)]),
-            p("Chest Pocket - Left", &[(0.14,0.93),(0.30,0.93),(0.31,1.08),(0.15,1.08)]),
-            p("Chest Pocket - Right", &[(0.57,0.93),(0.73,0.93),(0.74,1.08),(0.58,1.08)]),
-            p("Lower Pocket - Left", &[(0.13,0.76),(0.30,0.76),(0.32,0.89),(0.13,0.89)]),
-            p("Lower Pocket - Right", &[(0.57,0.76),(0.74,0.76),(0.76,0.89),(0.57,0.89)]),
-            p("Center Placket - Left", &[(0.43,0.72),(0.455,0.72),(0.455,1.36),(0.43,1.36)]),
-            p("Center Placket - Right", &[(0.46,0.72),(0.485,0.72),(0.485,1.36),(0.46,1.36)]),
-            p("Collar", &[(0.34,1.40),(0.43,1.44),(0.52,1.44),(0.62,1.40),(0.58,1.34),(0.38,1.34)]),
-            p("Cuff - Left", &[(0.05,0.01),(0.25,0.01),(0.26,0.11),(0.06,0.11)]),
-            p("Cuff - Right", &[(0.78,0.01),(0.98,0.01),(0.99,0.11),(0.79,0.11)]),
-        ],
-        "Hoodie" => {
-            let mut shapes = built_in_garment_shapes("Jacket");
-            shapes.push(p("Kangaroo Pocket", &[(0.02,0.60),(0.64,0.60),(0.60,0.78),(0.08,0.78)]));
-            shapes.push(p("Hood Facing", &[(1.72,1.44),(1.96,1.44),(2.00,1.70),(1.82,1.77)]));
-            shapes
-        }
-        "T-Shirt" => vec![
-            p("Front", &[(0.00,0.52),(0.38,0.52),(0.43,1.18),(0.30,1.28),(0.08,1.28),(-0.05,1.18)]),
-            p("Back", &[(0.57,0.52),(0.95,0.52),(1.00,1.18),(0.87,1.28),(0.65,1.28),(0.52,1.18)]),
-            p("Sleeve - Left", &[(-0.40,0.98),(-0.08,1.22),(0.08,1.14),(-0.10,0.91)]),
-            p("Sleeve - Right", &[(1.05,1.14),(1.21,1.22),(1.53,0.98),(1.43,0.91)]),
-            p("Neck Band", &[(0.34,1.31),(0.62,1.31),(0.59,1.36),(0.37,1.36)]),
-        ],
-        "Pants" => vec![
-            p("Front - Left Leg", &[(0.00,1.42),(0.35,1.42),(0.33,0.86),(0.27,0.48),(0.08,0.48),(0.05,0.92)]),
-            p("Front - Right Leg", &[(0.42,1.42),(0.77,1.42),(0.72,0.92),(0.69,0.48),(0.50,0.48),(0.44,0.86)]),
-            p("Back - Left Leg", &[(0.93,1.42),(1.28,1.42),(1.25,0.86),(1.20,0.48),(1.01,0.48),(0.98,0.92)]),
-            p("Back - Right Leg", &[(1.35,1.42),(1.70,1.42),(1.65,0.92),(1.61,0.48),(1.42,0.48),(1.37,0.86)]),
-            p("Waistband", &[(0.00,1.44),(0.77,1.44),(0.77,1.53),(0.00,1.53)]),
-            p("Pocket Bag", &[(0.15,1.22),(0.29,1.22),(0.27,1.08),(0.17,1.08)]),
-        ],
-        "Skirt" => vec![
-            p("Front Panel", &[(0.10,1.34),(0.54,1.34),(0.75,0.48),(-0.10,0.48)]),
-            p("Back Panel", &[(0.85,1.34),(1.29,1.34),(1.50,0.48),(0.65,0.48)]),
-            p("Waistband", &[(0.10,1.36),(0.54,1.36),(0.54,1.44),(0.10,1.44)]),
-        ],
-        "Dress" => vec![
-            p("Bodice - Front", &[(0.18,1.28),(0.44,1.28),(0.50,0.83),(0.13,0.83)]),
-            p("Bodice - Back", &[(0.68,1.28),(0.94,1.28),(0.99,0.83),(0.63,0.83)]),
-            p("Skirt - Front", &[(0.13,0.81),(0.50,0.81),(0.73,0.34),(-0.10,0.34)]),
-            p("Skirt - Back", &[(0.63,0.81),(0.99,0.81),(1.22,0.34),(0.39,0.34)]),
-            p("Strap - Left", &[(0.20,1.27),(0.25,1.27),(0.22,1.45),(0.18,1.45)]),
-            p("Strap - Right", &[(0.39,1.27),(0.44,1.27),(0.47,1.45),(0.43,1.45)]),
-        ],
-        "Bag" => vec![
-            p("Bag Front", &[(0.05,0.45),(0.62,0.45),(0.66,0.93),(0.01,0.93)]),
-            p("Bag Back", &[(0.78,0.45),(1.35,0.45),(1.39,0.93),(0.74,0.93)]),
-            p("Side Gusset", &[(1.49,0.45),(1.65,0.45),(1.68,0.93),(1.52,0.93)]),
-            p("Handle", &[(0.20,0.96),(0.27,0.96),(0.32,1.22),(0.35,1.29),(0.42,1.29),(0.45,1.22),(0.50,0.96),(0.57,0.96),(0.50,1.27),(0.44,1.36),(0.33,1.36),(0.26,1.27)]),
-        ],
-        "Cap" => vec![
-            p("Crown Panel 1", &[(0.30,0.55),(0.48,0.55),(0.61,1.04),(0.37,1.12)]),
-            p("Crown Panel 2", &[(0.49,0.55),(0.67,0.55),(0.79,1.04),(0.61,1.04)]),
-            p("Crown Panel 3", &[(0.68,0.55),(0.86,0.55),(0.97,1.04),(0.79,1.04)]),
-            p("Crown Panel 4", &[(0.90,0.55),(1.08,0.55),(1.15,1.02),(0.97,1.04)]),
-            p("Brim", &[(0.20,0.47),(1.20,0.47),(1.08,0.29),(0.31,0.29)]),
-        ],
-        "Shoes" => vec![
-            p("Upper - Left", &[(0.02,0.42),(0.20,0.42),(0.30,0.63),(0.54,0.66),(0.57,0.54),(0.42,0.43),(0.12,0.36)]),
-            p("Upper - Right", &[(0.72,0.42),(0.90,0.42),(1.00,0.63),(1.24,0.66),(1.27,0.54),(1.12,0.43),(0.82,0.36)]),
-            p("Sole - Left", &[(0.00,0.34),(0.57,0.34),(0.57,0.40),(0.00,0.40)]),
-            p("Sole - Right", &[(0.70,0.34),(1.27,0.34),(1.27,0.40),(0.70,0.40)]),
-        ],
-        _ => built_in_garment_shapes("Jacket"),
-    }
-}
-
 fn statics_from(colliders: &[Collider]) -> Vec<StaticMeshData> {
     let mut out = Vec::new();
     for collider in colliders {
@@ -745,18 +611,18 @@ fn statics_from(colliders: &[Collider]) -> Vec<StaticMeshData> {
 impl ClothEvoApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = egui::Color32::from_rgb(26, 27, 28);
-        visuals.window_fill = egui::Color32::from_rgb(31, 32, 33);
-        visuals.extreme_bg_color = egui::Color32::from_rgb(17, 18, 19);
-        visuals.faint_bg_color = egui::Color32::from_rgb(39, 40, 41);
-        visuals.code_bg_color = egui::Color32::from_rgb(20, 21, 22);
-        visuals.hyperlink_color = egui::Color32::from_rgb(16, 166, 160);
-        visuals.selection.bg_fill = egui::Color32::from_rgb(16, 102, 100);
-        visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(16, 166, 160));
-        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(34, 35, 36);
-        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(48, 49, 50);
-        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(16, 102, 100);
-        visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_rgb(219, 221, 223);
+        visuals.panel_fill = egui::Color32::from_rgb(15, 19, 35);
+        visuals.window_fill = egui::Color32::from_rgb(23, 27, 45);
+        visuals.extreme_bg_color = egui::Color32::from_rgb(8, 12, 25);
+        visuals.faint_bg_color = egui::Color32::from_rgb(28, 33, 54);
+        visuals.code_bg_color = egui::Color32::from_rgb(11, 16, 31);
+        visuals.hyperlink_color = egui::Color32::from_rgb(255, 180, 65);
+        visuals.selection.bg_fill = egui::Color32::from_rgb(205, 57, 135);
+        visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 193, 80));
+        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(31, 39, 65);
+        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(53, 61, 98);
+        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(205, 57, 135);
+        visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_rgb(236, 232, 219);
         cc.egui_ctx.set_visuals(visuals);
 
         let render_state = cc.wgpu_render_state.clone();
@@ -812,7 +678,7 @@ impl ClothEvoApp {
             capture,
             validation_scene,
             show_metrics: false,
-            workspace: if validation_scene { WorkspaceMode::Simulation } else { WorkspaceMode::Split },
+            workspace: WorkspaceMode::Simulation,
             split_swapped: false,
             split_vertical: false,
             pattern_project: PatternProject::new("Novo projeto"),
@@ -820,9 +686,8 @@ impl ClothEvoApp {
             pattern_spacing: 0.08,
             pattern_polygon_sides: 6,
             pattern_symmetry_axis_x: 0.0,
-            pattern_show_mesh: false,
+            pattern_show_mesh: true,
             selected_piece: 0,
-            selected_material_asset: 0,
             seam_a_piece: 0,
             seam_b_piece: 1,
             seam_sides_a: Vec::new(),
@@ -875,7 +740,7 @@ impl ClothEvoApp {
             placement_drag_selected_body: false,
             gizmo_mode: GizmoMode::Move,
             avatar_guide_texture: None,
-            show_avatar_guide: false,
+            show_avatar_guide: true,
             avatar_guide_backdrop: 0.25,
             avatar_mesh: None,
             avatar_sdf: None,
@@ -909,9 +774,6 @@ impl ClothEvoApp {
             pattern_dirty: false,
             pattern_fit_pending: false,
         };
-        if !app.validation_scene {
-            app.load_library_template("Jacket", false);
-        }
         app.try_load_default_avatar();
         if !app.validation_scene {
             app.focus_camera_preset(CameraPreset::Front, 1360.0 / 840.0);
@@ -1183,465 +1045,140 @@ impl ClothEvoApp {
     }
 
     fn top_navigation(&mut self, ui: &mut egui::Ui) {
-        const ACCENT: egui::Color32 = egui::Color32::from_rgb(230, 190, 57);
-        const TEXT: egui::Color32 = egui::Color32::from_rgb(226, 228, 230);
-        ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
-        ui.style_mut().visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(44, 45, 46);
-        ui.style_mut().visuals.widgets.active.bg_fill = egui::Color32::from_rgb(37, 68, 67);
-        ui.style_mut().spacing.item_spacing = egui::vec2(5.0, 2.0);
+        const ORANGE: egui::Color32 = egui::Color32::from_rgb(255, 170, 53);
+        const PAPER: egui::Color32 = egui::Color32::from_rgb(247, 239, 215);
 
-        let can_undo = !self.pattern_undo.is_empty();
-        let can_redo = !self.pattern_redo.is_empty();
-        let avatar_available = self.avatar_mesh.is_some();
-        let import_pending = self.avatar_import_pending_path.is_some();
+        ui.set_min_height(58.0);
+        let mut render_changed = false;
+        ui.horizontal(|ui| {
+            ui.add_space(2.0);
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("CLOTHEVO").size(23.0).strong().color(PAPER));
+            });
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(8.0);
 
+            if ui.selectable_label(
+                self.workspace == WorkspaceMode::Simulation,
+                egui::RichText::new("3D Viewport").strong(),
+            ).clicked() {
+                self.workspace = WorkspaceMode::Simulation;
+            }
+            if ui.selectable_label(
+                self.workspace == WorkspaceMode::Pattern,
+                egui::RichText::new("2D Viewport").strong(),
+            ).clicked() {
+                self.playing = false;
+                self.workspace = WorkspaceMode::Pattern;
+            }
+            if ui.selectable_label(
+                self.workspace == WorkspaceMode::Placement,
+                egui::RichText::new("Posicionamento 3D").strong(),
+            ).clicked() {
+                self.playing = false;
+                let already_prepared = self.workspace == WorkspaceMode::Placement
+                    && self.using_pattern_sim
+                    && !self.placement_ranges.is_empty();
+                if !already_prepared {
+                    if self.pattern_project.pieces.is_empty() {
+                        self.workspace = WorkspaceMode::Pattern;
+                        self.pattern_message = "Crie pelo menos um molde antes de entrar no posicionamento 3D.".into();
+                    } else if let Err(error) = self.start_pattern_simulation() {
+                        self.pattern_message = error;
+                        self.workspace = WorkspaceMode::Pattern;
+                    }
+                } else {
+                    self.workspace = WorkspaceMode::Placement;
+                }
+            }
+
+            ui.menu_button(
+                egui::RichText::new("View  ↘").strong().color(ORANGE),
+                |ui| {
+                    if ui.selectable_label(self.workspace == WorkspaceMode::Split, "3D + 2D").clicked() {
+                        self.workspace = WorkspaceMode::Split;
+                        self.pattern_fit_pending = true;
+                    }
+                    ui.menu_button("Visualização de malhas e costura", |ui| {
+                        render_changed |= ui.checkbox(&mut self.style.wireframe, "Mostrar malha / wireframe").changed();
+                        render_changed |= ui.checkbox(&mut self.style.seams, "Mostrar linhas de costura").changed();
+                    });
+                    ui.separator();
+                    ui.checkbox(&mut self.show_metrics, "Métricas");
+                },
+            );
+
+        });
+        if render_changed {
+            self.upload_scene();
+        }
+    }
+
+    fn global_toolbar(&mut self, ui: &mut egui::Ui) {
         let mut new_project = false;
         let mut open_project = false;
         let mut save_project = false;
-        let mut save_project_as = false;
-        let mut undo = false;
-        let mut redo = false;
-        let mut toggle_simulation = false;
-        let mut step_simulation = false;
-        let mut reset_simulation = false;
-        let mut enter_placement = false;
-        let mut add_rectangle = false;
-        let mut add_polygon = false;
-        let mut fit_patterns = false;
         let mut import_avatar = false;
         let mut avatar_visibility_changed = false;
-        let mut avatar_wireframe_changed = false;
-        let mut avatar_collision_changed = false;
-        let mut display_changed = false;
-        let mut selected_fabric: Option<FabricPreset> = None;
+        let mut wireframe_changed = false;
+        let mut collision_changed = false;
+        let import_pending = self.avatar_import_pending_path.is_some();
+        let imported_avatar_available = self.avatar_mesh.is_some();
 
-        ui.set_min_height(34.0);
+        ui.set_min_height(42.0);
         ui.horizontal_wrapped(|ui| {
-            ui.add_space(3.0);
-            ui.label(egui::RichText::new("M").size(24.0).strong().color(ACCENT));
-            ui.label(egui::RichText::new("CLOTHEVO").size(14.0).strong().color(TEXT));
-            ui.add_space(8.0);
-            ui.separator();
+            ui.label(egui::RichText::new("PROJETO").size(10.0).strong());
+            new_project = ui.button("Novo Projeto").clicked();
+            open_project = ui.button("Abrir Projeto").clicked();
+            save_project = ui.button("Salvar Projeto").clicked();
 
-            ui.menu_button("File", |ui| {
-                if ui.button("New Project").clicked() { new_project = true; }
-                if ui.button("Open Project…").clicked() { open_project = true; }
-                ui.separator();
-                if ui.button("Save Project").clicked() { save_project = true; }
-                if ui.button("Save Project As…").clicked() { save_project_as = true; }
-            });
-            ui.menu_button("Edit", |ui| {
-                if ui.add_enabled(can_undo, egui::Button::new("Undo  Ctrl+Z")).clicked() { undo = true; }
-                if ui.add_enabled(can_redo, egui::Button::new("Redo  Ctrl+Y")).clicked() { redo = true; }
-            });
-            ui.menu_button("3D Garment", |ui| {
-                if ui.button(if self.playing { "Pause Simulation" } else { "Start Simulation" }).clicked() {
-                    toggle_simulation = true;
-                }
-                if ui.button("Single Step").clicked() { step_simulation = true; }
-                if ui.button("Reset Simulation").clicked() { reset_simulation = true; }
-                ui.separator();
-                if ui.button("3D Positioning Mode…").clicked() { enter_placement = true; }
-            });
-            ui.menu_button("2D Pattern", |ui| {
-                ui.label("Pattern tools");
-                ui.selectable_value(&mut self.pattern_tool, PatternTool::Draw, "Draw");
-                ui.selectable_value(&mut self.pattern_tool, PatternTool::Select, "Select / Edit");
-                ui.checkbox(&mut self.pattern_snap, "Snap to 1 cm grid");
-                ui.separator();
-                if ui.button("Add Rectangle").clicked() { add_rectangle = true; }
-                if ui.button("Add Regular Polygon").clicked() { add_polygon = true; }
-                if ui.button("Fit All Patterns").clicked() { fit_patterns = true; }
-            });
-            ui.menu_button("Sewing", |ui| {
-                ui.label("Sewing tools are available in the 2D Pattern editor.");
-                ui.label("Create Seam — not yet available in this menu.");
-                ui.label("Unpick Seam — not yet available in this menu.");
-                ui.label("Automatic Sewing — not yet available in this menu.");
-            });
-            ui.menu_button("Materials", |ui| {
-                ui.label("Simulation fabric presets");
-                for fabric in FabricPreset::ALL {
-                    if ui.selectable_label(self.preset == fabric, fabric.name()).clicked() {
-                        selected_fabric = Some(fabric);
-                    }
-                }
-                ui.separator();
-                ui.label("Full material library — not yet implemented.");
-            });
-            ui.menu_button("Avatar", |ui| {
-                avatar_visibility_changed = ui.checkbox(&mut self.avatar_visible, "Show Avatar").changed();
-                avatar_wireframe_changed = ui.add_enabled(
-                    avatar_available,
-                    egui::Checkbox::new(&mut self.avatar_wireframe, "Wireframe"),
-                ).on_hover_text("Available after importing an OBJ or FBX avatar mesh.").changed();
-                avatar_collision_changed = ui.checkbox(
-                    &mut self.avatar_collision_enabled,
-                    "Use Avatar as Collision Surface",
-                ).changed();
-                ui.separator();
-                if ui.add_enabled(!import_pending, egui::Button::new("Import Avatar (.OBJ / .FBX)…")).clicked() {
-                    import_avatar = true;
-                }
-                if import_pending {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Importing avatar…");
-                    });
-                }
-            });
-            ui.menu_button("Display", |ui| {
-                display_changed |= ui.checkbox(&mut self.style.wireframe, "Show Mesh Wireframe").changed();
-                display_changed |= ui.checkbox(&mut self.style.seams, "Show Seam Lines").changed();
-                ui.checkbox(&mut self.show_metrics, "Metrics Panel");
-                ui.separator();
-                if ui.button("3D + 2D Viewports").clicked() {
-                    self.workspace = WorkspaceMode::Split;
-                }
-            });
-            ui.menu_button("Preferences", |ui| {
-                ui.label("Preferences");
-                ui.label("Interface themes and shortcuts are not yet implemented.");
-            });
-            ui.menu_button("Settings", |ui| {
-                ui.label("Application Settings");
-                ui.label("General and simulation defaults are not yet implemented.");
-            });
-            ui.menu_button("Help", |ui| {
-                ui.label("Documentation and About are not yet implemented.");
-            });
-            ui.menu_button(if self.playing { "Ⅱ SIMULATION" } else { "▶ SIMULATION" }, |ui| {
-                if ui.button(if self.playing { "Pause" } else { "Start" }).clicked() { toggle_simulation = true; }
-                if ui.button("Single Step").clicked() { step_simulation = true; }
-                if ui.button("Reset").clicked() { reset_simulation = true; }
-            });
+            ui.separator();
+            ui.label(egui::RichText::new("AVATAR").size(10.0).strong());
+            avatar_visibility_changed |= ui.checkbox(&mut self.avatar_visible, "Exibir Avatar").changed();
+            wireframe_changed |= ui.add_enabled(
+                imported_avatar_available,
+                egui::Checkbox::new(&mut self.avatar_wireframe, "Wireframe"),
+            ).on_hover_text("Disponível após importar uma malha OBJ ou FBX.").changed();
+            collision_changed |= ui.checkbox(
+                &mut self.avatar_collision_enabled,
+                "Usar Avatar como Superfície de Colisão",
+            ).changed();
+            import_avatar = ui.add_enabled(
+                !import_pending,
+                egui::Button::new("Importar Avatar (.OBJ / .FBX)…"),
+            ).clicked();
+
+            if import_pending {
+                ui.spinner();
+                ui.label("Importando avatar…");
+            }
         });
 
-        if new_project { self.new_pattern_project(); }
-        if open_project { self.open_pattern_project_dialog(); }
-        if save_project { self.save_pattern_project(); }
-        if save_project_as { self.save_pattern_project_as(); }
-        if undo { self.undo_pattern_edit(); }
-        if redo { self.redo_pattern_edit(); }
+        if new_project {
+            self.new_pattern_project();
+        }
+        if open_project {
+            self.open_pattern_project_dialog();
+        }
+        if save_project {
+            self.save_pattern_project();
+        }
 
-        if toggle_simulation {
-            if self.diverged {
-                self.sim.reset();
-                self.accumulator = 0.0;
-                self.diverged = false;
-                self.playing = true;
-            } else {
-                self.playing = !self.playing;
-            }
-        }
-        if step_simulation {
-            self.playing = false;
-            self.accumulator = 0.0;
-            self.sim.step(FIXED_DT);
-            self.last_step_ms = self.sim.stats.step_ms;
-            if !self.sim.is_finite() {
-                self.sim.reset();
-                self.last_step_ms = 0.0;
-                self.diverged = true;
-            }
-        }
-        if reset_simulation {
-            self.sim.reset();
-            self.last_step_ms = 0.0;
-            self.playing = false;
-            self.diverged = false;
-            self.accumulator = 0.0;
-        }
-        if enter_placement {
-            self.playing = false;
-            if self.pattern_project.pieces.is_empty() {
-                self.pattern_message = "Create at least one pattern in 2D Pattern before entering positioning mode.".into();
-                self.workspace = WorkspaceMode::Split;
-            } else if let Err(error) = self.start_pattern_simulation() {
-                self.pattern_message = error;
-                self.workspace = WorkspaceMode::Split;
-            } else {
-                self.workspace = WorkspaceMode::Placement;
-            }
-        }
-        if add_rectangle { self.create_rectangle_primitive(); }
-        if add_polygon { self.create_regular_polygon_primitive(); }
-        if fit_patterns { self.pattern_fit_pending = true; }
-        if let Some(fabric) = selected_fabric {
-            self.preset = fabric;
-            fabric.apply(&mut self.sim.params);
+        if avatar_visibility_changed || wireframe_changed || collision_changed {
             self.pattern_dirty = true;
         }
-        if avatar_visibility_changed || avatar_wireframe_changed || avatar_collision_changed {
-            self.pattern_dirty = true;
-        }
-        if avatar_collision_changed {
+        if collision_changed {
             if let Err(error) = self.sync_pattern_avatar_colliders() {
-                self.pattern_message = format!("Could not update avatar collision: {error}");
+                self.pattern_message = format!("Não foi possível atualizar a colisão do avatar: {error}");
             }
         }
-        if avatar_visibility_changed || avatar_wireframe_changed || avatar_collision_changed || display_changed {
+        if avatar_visibility_changed || wireframe_changed || collision_changed {
             self.upload_scene();
         }
-        if import_avatar { self.import_avatar_dialog(); }
-    }
-
-    fn library_panel(&mut self, ui: &mut egui::Ui) {
-        let mut selected_template: Option<String> = None;
-        let mut import_avatar = false;
-
-        ui.horizontal(|ui| {
-            ui.heading("Library");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new("ASSETS").size(9.0).color(egui::Color32::GRAY));
-            });
-        });
-        ui.separator();
-
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::CollapsingHeader::new("Garment")
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.label(egui::RichText::new("Starter patterns").size(10.0).color(egui::Color32::GRAY));
-                    egui::Grid::new("garment_library_grid")
-                        .num_columns(2)
-                        .spacing(egui::vec2(5.0, 7.0))
-                        .show(ui, |ui| {
-                            let templates = ["Jacket", "Hoodie", "T-Shirt", "Pants", "Skirt", "Dress", "Bag", "Cap", "Shoes"];
-                            for (index, template) in templates.iter().enumerate() {
-                                ui.vertical_centered(|ui| {
-                                    let width = ((ui.available_width() - 5.0) * 0.5).clamp(48.0, 78.0);
-                                    let (rect, response) = ui.allocate_exact_size(
-                                        egui::vec2(width, 56.0),
-                                        egui::Sense::click(),
-                                    );
-                                    let active = self.pattern_project.name.starts_with(template)
-                                        || (*template == "Jacket" && self.pattern_project.name.contains("Techwear_Jacket"));
-                                    let painter = ui.painter_at(rect);
-                                    painter.rect_filled(
-                                        rect,
-                                        3.0,
-                                        if active {
-                                            egui::Color32::from_rgb(43, 62, 63)
-                                        } else {
-                                            egui::Color32::from_rgb(33, 34, 35)
-                                        },
-                                    );
-                                    painter.rect_stroke(
-                                        rect,
-                                        3.0,
-                                        egui::Stroke::new(
-                                            1.0,
-                                            if active { egui::Color32::from_rgb(16, 166, 160) }
-                                            else { egui::Color32::from_rgb(54, 56, 58) },
-                                        ),
-                                        egui::StrokeKind::Inside,
-                                    );
-                                    paint_garment_thumbnail(&painter, rect.shrink(3.0), template);
-                                    let _ = response.clone().on_hover_text(format!("Load {template} starter patterns"));
-                                    if response.clicked() {
-                                        selected_template = Some((*template).to_owned());
-                                    }
-                                    if ui.add(
-                                        egui::Button::new(egui::RichText::new(*template).size(10.0))
-                                            .min_size(egui::vec2(width, 18.0)),
-                                    ).clicked() {
-                                        selected_template = Some((*template).to_owned());
-                                    }
-                                });
-                                if index % 2 == 1 {
-                                    ui.end_row();
-                                }
-                            }
-                        });
-                    ui.weak("Starter panels are editable. Add seam pairs before final garment simulation.");
-                });
-
-            egui::CollapsingHeader::new("Avatar")
-                .default_open(false)
-                .show(ui, |ui| {
-                    if let Some(name) = self.avatar_mesh_name.as_deref() {
-                        ui.label(name);
-                    } else {
-                        ui.weak("Procedural mannequin");
-                    }
-                    if ui.button("Import OBJ / FBX…").clicked() {
-                        import_avatar = true;
-                    }
-                });
-
-            for category in ["Hanger", "Fabric", "Hardware", "Material", "Stage"] {
-                egui::CollapsingHeader::new(category)
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        let message = match category {
-                            "Fabric" => "Fabric assets are listed in the Fabric panel.",
-                            "Material" => "Material asset editing is not implemented yet.",
-                            "Hanger" => "Hanger assets are not implemented yet.",
-                            "Hardware" => "Hardware assets are not implemented yet.",
-                            _ => "Stage assets are not implemented yet.",
-                        };
-                        ui.label(egui::RichText::new(message).size(10.0).color(egui::Color32::GRAY));
-                    });
-            }
-        });
-
         if import_avatar {
             self.import_avatar_dialog();
         }
-        if let Some(template) = selected_template {
-            self.load_library_template(&template, true);
-        }
-    }
-
-    fn inspector_panel(&mut self, ui: &mut egui::Ui) {
-        let material_assets = [
-            ("Primary_Nylon", egui::Color32::from_rgb(33, 35, 39)),
-            ("Lining_Ripstop", egui::Color32::from_rgb(117, 120, 123)),
-            ("Mesh", egui::Color32::from_rgb(65, 68, 70)),
-            ("Webbing", egui::Color32::from_rgb(77, 79, 81)),
-            ("Zipper", egui::Color32::from_rgb(93, 96, 99)),
-            ("Velcro", egui::Color32::from_rgb(14, 15, 16)),
-        ];
-
-        ui.heading("Fabric");
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("MATERIAL LAYERS").size(9.0).color(egui::Color32::GRAY));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new("6").size(9.0).color(egui::Color32::GRAY));
-            });
-        });
-
-        for (index, (name, swatch)) in material_assets.iter().enumerate() {
-            let selected = self.selected_material_asset == index;
-            ui.horizontal(|ui| {
-                let (swatch_rect, _) = ui.allocate_exact_size(egui::vec2(27.0, 22.0), egui::Sense::hover());
-                ui.painter().rect_filled(swatch_rect, 2.0, *swatch);
-                ui.painter().rect_stroke(
-                    swatch_rect,
-                    2.0,
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(77, 79, 81)),
-                    egui::StrokeKind::Inside,
-                );
-                if ui.selectable_label(selected, *name).clicked() {
-                    self.selected_material_asset = index;
-                }
-            });
-        }
-        ui.weak("Material swatches are library placeholders; shader/material binding is not implemented yet.");
-
-        egui::CollapsingHeader::new("Simulation Fabric Presets")
-            .default_open(false)
-            .show(ui, |ui| {
-                for fabric in FabricPreset::ALL {
-                    if ui.selectable_label(self.preset == fabric, fabric.name()).clicked() {
-                        self.preset = fabric;
-                        fabric.apply(&mut self.sim.params);
-                        self.pattern_dirty = true;
-                    }
-                }
-            });
-
-        ui.separator();
-        ui.heading("Property Editor");
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::CollapsingHeader::new("Project")
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.label(format!("Name: {}", self.pattern_project.name));
-                    ui.label(format!("Pattern pieces: {}", self.pattern_project.pieces.len()));
-                    ui.label(format!("Seams: {}", self.pattern_project.seams.len()));
-                    ui.label(format!("Units: {}", self.pattern_project.units.label()));
-                    if self.pattern_dirty {
-                        ui.colored_label(egui::Color32::from_rgb(224, 173, 68), "Unsaved changes");
-                    } else if self.pattern_saved_path.is_some() {
-                        ui.label("Project saved");
-                    } else {
-                        ui.label("Built-in template · use File > Save Project to create a file");
-                    }
-                });
-
-            if let Some(piece) = self.pattern_project.pieces.get(self.selected_piece) {
-                let selected_name = piece.name.clone();
-                let selected_id = piece.id;
-                let selected_layer = piece.layer;
-                let segment_count = piece.outline.segments.len();
-                let points = sample_curve(&piece.outline, 16);
-                let outline_length = points.windows(2)
-                    .map(|pair| pair[0].distance(pair[1]))
-                    .sum::<f64>();
-                let min_x = points.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
-                let max_x = points.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
-                let min_y = points.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
-                let max_y = points.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
-
-                ui.separator();
-                egui::CollapsingHeader::new("Selected Pattern")
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        ui.label(format!("Name: {selected_name}"));
-                        ui.label(format!("Item No.: {selected_id}"));
-                        ui.label(format!("Layer: {selected_layer}"));
-                        ui.label(format!("Outline segments: {segment_count}"));
-                        ui.label(format!("2D Outline Length: {:.2} mm", outline_length * 1000.0));
-                        if min_x.is_finite() && min_y.is_finite() {
-                            ui.label(format!("Width: {:.1} mm", (max_x - min_x) * 1000.0));
-                            ui.label(format!("Height: {:.1} mm", (max_y - min_y) * 1000.0));
-                        }
-                        let mut changed = false;
-                        if let Some(piece) = self.pattern_project.pieces.get_mut(self.selected_piece) {
-                            changed |= ui.add(
-                                egui::Slider::new(&mut piece.seam_allowance_meters, 0.0..=0.04)
-                                    .text("Seam Allowance (m)"),
-                            ).changed();
-                            changed |= ui.add(
-                                egui::Slider::new(&mut piece.fabric.particle_distance_meters, 0.005..=0.10)
-                                    .text("Particle Distance (m)"),
-                            ).changed();
-                        }
-                        if changed {
-                            self.pattern_dirty = true;
-                        }
-                    });
-            } else {
-                ui.separator();
-                ui.weak("Select a pattern in Library or load a starter garment.");
-            }
-
-            egui::CollapsingHeader::new("Selected Line")
-                .default_open(false)
-                .show(ui, |ui| {
-                    ui.label("Select an outline edge in the 2D Pattern viewport to inspect its geometry.");
-                    ui.label("Line-specific elastic and seam-taping controls are not implemented yet.");
-                });
-
-            egui::CollapsingHeader::new("Simulation Properties")
-                .default_open(false)
-                .show(ui, |ui| {
-                    ui.label(format!("Solver: XPBD"));
-                    ui.label(format!("Steps: {}", self.sim.stats.steps));
-                    ui.label(format!("Last step: {:.2} ms", self.last_step_ms));
-                    ui.label(format!("Fabric preset: {}", self.preset.name()));
-                    ui.label("Per-pattern material bindings are not implemented yet.");
-                });
-
-            if let Some(name) = self.avatar_mesh_name.as_deref() {
-                egui::CollapsingHeader::new("Avatar")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        ui.label(name);
-                        if let Some(diag) = self.avatar_diagnostics.as_ref() {
-                            ui.label(format!("{} vertices · {} triangles", diag.vertex_count, diag.triangle_count));
-                            ui.label(format!(
-                                "Dimensions: {:.2} × {:.2} × {:.2} m",
-                                diag.dimensions_meters[0],
-                                diag.dimensions_meters[1],
-                                diag.dimensions_meters[2],
-                            ));
-                        }
-                    });
-            }
-        });
     }
 
     fn environment_controls(&mut self, ui: &mut egui::Ui) {
@@ -1889,7 +1426,7 @@ impl ClothEvoApp {
         ui.weak("Selecione a ferramenta pelos ícones na barra vertical da viewport.");
         ui.horizontal(|ui| {
             if ui.button("Voltar ao 2D Viewport").clicked() {
-                self.workspace = WorkspaceMode::Split;
+                self.workspace = WorkspaceMode::Pattern;
                 self.playing = false;
             }
             if ui.button("Atualizar prévia").clicked() {
@@ -2574,7 +2111,7 @@ impl ClothEvoApp {
         if !self.confirm_discard_unsaved_changes() { return; }
         let avatar_path = self.avatar_mesh_path.clone();
         self.pattern_project = PatternProject::new("Novo projeto");
-        self.workspace = WorkspaceMode::Split;
+        self.workspace = WorkspaceMode::Pattern;
         self.playing = false;
         self.draft_points.clear();
         self.selected_piece = 0;
@@ -2641,7 +2178,7 @@ impl ClothEvoApp {
             Ok((project, app_state)) => {
                 if !self.confirm_discard_unsaved_changes() { return; }
                 self.pattern_project = project;
-                self.workspace = WorkspaceMode::Split;
+                self.workspace = WorkspaceMode::Pattern;
                 self.playing = false;
                 self.draft_points.clear();
                 self.selected_piece = 0;
@@ -4091,62 +3628,6 @@ impl ClothEvoApp {
         }
     }
 
-    fn load_library_template(&mut self, template: &str, confirm_changes: bool) {
-        if confirm_changes && !self.confirm_discard_unsaved_changes() {
-            return;
-        }
-
-        let project_name = match template {
-            "Jacket" => "Techwear_Jacket",
-            "T-Shirt" => "T-Shirt",
-            other => other,
-        };
-        let shapes = built_in_garment_shapes(template);
-        if shapes.is_empty() {
-            self.pattern_message = format!("No starter shapes are available for {template} yet.");
-            return;
-        }
-
-        self.pattern_project = PatternProject::new(project_name);
-        for (index, (name, points)) in shapes.into_iter().enumerate() {
-            let id = index as u64 + 1;
-            match PatternPiece::from_polygon(id, name, &points) {
-                Ok(mut piece) => {
-                    piece.fabric.particle_distance_meters = 0.015;
-                    piece.seam_allowance_meters = 0.010;
-                    self.pattern_project.pieces.push(piece);
-                }
-                Err(error) => {
-                    self.pattern_message = format!("Could not create {template} pattern: {error}");
-                    self.pattern_project.pieces.clear();
-                    return;
-                }
-            }
-        }
-
-        self.draft_points.clear();
-        self.selected_piece = 0;
-        self.selected_target = None;
-        self.selected_material_asset = 0;
-        self.pattern_saved_path = None;
-        self.pattern_undo.clear();
-        self.pattern_redo.clear();
-        self.dragging_target = None;
-        self.dragging_before = None;
-        self.drag_last_world = None;
-        self.pattern_dirty = confirm_changes;
-        self.pattern_fit_pending = true;
-        self.pattern_tool = PatternTool::Select;
-        self.workspace = WorkspaceMode::Split;
-        self.playing = false;
-        self.reset_to_empty_environment();
-        self.pattern_message = if confirm_changes {
-            format!("{template} starter patterns loaded. Pair the seam edges before final garment simulation.")
-        } else {
-            String::new()
-        };
-    }
-
     fn set_symmetry_axis_to_min_x(&mut self) {
         let Some(piece) = self.pattern_project.pieces.get(self.selected_piece) else {
             self.pattern_message = "Crie ou selecione um molde primeiro.".into();
@@ -5292,38 +4773,31 @@ impl ClothEvoApp {
             let outline_color = if selected_piece {
                 egui::Color32::from_rgb(108, 205, 255)
             } else {
-                egui::Color32::from_rgb(204, 207, 209)
+                egui::Color32::from_rgb(91, 183, 245)
             };
 
-            // Preenchimento por triângulos mantém contornos côncavos corretos; a grade da
-            // triangulação fica opcional para que a folha de moldes abra limpa como na referência.
-            if let Ok(mesh) = triangulate_outline(points, self.pattern_spacing) {
-                for triangle in &mesh.triangles {
-                    let a = to_screen(mesh.vertices[triangle[0] as usize]);
-                    let b = to_screen(mesh.vertices[triangle[1] as usize]);
-                    let c = to_screen(mesh.vertices[triangle[2] as usize]);
-                    painter.add(egui::Shape::convex_polygon(
-                        vec![a, b, c],
-                        egui::Color32::from_rgb(69, 71, 72),
-                        egui::Stroke::NONE,
-                    ));
-                    if self.pattern_show_mesh {
-                        let stroke = egui::Stroke::new(0.7, egui::Color32::from_rgb(89, 99, 103));
-                        painter.line_segment([a, b], stroke);
-                        painter.line_segment([b, c], stroke);
-                        painter.line_segment([c, a], stroke);
-                    }
-                }
-            }
-
-            // Margem de costura em verde, separada do contorno de corte.
+            // Contorno de corte em azul; margem de costura independente em verde.
             if piece.seam_allowance_meters > 0.0 {
                 if let Ok(margin) = offset_polygon(points, piece.seam_allowance_meters) {
                     for i in 0..margin.len() {
                         painter.line_segment(
                             [to_screen(margin[i]), to_screen(margin[(i + 1) % margin.len()])],
-                            egui::Stroke::new(1.2, egui::Color32::from_rgb(104, 156, 121)),
+                            egui::Stroke::new(1.5, egui::Color32::from_rgb(104, 196, 131)),
                         );
+                    }
+                }
+            }
+
+            if self.pattern_show_mesh {
+                if let Ok(mesh) = triangulate_outline(points, self.pattern_spacing) {
+                    for triangle in &mesh.triangles {
+                        let a = to_screen(mesh.vertices[triangle[0] as usize]);
+                        let b = to_screen(mesh.vertices[triangle[1] as usize]);
+                        let c = to_screen(mesh.vertices[triangle[2] as usize]);
+                        let stroke = egui::Stroke::new(0.7, egui::Color32::from_rgb(63, 91, 105));
+                        painter.line_segment([a, b], stroke);
+                        painter.line_segment([b, c], stroke);
+                        painter.line_segment([c, a], stroke);
                     }
                 }
             }
@@ -6409,7 +5883,7 @@ impl ClothEvoApp {
         first
             .resizable(true)
             .frame(egui::Frame::NONE)
-            .default_size(total * 0.48)
+            .default_size(total * 0.5)
             .size_range(egui::Rangef::new(MIN_PANE, max_first))
             .show(ui, |ui| self.split_pane(ui, pattern_first));
         egui::CentralPanel::default()
@@ -6418,58 +5892,11 @@ impl ClothEvoApp {
     }
 
     fn split_pane(&mut self, ui: &mut egui::Ui, pattern: bool) {
-        egui::Frame::new()
-            .fill(egui::Color32::from_rgb(25, 26, 27))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(65, 67, 69)))
-            .inner_margin(egui::Margin::same(3))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if pattern {
-                        ui.label(egui::RichText::new("2D Pattern Window").strong());
-                        ui.separator();
-                        if ui.selectable_label(self.pattern_tool == PatternTool::Draw, "Draw").clicked() {
-                            self.pattern_tool = PatternTool::Draw;
-                        }
-                        if ui.selectable_label(self.pattern_tool == PatternTool::Select, "Select").clicked() {
-                            self.pattern_tool = PatternTool::Select;
-                        }
-                        if ui.small_button("Fit").clicked() {
-                            self.pattern_fit_pending = true;
-                        }
-                    } else {
-                        ui.label(egui::RichText::new("3D Garment").strong());
-                        ui.separator();
-                        ui.label(egui::RichText::new("Perspective").color(egui::Color32::GRAY));
-                        if ui.small_button("Front").clicked() {
-                            let aspect = ui.available_width() / ui.available_height().max(1.0);
-                            self.focus_camera_preset(CameraPreset::Front, aspect);
-                        }
-                        if ui.small_button("Side").clicked() {
-                            let aspect = ui.available_width() / ui.available_height().max(1.0);
-                            self.focus_camera_preset(CameraPreset::Side, aspect);
-                        }
-                        if ui.small_button("Top").clicked() {
-                            let aspect = ui.available_width() / ui.available_height().max(1.0);
-                            self.focus_camera_preset(CameraPreset::Top, aspect);
-                        }
-                        ui.menu_button("Show", |ui| {
-                            let mut changed = false;
-                            changed |= ui.checkbox(&mut self.style.wireframe, "Mesh Wireframe").changed();
-                            changed |= ui.checkbox(&mut self.style.seams, "Seam Lines").changed();
-                            changed |= ui.checkbox(&mut self.avatar_visible, "Avatar").changed();
-                            if changed {
-                                self.upload_scene();
-                            }
-                        });
-                    }
-                });
-                ui.separator();
-                if pattern {
-                    self.pattern_viewport(ui);
-                } else {
-                    self.viewport(ui);
-                }
-            });
+        if pattern {
+            self.pattern_viewport(ui);
+        } else {
+            self.viewport(ui);
+        }
     }
 
     fn camera_focus_bounds(&self) -> Option<(Vec3, f32)> {
@@ -6646,7 +6073,7 @@ impl ClothEvoApp {
             .collect();
 
         // Fundo neutro atrás da cena (o chão desenhado pelo renderer cobre a parte de baixo).
-        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(35, 36, 37));
+        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(52, 60, 74));
         let view_proj = self.camera.view_proj(aspect);
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
@@ -8056,7 +7483,7 @@ impl eframe::App for ClothEvoApp {
             if self.camera.approach(&goal, camera_dt) { self.camera_goal = None; }
             else { ui.ctx().request_repaint(); }
         }
-        if matches!(self.workspace, WorkspaceMode::Pattern | WorkspaceMode::Split) {
+        if self.workspace == WorkspaceMode::Pattern {
             let (undo, redo) = ui.input(|i| (
                 i.modifiers.ctrl && i.key_pressed(egui::Key::Z) && !i.modifiers.shift,
                 (i.modifiers.ctrl && i.key_pressed(egui::Key::Y))
@@ -8074,41 +7501,30 @@ impl eframe::App for ClothEvoApp {
 
         egui::Panel::top("main_navigation")
             .frame(egui::Frame::new()
-                .fill(egui::Color32::from_rgb(23, 24, 25))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(43, 44, 45)))
-                .inner_margin(egui::Margin::symmetric(10, 4)))
+                .fill(egui::Color32::from_rgb(18, 54, 150))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 170, 53)))
+                .inner_margin(egui::Margin::symmetric(14, 8)))
             .show(ui, |ui| self.top_navigation(ui));
 
-        egui::Panel::bottom("status_bar")
+        egui::Panel::top("global_toolbar")
             .frame(egui::Frame::new()
-                .fill(egui::Color32::from_rgb(22, 23, 24))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(43, 44, 45)))
-                .inner_margin(egui::Margin::symmetric(8, 3)))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let status = if self.playing { "Simulation Running" } else { "Simulation Ready" };
-                    ui.label(egui::RichText::new(status).size(10.0).color(egui::Color32::GRAY));
-                    if self.pattern_dirty {
-                        ui.label(egui::RichText::new("· Unsaved Changes").size(10.0).color(egui::Color32::from_rgb(224, 173, 68)));
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new(self.pattern_project.units.label().to_uppercase()).size(10.0).color(egui::Color32::GRAY));
-                    });
-                });
-            });
+                .fill(egui::Color32::from_rgb(20, 25, 39))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(54, 63, 91)))
+                .inner_margin(egui::Margin::symmetric(14, 5)))
+            .show(ui, |ui| self.global_toolbar(ui));
 
         if self.show_metrics {
             egui::Panel::bottom("view_metrics")
                 .resizable(true)
                 .default_size(155.0)
                 .frame(egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(22, 23, 24))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(56, 58, 60)))
+                    .fill(egui::Color32::from_rgb(12, 16, 29))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(54, 63, 91)))
                     .inner_margin(egui::Margin::same(10)))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Metrics").strong());
-                        if ui.small_button("Close ×").clicked() {
+                        ui.label(egui::RichText::new("Métricas").strong());
+                        if ui.small_button("Fechar ×").clicked() {
                             self.show_metrics = false;
                         }
                     });
@@ -8116,25 +7532,9 @@ impl eframe::App for ClothEvoApp {
                 });
         }
 
-        egui::Panel::left("library_panel")
-            .resizable(true)
-            .default_size(138.0)
-            .size_range(egui::Rangef::new(118.0, 230.0))
-            .frame(egui::Frame::new()
-                .fill(egui::Color32::from_rgb(27, 28, 29))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(47, 48, 49)))
-                .inner_margin(egui::Margin::same(7)))
-            .show(ui, |ui| self.library_panel(ui));
-
-        egui::Panel::right("property_inspector")
-            .resizable(true)
-            .default_size(236.0)
-            .size_range(egui::Rangef::new(210.0, 340.0))
-            .frame(egui::Frame::new()
-                .fill(egui::Color32::from_rgb(27, 28, 29))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(47, 48, 49)))
-                .inner_margin(egui::Margin::same(7)))
-            .show(ui, |ui| self.inspector_panel(ui));
+        egui::Panel::left("controls").default_size(310.0).show(ui, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui));
+        });
         if was_simulation_workspace {
             self.advance(dt);
         }
