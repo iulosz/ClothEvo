@@ -31,6 +31,8 @@ impl Default for UiCustomization {
 pub struct ThemeSettings {
     pub panel_bg: [u8; 3],
     pub window_bg: [u8; 3],
+    pub navigation_bg: [u8; 3],
+    pub toolbar_bg: [u8; 3],
     pub deep_bg: [u8; 3],
     pub muted_bg: [u8; 3],
     pub text: [u8; 3],
@@ -53,6 +55,8 @@ impl Default for ThemeSettings {
         Self {
             panel_bg: [15, 19, 35],
             window_bg: [23, 27, 45],
+            navigation_bg: [18, 54, 150],
+            toolbar_bg: [20, 25, 39],
             deep_bg: [8, 12, 25],
             muted_bg: [28, 33, 54],
             text: [236, 232, 219],
@@ -73,6 +77,8 @@ impl ThemeSettings {
         Self {
             panel_bg: [34, 35, 36],
             window_bg: [27, 28, 29],
+            navigation_bg: [29, 30, 31],
+            toolbar_bg: [24, 25, 26],
             deep_bg: [20, 21, 22],
             muted_bg: [43, 44, 45],
             text: [224, 226, 228],
@@ -89,6 +95,8 @@ impl ThemeSettings {
 
     pub fn amethyst() -> Self {
         Self {
+            navigation_bg: [57, 39, 78],
+            toolbar_bg: [32, 28, 41],
             accent: [181, 126, 255],
             selection: [104, 66, 154],
             button_bg: [43, 36, 60],
