@@ -1075,7 +1075,7 @@ impl ClothEvoApp {
             }
 
             ui.menu_button(
-                egui::RichText::new("VIEW  ↘").strong().color(ORANGE),
+                egui::RichText::new("View  ↘").strong().color(ORANGE),
                 |ui| {
                     if ui.selectable_label(self.workspace == WorkspaceMode::Split, "3D + 2D").clicked() {
                         self.workspace = WorkspaceMode::Split;
@@ -1173,7 +1173,10 @@ impl ClothEvoApp {
                     visibility_changed = ui.checkbox(&mut self.avatar_visible, "Exibir avatar").changed();
                     collision_changed = ui.checkbox(&mut self.avatar_collision_enabled, "Usar avatar como superfície de colisão").changed();
                 } else {
-                    ui.weak("Manequim procedural ativo; nenhum arquivo externo foi encontrado no caminho padrão.");
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 170, 53),
+                        "Nenhum Sarah.fbx/OBJ padrão foi encontrado. A sessão continua com o avatar procedural; importe um modelo para usar sua malha visual e colisão.",
+                    );
                 }
                 if self.pattern_project.pieces.is_empty() {
                     ui.weak("Próximo passo: criar os moldes em Moldes 2D.");
@@ -2127,8 +2130,8 @@ impl ClothEvoApp {
     }
 
     fn pattern_controls(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Pattern Studio 0.4 · Geometria vetorial");
-        ui.label("Editor 2D · medidas internas em metros");
+        ui.heading("MOLDES 2D · GEOMETRIA VETORIAL");
+        ui.label("Editor de moldes · medidas internas em metros");
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.pattern_tool, PatternTool::Draw, "Desenhar");
             ui.selectable_value(&mut self.pattern_tool, PatternTool::Select, "Selecionar / editar");

@@ -1,4 +1,4 @@
-# ClothEvo — Pattern Studio + XPBD
+# ClothEvo — Surreal Textile Lab + XPBD
 
 Aplicação desktop em Rust, organizada em seis crates, para criação de moldes 2D, montagem de roupas
 em 3D e simulação XPBD. O Pattern Studio inclui curvas lineares/Bézier, triangulação CDT, costuras,
@@ -32,7 +32,7 @@ O wgpu escolhe sozinho Vulkan, DX12 ou Metal. Para forçar um: `WGPU_BACKEND=vul
 
 ## Interface de trabalho
 
-A interface usa uma identidade editorial surrealista com azul-cobalto, magenta e acentos ocre. A navegação superior organiza **Ambiente 3D**, **Moldes 2D**, **Posicionamento 3D** e o menu **View**. Em View, **3D + 2D** abre as duas viewports, **Visualização de malhas e costura** controla wireframe e costuras, e **Métricas** mostra os diagnósticos do solver num painel inferior redimensionável.
+A interface usa uma identidade editorial surrealista com azul-cobalto, magenta e acentos ocre. A navegação superior organiza **Ambiente 3D**, **Moldes 2D**, **Posicionamento 3D** e o menu **View**. O painel Moldes 2D identifica diretamente o editor de geometria vetorial, e o estado do avatar padrão é destacado quando o arquivo externo não está disponível. Em View, **3D + 2D** abre as duas viewports, **Visualização de malhas e costura** controla wireframe e costuras, e **Métricas** mostra os diagnósticos do solver num painel inferior redimensionável.
 
 Uma sessão comum inicia no Ambiente 3D com chão e avatar procedural; se um arquivo padrão `Sarah.fbx` estiver num dos caminhos de recursos examinados, ele é carregado automaticamente. A cena de benchmark/demonstração não é carregada como a experiência normal; as cenas internas permanecem disponíveis para testes e captura por `CLOTHEVO_SCENE`.
 
