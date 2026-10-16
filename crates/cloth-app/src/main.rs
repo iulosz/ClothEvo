@@ -483,6 +483,7 @@ struct ClothEvoApp {
     pattern_symmetry_axis_x: f64,
     pattern_show_mesh: bool,
     selected_piece: usize,
+    selected_material_asset: usize,
     seam_a_piece: usize,
     seam_b_piece: usize,
     seam_sides_a: Vec<EdgePath>,
@@ -688,6 +689,7 @@ impl ClothEvoApp {
             pattern_symmetry_axis_x: 0.0,
             pattern_show_mesh: true,
             selected_piece: 0,
+            selected_material_asset: 0,
             seam_a_piece: 0,
             seam_b_piece: 1,
             seam_sides_a: Vec::new(),
@@ -740,7 +742,7 @@ impl ClothEvoApp {
             placement_drag_selected_body: false,
             gizmo_mode: GizmoMode::Move,
             avatar_guide_texture: None,
-            show_avatar_guide: true,
+            show_avatar_guide: false,
             avatar_guide_backdrop: 0.25,
             avatar_mesh: None,
             avatar_sdf: None,
@@ -774,6 +776,9 @@ impl ClothEvoApp {
             pattern_dirty: false,
             pattern_fit_pending: false,
         };
+        if !app.validation_scene {
+            app.load_library_template("Jacket", false);
+        }
         app.try_load_default_avatar();
         if !app.validation_scene {
             app.focus_camera_preset(CameraPreset::Front, 1360.0 / 840.0);
