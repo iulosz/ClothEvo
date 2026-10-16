@@ -7852,6 +7852,10 @@ fn metrics_panel(app: &ClothEvoApp, ui: &mut egui::Ui) {
 
 impl eframe::App for ClothEvoApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.ui_theme_dirty {
+            self.apply_ui_customization(ui.ctx());
+            self.ui_theme_dirty = false;
+        }
         self.poll_avatar_import();
         if let Some(goal) = self.camera_goal {
             let camera_dt = ui.input(|i| i.stable_dt);
@@ -7887,6 +7891,14 @@ impl eframe::App for ClothEvoApp {
                 .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(54, 63, 91)))
                 .inner_margin(egui::Margin::symmetric(14, 5)))
             .show(ui, |ui| self.global_toolbar(ui));
+
+        if self.ui_customization.toolbar_buttons.iter().any(|button| button.visible) {
+            egui::Panel::top("custom_command_toolbar")
+                .frame(egui::Frame::new()
+                    .fill(ui_rgb(self.ui_customization.theme.panel_bg))
+                    .inner_margin(egui::Margin::symmetric(10, 3)))
+                .show(ui, |ui| self.custom_toolbar(ui));
+        }
 
         if self.show_metrics {
             egui::Panel::bottom("view_metrics")
@@ -7925,6 +7937,7 @@ impl eframe::App for ClothEvoApp {
             }
         });
 
+        self.ui_customizer_window(ui.ctx());
         self.handle_capture(ui);
         if self.diverged && !diverged_before {
             // O diagnóstico foi definido após renderizar o painel de controles deste frame.
@@ -7940,6 +7953,22 @@ impl eframe::App for ClothEvoApp {
 }
 
 
+
+fn ui_rgb(rgb: [u8; 3]) -> egui::Color32 {
+    egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+}
+
+fn edit_ui_rgb(ui: &mut egui::Ui, label: &str, rgb: &mut [u8; 3]) -> bool {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let mut color = ui_rgb(*rgb);
+        let changed = ui.color_edit_button_srgba(&mut color).changed();
+        if changed {
+            *rgb = [color.r(), color.g(), color.b()];
+        }
+        changed
+    }).inner
+}
 
 fn gizmo_axis_color(axis: usize) -> egui::Color32 {
     match axis {
