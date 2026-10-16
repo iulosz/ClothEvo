@@ -943,6 +943,7 @@ impl ClothEvoApp {
             .add_filter("Autodesk FBX", &["fbx"])
             .pick_file();
         let Some(path) = selected else { return; };
+        self.pattern_dirty = true;
         self.schedule_avatar_import(&path, true);
     }
 
@@ -979,6 +980,18 @@ impl ClothEvoApp {
                     avatar.wire_indices.clear();
                 }
                 statics.push(avatar);
+            } else if !self.validation_scene && !self.avatar_collision_enabled {
+                // O manequim procedural também precisa continuar visível quando sua função
+                // de colisão é desligada. Nesse caso desenhamos seus volumes sem enviá-los ao solver.
+                let avatar = AvatarConfig {
+                    height_m: self.pattern_project.avatar.height_meters as f32,
+                    shoulder_width_m: self.pattern_project.avatar.shoulder_width_meters as f32,
+                    waist_width_m: self.pattern_project.avatar.waist_width_meters as f32,
+                    hip_width_m: self.pattern_project.avatar.hip_width_meters as f32,
+                };
+                if let Ok(visual_colliders) = build_avatar_colliders(&avatar) {
+                    statics.extend(statics_from(&visual_colliders));
+                }
             }
         }
         let mut renderer = rs.renderer.write();
@@ -1213,11 +1226,13 @@ impl ClothEvoApp {
             });
 
         if reprocess {
+            self.pattern_dirty = true;
             if let Some(path) = self.avatar_mesh_path.clone() {
                 self.schedule_avatar_import(&path, true);
             }
         }
         if remove {
+            self.pattern_dirty = true;
             self.avatar_import_receiver = None;
             self.avatar_import_pending_path = None;
             self.avatar_mesh = None;
@@ -2110,9 +2125,15 @@ impl ClothEvoApp {
         let Some(path) = dialog.pick_file() else { return; };
         let loaded = std::fs::read_to_string(&path)
             .map_err(|e| format!("Falha ao ler {}: {e}", path.display()))
-            .and_then(|json| PatternProject::from_json(&json));
+            .and_then(|json| {
+                PatternProject::from_json(&json).map(|project| {
+                    let app_state = serde_json::from_str::<serde_json::Value>(&json).ok()
+                        .and_then(|document| document.get("clothevo_app").cloned());
+                    (project, app_state)
+                })
+            });
         match loaded {
-            Ok(project) => {
+            Ok((project, app_state)) => {
                 if !self.confirm_discard_unsaved_changes() { return; }
                 self.pattern_project = project;
                 self.workspace = WorkspaceMode::Pattern;
@@ -2128,9 +2149,55 @@ impl ClothEvoApp {
                 self.drag_last_world = None;
                 self.pattern_dirty = false;
                 self.pattern_message = format!("Projeto carregado: {}", path.display());
+                if let Some(app_state) = app_state {
+                    self.restore_project_app_state(&app_state);
+                }
             }
             Err(error) => self.pattern_message = error,
         }
+    }
+
+    fn restore_project_app_state(&mut self, app_state: &serde_json::Value) {
+        self.avatar_visible = app_state.get("avatar_visible")
+            .and_then(serde_json::Value::as_bool).unwrap_or(true);
+        self.avatar_wireframe = app_state.get("avatar_wireframe")
+            .and_then(serde_json::Value::as_bool).unwrap_or(false);
+        self.avatar_collision_enabled = app_state.get("avatar_collision_enabled")
+            .and_then(serde_json::Value::as_bool).unwrap_or(true);
+        self.avatar_collision_spacing_m = app_state.get("avatar_collision_spacing_m")
+            .and_then(serde_json::Value::as_f64).unwrap_or(0.01)
+            .clamp(0.004, 0.03) as f32;
+        self.avatar_heading_degrees = app_state.get("avatar_heading_degrees")
+            .and_then(serde_json::Value::as_f64).unwrap_or(0.0)
+            .clamp(-180.0, 180.0) as f32;
+
+        // Uma referência presente no documento substitui o avatar da sessão atual.
+        self.avatar_import_receiver = None;
+        self.avatar_import_pending_path = None;
+        self.avatar_mesh = None;
+        self.avatar_sdf = None;
+        self.avatar_mesh_name = None;
+        self.avatar_mesh_path = None;
+        self.avatar_diagnostics = None;
+        self.avatar_imported_height_m = None;
+        self.avatar_imported_heading_degrees = None;
+        self.avatar_imported_collision_spacing_m = None;
+
+        if let Some(saved_path) = app_state.get("avatar_path").and_then(serde_json::Value::as_str) {
+            let saved_path = std::path::PathBuf::from(saved_path);
+            if saved_path.is_file() {
+                self.schedule_avatar_import(&saved_path, true);
+            } else {
+                self.pattern_message = format!(
+                    "Projeto carregado, mas o arquivo de avatar salvo não foi encontrado: {}. A visualização usa o manequim procedural.",
+                    saved_path.display()
+                );
+            }
+        }
+        if let Err(error) = self.sync_pattern_avatar_colliders() {
+            self.pattern_message = format!("Projeto carregado, mas não foi possível atualizar a colisão: {error}");
+        }
+        self.upload_scene();
     }
 
     fn save_pattern_project(&mut self) {
@@ -2157,9 +2224,24 @@ impl ClothEvoApp {
         if path.extension().is_none() {
             path.set_extension("clothevo");
         }
-        let result = self.pattern_project.to_json()
-            .and_then(|json| std::fs::write(&path, json)
-                .map_err(|e| format!("Falha ao salvar {}: {e}", path.display())));
+        let result = self.pattern_project.to_json().and_then(|json| {
+            let mut document = serde_json::from_str::<serde_json::Value>(&json)
+                .map_err(|e| format!("Falha ao preparar o projeto para salvar: {e}"))?;
+            document["clothevo_app"] = serde_json::json!({
+                "version": 1,
+                "avatar_path": self.avatar_mesh_path.as_ref()
+                    .map(|saved_path| saved_path.to_string_lossy().into_owned()),
+                "avatar_visible": self.avatar_visible,
+                "avatar_wireframe": self.avatar_wireframe,
+                "avatar_collision_enabled": self.avatar_collision_enabled,
+                "avatar_collision_spacing_m": self.avatar_collision_spacing_m,
+                "avatar_heading_degrees": self.avatar_heading_degrees,
+            });
+            let serialized = serde_json::to_string_pretty(&document)
+                .map_err(|e| format!("Falha ao serializar o projeto: {e}"))?;
+            std::fs::write(&path, serialized)
+                .map_err(|e| format!("Falha ao salvar {}: {e}", path.display()))
+        });
         match result {
             Ok(()) => {
                 self.pattern_saved_path = Some(path.clone());
@@ -3071,15 +3153,18 @@ impl ClothEvoApp {
             avatar_changed |= ui.add(egui::Slider::new(
                 &mut self.pattern_project.avatar.hip_width_meters, 0.22..=0.70,
             ).text("Largura do quadril (m)")).changed();
-            ui.add(egui::Slider::new(
+            let heading_changed = ui.add(egui::Slider::new(
                 &mut self.avatar_heading_degrees, -180.0..=180.0,
-            ).text("Giro do avatar em Y (°)"));
+            ).text("Giro do avatar em Y (°)")).changed();
             ui.label("OBJ usa detecção automática de eixo; FBX é convertido para Y-up.");
-            ui.add(egui::Slider::new(
+            let spacing_changed = ui.add(egui::Slider::new(
                 &mut self.avatar_collision_spacing_m, 0.004..=0.03,
             ).text("Precisão da colisão (m)"))
                 .on_hover_text("Espaçamento menor preserva mais detalhes, com maior custo de memória e importação.")
                 .changed();
+            if heading_changed || spacing_changed {
+                self.pattern_dirty = true;
+            }
 
             ui.horizontal(|ui| {
                 if self.avatar_mesh_path.is_some() {
@@ -3177,6 +3262,7 @@ impl ClothEvoApp {
             }
         });
         if remove_avatar {
+            self.pattern_dirty = true;
             self.avatar_import_receiver = None;
             self.avatar_import_pending_path = None;
             self.avatar_mesh = None;
@@ -3194,6 +3280,7 @@ impl ClothEvoApp {
             self.upload_scene();
         }
         if reprocess_avatar {
+            self.pattern_dirty = true;
             if let Some(path) = self.avatar_mesh_path.clone() {
                 self.schedule_avatar_import(&path, true);
             }
