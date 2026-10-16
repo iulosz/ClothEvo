@@ -5,6 +5,9 @@
 //! `CLOTHEVO_SCREENSHOT=<arquivo.ppm>` — salva o viewport e fecha o app.
 
 mod avatar_import;
+mod ui_customization;
+
+use ui_customization::{ButtonIcon, ButtonShape, CustomToolbarButton, ThemeSettings, UiCommand, UiCustomization};
 
 use cloth_render::{
     primitives, CameraGoal, CameraPreset, ClothTopology, MeshKind, OrbitCamera, SceneRenderer,
@@ -319,7 +322,7 @@ fn pattern_sim_shell_radius(piece_index: usize, thickness: f32) -> f32 {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("ClothEvo — Surreal Textile Lab")
+            .with_title("ClothEvo")
             .with_inner_size([1360.0, 840.0])
             .with_min_inner_size([900.0, 600.0]),
         renderer: eframe::Renderer::Wgpu,
@@ -347,7 +350,7 @@ enum WorkspaceMode {
     Pattern,
     /// Posiciona os painéis em 3D antes de liberar a simulação.
     Placement,
-    /// Viewport 3D e editor de moldes 2D visíveis ao mesmo tempo.
+    /// Viewport 3D e editor 2D visíveis ao mesmo tempo.
     Split,
 }
 
@@ -445,6 +448,7 @@ impl PatternEditTarget {
 struct AvatarImportJobResult {
     path: std::path::PathBuf,
     refresh_viewport: bool,
+    mark_project_dirty: bool,
     target_height_m: f32,
     collision_spacing_m: f32,
     heading_degrees: f32,
@@ -470,6 +474,14 @@ struct ClothEvoApp {
     validation_scene: bool,
     /// Painel de métricas é aberto pelo menu View.
     show_metrics: bool,
+    /// Preferências da interface, salvas fora dos arquivos de projeto de vestuário.
+    ui_customization: UiCustomization,
+    show_ui_customizer: bool,
+    ui_customizer_new_command: UiCommand,
+    ui_customizer_new_label: String,
+    ui_customization_message: String,
+    ui_customization_dirty: bool,
+    ui_theme_dirty: bool,
     workspace: WorkspaceMode,
     /// No modo dividido: o editor 2D fica no primeiro painel (esquerda ou topo).
     split_swapped: bool,
@@ -609,6 +621,9 @@ fn statics_from(colliders: &[Collider]) -> Vec<StaticMeshData> {
 
 impl ClothEvoApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let (ui_customization, ui_load_message) = UiCustomization::load();
+        let startup_split_vertical = ui_customization.split_vertical;
+        let startup_split_swapped = ui_customization.split_swapped;
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = egui::Color32::from_rgb(15, 19, 35);
         visuals.window_fill = egui::Color32::from_rgb(23, 27, 45);
@@ -677,9 +692,16 @@ impl ClothEvoApp {
             capture,
             validation_scene,
             show_metrics: false,
+            ui_customization,
+            show_ui_customizer: false,
+            ui_customizer_new_command: UiCommand::ToggleSimulation,
+            ui_customizer_new_label: String::new(),
+            ui_customization_message: ui_load_message.unwrap_or_default(),
+            ui_customization_dirty: false,
+            ui_theme_dirty: false,
             workspace: WorkspaceMode::Simulation,
-            split_swapped: false,
-            split_vertical: false,
+            split_swapped: startup_split_swapped,
+            split_vertical: startup_split_vertical,
             pattern_project: PatternProject::new("Novo projeto"),
             draft_points: Vec::new(),
             pattern_spacing: 0.08,
@@ -777,11 +799,17 @@ impl ClothEvoApp {
         if !app.validation_scene {
             app.focus_camera_preset(CameraPreset::Front, 1360.0 / 840.0);
         }
+        app.apply_ui_customization(&cc.egui_ctx);
         app.upload_scene();
         app
     }
 
-    fn schedule_avatar_import(&mut self, path: &std::path::Path, refresh_viewport: bool) {
+    fn schedule_avatar_import(
+        &mut self,
+        path: &std::path::Path,
+        refresh_viewport: bool,
+        mark_project_dirty: bool,
+    ) {
         let path = path.to_path_buf();
         let target_height_m = self.pattern_project.avatar.height_meters as f32;
         let collision_spacing_m = self.avatar_collision_spacing_m;
@@ -800,6 +828,7 @@ impl ClothEvoApp {
                 let _ = sender.send(AvatarImportJobResult {
                     path: worker_path,
                     refresh_viewport,
+                    mark_project_dirty,
                     target_height_m,
                     collision_spacing_m,
                     heading_degrees,
@@ -834,6 +863,9 @@ impl ClothEvoApp {
                         let warning = imported.collision_warning.clone();
                         self.avatar_mesh = Some(imported.mesh);
                         self.avatar_sdf = imported.collision_sdf;
+                        if job.mark_project_dirty {
+                            self.pattern_dirty = true;
+                        }
                         self.avatar_mesh_name = Some(display_name.clone());
                         self.avatar_mesh_path = Some(job.path);
                         self.avatar_diagnostics = Some(imported.diagnostics);
@@ -929,7 +961,7 @@ impl ClothEvoApp {
         }
         for candidate in candidates {
             if candidate.is_file() {
-                self.schedule_avatar_import(&candidate, true);
+                self.schedule_avatar_import(&candidate, true, false);
                 break;
             }
         }
@@ -943,7 +975,7 @@ impl ClothEvoApp {
             .add_filter("Autodesk FBX", &["fbx"])
             .pick_file();
         let Some(path) = selected else { return; };
-        self.schedule_avatar_import(&path, true);
+        self.schedule_avatar_import(&path, true, true);
     }
 
     /// Reconstrói a cena preservando os parâmetros atuais.
@@ -979,6 +1011,18 @@ impl ClothEvoApp {
                     avatar.wire_indices.clear();
                 }
                 statics.push(avatar);
+            } else if !self.validation_scene && !self.avatar_collision_enabled {
+                // O manequim procedural também precisa continuar visível quando sua função
+                // de colisão é desligada. Nesse caso desenhamos seus volumes sem enviá-los ao solver.
+                let avatar = AvatarConfig {
+                    height_m: self.pattern_project.avatar.height_meters as f32,
+                    shoulder_width_m: self.pattern_project.avatar.shoulder_width_meters as f32,
+                    waist_width_m: self.pattern_project.avatar.waist_width_meters as f32,
+                    hip_width_m: self.pattern_project.avatar.hip_width_meters as f32,
+                };
+                if let Ok(visual_colliders) = build_avatar_colliders(&avatar) {
+                    statics.extend(statics_from(&visual_colliders));
+                }
             }
         }
         let mut renderer = rs.renderer.write();
@@ -1023,18 +1067,16 @@ impl ClothEvoApp {
     }
 
     fn top_navigation(&mut self, ui: &mut egui::Ui) {
-        const COBALT: egui::Color32 = egui::Color32::from_rgb(18, 54, 150);
-        const MAGENTA: egui::Color32 = egui::Color32::from_rgb(220, 67, 143);
-        const ORANGE: egui::Color32 = egui::Color32::from_rgb(255, 170, 53);
-        const PAPER: egui::Color32 = egui::Color32::from_rgb(247, 239, 215);
+        let accent = ui_rgb(self.ui_customization.theme.accent);
+        let brand_text = ui_rgb(self.ui_customization.theme.text);
 
         ui.set_min_height(58.0);
         let mut render_changed = false;
+        let mut open_ui_customizer = false;
         ui.horizontal(|ui| {
             ui.add_space(2.0);
             ui.vertical(|ui| {
-                ui.label(egui::RichText::new("CLOTHEVO").size(23.0).strong().color(PAPER));
-                ui.label(egui::RichText::new("SURREAL TEXTILE LAB  /  01").size(9.5).strong().color(ORANGE));
+                ui.label(egui::RichText::new("CLOTHEVO").size(23.0).strong().color(brand_text));
             });
             ui.add_space(16.0);
             ui.separator();
@@ -1042,13 +1084,13 @@ impl ClothEvoApp {
 
             if ui.selectable_label(
                 self.workspace == WorkspaceMode::Simulation,
-                egui::RichText::new("Ambiente 3D").strong(),
+                egui::RichText::new("3D Viewport").strong(),
             ).clicked() {
                 self.workspace = WorkspaceMode::Simulation;
             }
             if ui.selectable_label(
                 self.workspace == WorkspaceMode::Pattern,
-                egui::RichText::new("Moldes 2D").strong(),
+                egui::RichText::new("2D Viewport").strong(),
             ).clicked() {
                 self.playing = false;
                 self.workspace = WorkspaceMode::Pattern;
@@ -1075,7 +1117,7 @@ impl ClothEvoApp {
             }
 
             ui.menu_button(
-                egui::RichText::new("View  ↘").strong().color(ORANGE),
+                egui::RichText::new("View  ↘").strong().color(accent),
                 |ui| {
                     if ui.selectable_label(self.workspace == WorkspaceMode::Split, "3D + 2D").clicked() {
                         self.workspace = WorkspaceMode::Split;
@@ -1090,59 +1132,507 @@ impl ClothEvoApp {
                 },
             );
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(48.0, 40.0), egui::Sense::hover());
-                let painter = ui.painter_at(rect);
-                let center = rect.center();
-                painter.circle_filled(center, 13.0, MAGENTA);
-                painter.circle_stroke(center, 18.0, egui::Stroke::new(1.5, ORANGE));
-                painter.add(egui::Shape::convex_polygon(
-                    vec![
-                        center + egui::vec2(0.0, -22.0),
-                        center + egui::vec2(7.0, -5.0),
-                        center + egui::vec2(23.0, 1.0),
-                        center + egui::vec2(5.0, 5.0),
-                        center + egui::vec2(0.0, 22.0),
-                        center + egui::vec2(-5.0, 5.0),
-                        center + egui::vec2(-23.0, 1.0),
-                        center + egui::vec2(-7.0, -5.0),
-                    ],
-                    ORANGE,
-                    egui::Stroke::new(0.8, COBALT),
-                ));
-                ui.label(egui::RichText::new(if self.avatar_import_pending_path.is_some() {
-                    "AVATAR / IMPORTANDO"
-                } else if self.avatar_mesh.is_some() {
-                    "AVATAR / MALHA"
-                } else {
-                    "AVATAR / PROCEDURAL"
-                }).size(10.0).strong().color(PAPER));
-            });
+            ui.menu_button(
+                egui::RichText::new("Preferences  ↘").strong().color(accent),
+                |ui| {
+                    if ui.button("Personalizar interface…").clicked() {
+                        open_ui_customizer = true;
+                        ui.close();
+                    }
+                    if ui.button("Salvar preferências da interface").clicked() {
+                        self.save_ui_customization();
+                        ui.close();
+                    }
+                },
+            );
         });
+        if open_ui_customizer {
+            self.show_ui_customizer = true;
+        }
         if render_changed {
             self.upload_scene();
         }
     }
 
+    fn apply_ui_customization(&self, ctx: &egui::Context) {
+        let theme = &self.ui_customization.theme;
+        let mut style = (*ctx.global_style()).clone();
+        let mut visuals = style.visuals.clone();
+        visuals.panel_fill = ui_rgb(theme.panel_bg);
+        visuals.window_fill = ui_rgb(theme.window_bg);
+        visuals.extreme_bg_color = ui_rgb(theme.deep_bg);
+        visuals.faint_bg_color = ui_rgb(theme.muted_bg);
+        visuals.code_bg_color = ui_rgb(theme.deep_bg);
+        visuals.hyperlink_color = ui_rgb(theme.accent);
+        visuals.selection.bg_fill = ui_rgb(theme.selection);
+        visuals.selection.stroke = egui::Stroke::new(1.0, ui_rgb(theme.accent));
+        visuals.widgets.noninteractive.fg_stroke.color = ui_rgb(theme.text);
+        visuals.widgets.inactive.fg_stroke.color = ui_rgb(theme.text);
+        visuals.widgets.hovered.fg_stroke.color = ui_rgb(theme.text);
+        visuals.widgets.active.fg_stroke.color = ui_rgb(theme.text);
+        visuals.widgets.inactive.weak_bg_fill = ui_rgb(theme.button_bg);
+        visuals.widgets.hovered.weak_bg_fill = ui_rgb(theme.button_hover);
+        visuals.widgets.active.weak_bg_fill = ui_rgb(theme.selection);
+        visuals.widgets.noninteractive.bg_stroke.color = ui_rgb(theme.border);
+        visuals.widgets.inactive.bg_stroke.color = ui_rgb(theme.border);
+        visuals.widgets.hovered.bg_stroke.color = ui_rgb(theme.accent);
+        visuals.widgets.active.bg_stroke.color = ui_rgb(theme.accent);
+        let radius = egui::CornerRadius::same(theme.corner_radius);
+        visuals.window_corner_radius = radius;
+        visuals.widgets.noninteractive.corner_radius = radius;
+        visuals.widgets.inactive.corner_radius = radius;
+        visuals.widgets.hovered.corner_radius = radius;
+        visuals.widgets.active.corner_radius = radius;
+        style.visuals = visuals;
+        style.spacing.item_spacing = egui::vec2(theme.spacing, theme.spacing);
+        style.spacing.button_padding = egui::vec2(theme.spacing * 0.8, theme.spacing * 0.5);
+        ctx.set_global_style(style);
+        ctx.set_zoom_factor(theme.ui_scale.clamp(0.75, 1.75));
+    }
+
+    fn save_ui_customization(&mut self) {
+        self.ui_customization.split_vertical = self.split_vertical;
+        self.ui_customization.split_swapped = self.split_swapped;
+        match self.ui_customization.save() {
+            Ok(()) => {
+                let path = ui_customization::configuration_path()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|_| "pasta de configurações do usuário".into());
+                self.ui_customization_message = format!("Preferências salvas em: {path}");
+                self.ui_customization_dirty = false;
+            }
+            Err(error) => self.ui_customization_message = error,
+        }
+    }
+
+    fn custom_toolbar(&mut self, ui: &mut egui::Ui) {
+        let text_color = ui_rgb(self.ui_customization.theme.text);
+        let buttons: Vec<(u64, String, UiCommand, [u8; 3], ButtonShape, ButtonIcon)> = self.ui_customization.toolbar_buttons
+            .iter()
+            .filter(|button| button.visible)
+            .map(|button| (
+                button.id,
+                button.label.clone(),
+                button.command,
+                button.color,
+                button.shape,
+                button.icon,
+            ))
+            .collect();
+        if buttons.is_empty() {
+            return;
+        }
+
+        let mut actions = Vec::new();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("MINHA BARRA").size(9.0).strong());
+            for (id, label, command, color, shape, icon) in buttons {
+                let text = if icon.glyph().is_empty() {
+                    label
+                } else {
+                    format!("{} {}", icon.glyph(), label)
+                };
+                let button = egui::Button::new(egui::RichText::new(text).color(text_color))
+                    .fill(ui_rgb(color))
+                    .corner_radius(egui::CornerRadius::same(shape.corner_radius()));
+                if ui.push_id(("custom_ui_command", id), |ui| ui.add(button)).inner.clicked() {
+                    actions.push(command);
+                }
+            }
+            if ui.small_button("＋ Personalizar").clicked() {
+                self.show_ui_customizer = true;
+            }
+        });
+        for command in actions {
+            self.execute_ui_command(command);
+        }
+    }
+
+    fn execute_ui_command(&mut self, command: UiCommand) {
+        match command {
+            UiCommand::ToggleSimulation => {
+                if self.diverged {
+                    self.sim.reset();
+                    self.accumulator = 0.0;
+                    self.diverged = false;
+                    self.playing = true;
+                } else {
+                    self.playing = !self.playing;
+                }
+            }
+            UiCommand::SingleStep => {
+                self.playing = false;
+                self.accumulator = 0.0;
+                self.sim.step(FIXED_DT);
+                self.last_step_ms = self.sim.stats.step_ms;
+                if !self.sim.is_finite() {
+                    self.sim.reset();
+                    self.last_step_ms = 0.0;
+                    self.diverged = true;
+                }
+            }
+            UiCommand::ResetSimulation => {
+                self.sim.reset();
+                self.last_step_ms = 0.0;
+                self.playing = false;
+                self.diverged = false;
+                self.accumulator = 0.0;
+            }
+            UiCommand::NewProject => self.new_pattern_project(),
+            UiCommand::OpenProject => self.open_pattern_project_dialog(),
+            UiCommand::SaveProject => self.save_pattern_project(),
+            UiCommand::ImportAvatar => self.import_avatar_dialog(),
+            UiCommand::ToggleAvatar => {
+                self.avatar_visible = !self.avatar_visible;
+                self.pattern_dirty = true;
+                self.upload_scene();
+            }
+            UiCommand::ToggleAvatarWireframe => {
+                self.avatar_wireframe = !self.avatar_wireframe;
+                self.pattern_dirty = true;
+                self.upload_scene();
+            }
+            UiCommand::ToggleAvatarCollision => {
+                self.avatar_collision_enabled = !self.avatar_collision_enabled;
+                self.pattern_dirty = true;
+                if let Err(error) = self.sync_pattern_avatar_colliders() {
+                    self.pattern_message = format!("Não foi possível atualizar a colisão: {error}");
+                }
+                self.upload_scene();
+            }
+            UiCommand::Show3dViewport => self.workspace = WorkspaceMode::Simulation,
+            UiCommand::Show2dViewport => {
+                self.playing = false;
+                self.workspace = WorkspaceMode::Pattern;
+            }
+            UiCommand::ShowSplitViewport => {
+                self.workspace = WorkspaceMode::Split;
+                self.pattern_fit_pending = true;
+            }
+            UiCommand::ToggleMetrics => self.show_metrics = !self.show_metrics,
+        }
+    }
+
+    fn ui_customizer_window(&mut self, ctx: &egui::Context) {
+        if !self.show_ui_customizer {
+            return;
+        }
+
+        let mut window_open = self.show_ui_customizer;
+        let mut save_clicked = false;
+        let mut reset_theme_clicked = false;
+        let mut reset_all_clicked = false;
+        let mut theme_changed = false;
+        let mut layout_changed = false;
+        let mut remove_button_id = None;
+        let mut add_button: Option<(UiCommand, String)> = None;
+        let mut close_clicked = false;
+        let mut buttons_changed = false;
+
+        egui::Window::new("Personalizar interface")
+            .open(&mut window_open)
+            .resizable(true)
+            .default_size(egui::vec2(620.0, 700.0))
+            .show(ctx, |ui| {
+                ui.label("Personalize cores, formas, organização dos viewports e comandos. As preferências ficam separadas dos arquivos de vestuário.");
+                ui.separator();
+
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    egui::CollapsingHeader::new("Tema e cores")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button("ClothEvo original").clicked() {
+                                    reset_theme_clicked = true;
+                                }
+                                if ui.button("Graphite").clicked() {
+                                    self.ui_customization.theme = ThemeSettings::graphite();
+                                    theme_changed = true;
+                                }
+                                if ui.button("Amethyst").clicked() {
+                                    self.ui_customization.theme = ThemeSettings::amethyst();
+                                    theme_changed = true;
+                                }
+                            });
+                            ui.label("Cada cor pode ser alterada individualmente.");
+                            theme_changed |= edit_ui_rgb(ui, "Fundo dos painéis", &mut self.ui_customization.theme.panel_bg);
+                            theme_changed |= edit_ui_rgb(ui, "Fundo das janelas", &mut self.ui_customization.theme.window_bg);
+                            theme_changed |= edit_ui_rgb(ui, "Fundo da navegação", &mut self.ui_customization.theme.navigation_bg);
+                            theme_changed |= edit_ui_rgb(ui, "Fundo da barra de ferramentas", &mut self.ui_customization.theme.toolbar_bg);
+                            theme_changed |= edit_ui_rgb(ui, "Fundo profundo", &mut self.ui_customization.theme.deep_bg);
+                            theme_changed |= edit_ui_rgb(ui, "Fundo secundário", &mut self.ui_customization.theme.muted_bg);
+                            theme_changed |= edit_ui_rgb(ui, "Texto", &mut self.ui_customization.theme.text);
+                            theme_changed |= edit_ui_rgb(ui, "Cor de destaque", &mut self.ui_customization.theme.accent);
+                            theme_changed |= edit_ui_rgb(ui, "Seleção / estado ativo", &mut self.ui_customization.theme.selection);
+                            theme_changed |= edit_ui_rgb(ui, "Botão", &mut self.ui_customization.theme.button_bg);
+                            theme_changed |= edit_ui_rgb(ui, "Botão ao passar o mouse", &mut self.ui_customization.theme.button_hover);
+                            theme_changed |= edit_ui_rgb(ui, "Contornos", &mut self.ui_customization.theme.border);
+                        });
+
+                    egui::CollapsingHeader::new("Formas e densidade")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            theme_changed |= ui.add(
+                                egui::Slider::new(&mut self.ui_customization.theme.corner_radius, 0..=16)
+                                    .text("Arredondamento dos cantos"),
+                            ).changed();
+                            theme_changed |= ui.add(
+                                egui::Slider::new(&mut self.ui_customization.theme.spacing, 2.0..=20.0)
+                                    .text("Espaçamento dos componentes"),
+                            ).changed();
+                            theme_changed |= ui.add(
+                                egui::Slider::new(&mut self.ui_customization.theme.ui_scale, 0.75..=1.75)
+                                    .text("Escala global da interface"),
+                            ).changed();
+                        });
+
+                    egui::CollapsingHeader::new("Organização dos viewports")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.label("Estas opções controlam a área dividida 3D + 2D.");
+                            layout_changed |= ui.checkbox(
+                                &mut self.ui_customization.split_vertical,
+                                "Empilhar viewports verticalmente",
+                            ).changed();
+                            layout_changed |= ui.checkbox(
+                                &mut self.ui_customization.split_swapped,
+                                "Colocar 2D Pattern primeiro",
+                            ).changed();
+                            if ui.button("Abrir layout 3D + 2D").clicked() {
+                                self.workspace = WorkspaceMode::Split;
+                                self.pattern_fit_pending = true;
+                            }
+                        });
+
+                    egui::CollapsingHeader::new("Minha barra de comandos")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.label("Adicione comandos existentes à sua própria barra. Cada botão pode ser renomeado, ocultado, reordenado ou removido.");
+                            let mut previous_order = None;
+                            let button_count = self.ui_customization.toolbar_buttons.len();
+                            for index in 0..button_count {
+                                let button = &mut self.ui_customization.toolbar_buttons[index];
+                                ui.horizontal(|ui| {
+                                    buttons_changed |= ui.checkbox(&mut button.visible, "").changed();
+                                    buttons_changed |= ui.text_edit_singleline(&mut button.label).changed();
+                                    egui::ComboBox::from_id_salt(("toolbar_command", button.id))
+                                        .selected_text(button.command.label())
+                                        .width(170.0)
+                                        .show_ui(ui, |ui| {
+                                            for (command, label) in UiCommand::ALL {
+                                                buttons_changed |= ui.selectable_value(&mut button.command, *command, *label).changed();
+                                            }
+                                        });
+                                    if ui.small_button("↑").clicked() {
+                                        previous_order = Some((index, index.saturating_sub(1)));
+                                        buttons_changed = true;
+                                    }
+                                    if ui.small_button("↓").clicked() && index + 1 < button_count {
+                                        previous_order = Some((index, index + 1));
+                                        buttons_changed = true;
+                                    }
+                                    if ui.small_button("×").on_hover_text("Remover botão").clicked() {
+                                        remove_button_id = Some(button.id);
+                                        buttons_changed = true;
+                                    }
+                                });
+                                egui::CollapsingHeader::new(format!("Aparência: {}", button.label))
+                                    .default_open(false)
+                                    .show(ui, |ui| {
+                                        buttons_changed |= edit_ui_rgb(ui, "Cor do botão", &mut button.color);
+                                        ui.horizontal(|ui| {
+                                            ui.label("Formato");
+                                            egui::ComboBox::from_id_salt(("toolbar_button_shape", button.id))
+                                                .selected_text(button.shape.label())
+                                                .show_ui(ui, |ui| {
+                                                    for shape in [ButtonShape::Square, ButtonShape::Rounded, ButtonShape::Pill] {
+                                                        buttons_changed |= ui.selectable_value(&mut button.shape, shape, shape.label()).changed();
+                                                    }
+                                                });
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Ícone");
+                                            egui::ComboBox::from_id_salt(("toolbar_button_icon", button.id))
+                                                .selected_text(button.icon.label())
+                                                .show_ui(ui, |ui| {
+                                                    for (icon, label) in ButtonIcon::ALL {
+                                                        buttons_changed |= ui.selectable_value(&mut button.icon, *icon, *label).changed();
+                                                    }
+                                                });
+                                        });
+                                    });
+                            }
+                            if let Some((from, to)) = previous_order {
+                                self.ui_customization.toolbar_buttons.swap(from, to);
+                            }
+                            ui.separator();
+                            ui.label("Adicionar um comando");
+                            ui.horizontal(|ui| {
+                                egui::ComboBox::from_id_salt("new_custom_toolbar_command")
+                                    .selected_text(self.ui_customizer_new_command.label())
+                                    .width(220.0)
+                                    .show_ui(ui, |ui| {
+                                        for (command, label) in UiCommand::ALL {
+                                            ui.selectable_value(&mut self.ui_customizer_new_command, *command, *label);
+                                        }
+                                    });
+                                ui.text_edit_singleline(&mut self.ui_customizer_new_label);
+                            });
+                            if ui.button("＋ Adicionar botão").clicked() {
+                                add_button = Some((
+                                    self.ui_customizer_new_command,
+                                    self.ui_customizer_new_label.trim().to_owned(),
+                                ));
+                            }
+                        });
+                });
+
+                if self.ui_customization_dirty {
+                    ui.separator();
+                    ui.colored_label(ui_rgb(self.ui_customization.theme.accent), "Há alterações de interface não salvas.");
+                } else if !self.ui_customization_message.is_empty() {
+                    ui.separator();
+                    ui.label(egui::RichText::new(&self.ui_customization_message).size(11.0));
+                }
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Salvar preferências").clicked() {
+                        save_clicked = true;
+                    }
+                    if ui.button("Restaurar todas as preferências").clicked() {
+                        reset_all_clicked = true;
+                    }
+                    if ui.button("Fechar").clicked() {
+                        close_clicked = true;
+                    }
+                });
+            });
+
+        self.show_ui_customizer = window_open && !close_clicked;
+        if reset_theme_clicked {
+            self.ui_customization.theme = ThemeSettings::default();
+            theme_changed = true;
+        }
+        if reset_all_clicked {
+            self.ui_customization = UiCustomization::default();
+            self.split_vertical = false;
+            self.split_swapped = false;
+            self.workspace = WorkspaceMode::Split;
+            theme_changed = true;
+            layout_changed = false;
+        }
+        if layout_changed {
+            self.split_vertical = self.ui_customization.split_vertical;
+            self.split_swapped = self.ui_customization.split_swapped;
+        }
+        if let Some(id) = remove_button_id {
+            self.ui_customization.toolbar_buttons.retain(|button| button.id != id);
+        }
+        if let Some((command, label)) = add_button {
+            buttons_changed = true;
+            let id = self.ui_customization.toolbar_buttons.iter().map(|button| button.id).max().unwrap_or(0).saturating_add(1);
+            let label = if label.is_empty() { command.label().to_owned() } else { label };
+            self.ui_customization.toolbar_buttons.push(CustomToolbarButton {
+                id,
+                label,
+                command,
+                visible: true,
+                color: self.ui_customization.theme.accent,
+                shape: ButtonShape::Rounded,
+                icon: ButtonIcon::None,
+            });
+            self.ui_customization_message = "Botão adicionado. Salve as preferências para mantê-lo.".into();
+        }
+        if theme_changed {
+            self.ui_theme_dirty = true;
+        }
+        if theme_changed || layout_changed || buttons_changed || reset_theme_clicked || reset_all_clicked {
+            self.ui_customization_dirty = true;
+        }
+        if save_clicked {
+            self.save_ui_customization();
+        }
+    }
+
+    fn global_toolbar(&mut self, ui: &mut egui::Ui) {
+        let mut new_project = false;
+        let mut open_project = false;
+        let mut save_project = false;
+        let mut import_avatar = false;
+        let mut avatar_visibility_changed = false;
+        let mut wireframe_changed = false;
+        let mut collision_changed = false;
+        let import_pending = self.avatar_import_pending_path.is_some();
+        let imported_avatar_available = self.avatar_mesh.is_some();
+
+        ui.set_min_height(42.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("PROJETO").size(10.0).strong());
+            new_project = ui.button("Novo Projeto").clicked();
+            open_project = ui.button("Abrir Projeto").clicked();
+            save_project = ui.button("Salvar Projeto").clicked();
+
+            ui.separator();
+            ui.label(egui::RichText::new("AVATAR").size(10.0).strong());
+            avatar_visibility_changed |= ui.checkbox(&mut self.avatar_visible, "Exibir Avatar").changed();
+            wireframe_changed |= ui.add_enabled(
+                imported_avatar_available,
+                egui::Checkbox::new(&mut self.avatar_wireframe, "Wireframe"),
+            ).on_hover_text("Disponível após importar uma malha OBJ ou FBX.").changed();
+            collision_changed |= ui.checkbox(
+                &mut self.avatar_collision_enabled,
+                "Usar Avatar como Superfície de Colisão",
+            ).changed();
+            import_avatar = ui.add_enabled(
+                !import_pending,
+                egui::Button::new("Importar Avatar (.OBJ / .FBX)…"),
+            ).clicked();
+
+            if import_pending {
+                ui.spinner();
+                ui.label("Importando avatar…");
+            }
+        });
+
+        if new_project {
+            self.new_pattern_project();
+        }
+        if open_project {
+            self.open_pattern_project_dialog();
+        }
+        if save_project {
+            self.save_pattern_project();
+        }
+
+        if avatar_visibility_changed || wireframe_changed || collision_changed {
+            self.pattern_dirty = true;
+        }
+        if collision_changed {
+            if let Err(error) = self.sync_pattern_avatar_colliders() {
+                self.pattern_message = format!("Não foi possível atualizar a colisão do avatar: {error}");
+            }
+        }
+        if avatar_visibility_changed || wireframe_changed || collision_changed {
+            self.upload_scene();
+        }
+        if import_avatar {
+            self.import_avatar_dialog();
+        }
+    }
+
     fn environment_controls(&mut self, ui: &mut egui::Ui) {
-        ui.heading("AMBIENTE 3D");
+        ui.heading("3D VIEWPORT");
         ui.label("Espaço de trabalho pronto para receber os moldes e a simulação.");
         ui.separator();
 
-        let mut import = false;
         let mut reprocess = false;
         let mut remove = false;
-        let mut visibility_changed = false;
-        let mut collision_changed = false;
         let import_pending = self.avatar_import_pending_path.is_some();
 
         egui::CollapsingHeader::new("Avatar e colisão corporal")
             .default_open(true)
             .show(ui, |ui| {
                 ui.label("O modelo padrão é procurado automaticamente. Também é possível importar OBJ ou FBX.");
-                if ui.add_enabled(!import_pending, egui::Button::new("Importar avatar OBJ/FBX…")).clicked() {
-                    import = true;
-                }
                 if self.avatar_mesh_path.is_some() {
                     ui.horizontal(|ui| {
                         reprocess = ui.add_enabled(!import_pending, egui::Button::new("Aplicar escala / colisão")).clicked();
@@ -1170,8 +1660,6 @@ impl ClothEvoApp {
                             }
                         }
                     }
-                    visibility_changed = ui.checkbox(&mut self.avatar_visible, "Exibir avatar").changed();
-                    collision_changed = ui.checkbox(&mut self.avatar_collision_enabled, "Usar avatar como superfície de colisão").changed();
                 } else {
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 170, 53),
@@ -1179,19 +1667,20 @@ impl ClothEvoApp {
                     );
                 }
                 if self.pattern_project.pieces.is_empty() {
-                    ui.weak("Próximo passo: criar os moldes em Moldes 2D.");
+                    ui.weak("Próximo passo: criar os moldes no 2D Viewport.");
                 } else {
                     ui.weak("Use Posicionamento 3D para organizar os painéis antes de iniciar a simulação.");
                 }
             });
 
-        if import { self.import_avatar_dialog(); }
         if reprocess {
+            self.pattern_dirty = true;
             if let Some(path) = self.avatar_mesh_path.clone() {
-                self.schedule_avatar_import(&path, true);
+                self.schedule_avatar_import(&path, true, true);
             }
         }
         if remove {
+            self.pattern_dirty = true;
             self.avatar_import_receiver = None;
             self.avatar_import_pending_path = None;
             self.avatar_mesh = None;
@@ -1205,15 +1694,6 @@ impl ClothEvoApp {
             if let Err(error) = self.sync_pattern_avatar_colliders() {
                 self.pattern_message = format!("Não foi possível restaurar a colisão procedural: {error}");
             }
-            self.upload_scene();
-        }
-        if collision_changed {
-            if let Err(error) = self.sync_pattern_avatar_colliders() {
-                self.pattern_message = format!("Não foi possível atualizar a colisão: {error}");
-            }
-            self.upload_scene();
-        }
-        if visibility_changed {
             self.upload_scene();
         }
         if !self.pattern_message.is_empty() {
@@ -1237,7 +1717,7 @@ impl ClothEvoApp {
                 ui.checkbox(&mut self.split_swapped, "Trocar lados");
                 ui.checkbox(&mut self.split_vertical, "Empilhar");
             });
-            egui::CollapsingHeader::new("Moldes 2D")
+            egui::CollapsingHeader::new("2D Viewport")
                 .default_open(true)
                 .show(ui, |ui| self.pattern_controls(ui));
             ui.separator();
@@ -1252,10 +1732,10 @@ impl ClothEvoApp {
         }
 
         if self.using_pattern_sim {
-            ui.heading("AMBIENTE 3D");
+            ui.heading("3D VIEWPORT");
             ui.label("Roupa personalizada convertida para o solver XPBD.");
         } else {
-            ui.heading("AMBIENTE 3D");
+            ui.heading("3D VIEWPORT");
         }
         ui.separator();
         ui.horizontal(|ui| {
@@ -1373,22 +1853,18 @@ impl ClothEvoApp {
         ui.heading("Posicionamento 3D");
         ui.label("Organize os moldes ao redor do manequim antes de iniciar a simulação.");
         ui.label("Selecione um gizmo e arraste o eixo/anel/quadrado diretamente na viewport.");
-        ui.horizontal_wrapped(|ui| {
-            for (mode, label) in [
-                (GizmoMode::Move, "Mover"),
-                (GizmoMode::Rotate, "Girar"),
-                (GizmoMode::Scale, "Escalar"),
-                (GizmoMode::Transform, "Transformar"),
-            ] {
-                if ui.selectable_label(self.gizmo_mode == mode, label).clicked() {
-                    self.gizmo_mode = mode;
-                    self.placement_gizmo_drag = None;
-                }
-            }
-        });
-        ui.weak("Mover: setas X/Y/Z · Girar: anéis · Escalar: quadrados nos eixos · Transformar: controles combinados.");
         ui.horizontal(|ui| {
-            if ui.button("Voltar aos moldes 2D").clicked() {
+            ui.label("Ferramenta ativa:");
+            ui.strong(match self.gizmo_mode {
+                GizmoMode::Move => "Mover",
+                GizmoMode::Rotate => "Girar",
+                GizmoMode::Scale => "Escalar",
+                GizmoMode::Transform => "Transformar",
+            });
+        });
+        ui.weak("Selecione a ferramenta pelos ícones na barra vertical da viewport.");
+        ui.horizontal(|ui| {
+            if ui.button("Voltar ao 2D Viewport").clicked() {
                 self.workspace = WorkspaceMode::Pattern;
                 self.playing = false;
             }
@@ -1871,6 +2347,75 @@ impl ClothEvoApp {
         painter.circle_stroke(center, 6.5, egui::Stroke::new(1.5, egui::Color32::from_gray(30)));
     }
 
+    fn draw_placement_toolbar(&mut self, ui: &mut egui::Ui, viewport_rect: egui::Rect) {
+        let panel_rect = placement_toolbar_bounds(viewport_rect);
+        let painter = ui.painter();
+        painter.rect_filled(
+            panel_rect,
+            6.0,
+            egui::Color32::from_rgba_unmultiplied(19, 21, 26, 242),
+        );
+        painter.rect_stroke(
+            panel_rect,
+            6.0,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(62, 65, 74)),
+            egui::StrokeKind::Inside,
+        );
+
+        let tools = [
+            (GizmoMode::Rotate, "Girar", "Girar o molde usando os anéis dos eixos."),
+            (GizmoMode::Move, "Mover", "Mover o molde pelos eixos X, Y e Z."),
+            (GizmoMode::Scale, "Escalar", "Escalar o molde pelos controles nas extremidades."),
+            (GizmoMode::Transform, "Transformar", "Combinar mover, girar e escalar."),
+        ];
+        let button_side = 36.0;
+        let gap = 7.0;
+        for (index, (mode, _label, tooltip)) in tools.iter().enumerate() {
+            let button_rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    panel_rect.center().x - button_side * 0.5,
+                    panel_rect.top() + 7.0 + index as f32 * (button_side + gap),
+                ),
+                egui::vec2(button_side, button_side),
+            );
+            let response = ui.interact(
+                button_rect,
+                ui.make_persistent_id(("placement_gizmo_toolbar", index)),
+                egui::Sense::click(),
+            );
+            let active = self.gizmo_mode == *mode;
+            let fill = if active {
+                egui::Color32::from_rgb(111, 48, 111)
+            } else if response.hovered() {
+                egui::Color32::from_rgb(48, 57, 74)
+            } else {
+                egui::Color32::from_rgb(29, 31, 37)
+            };
+            let icon_color = if active {
+                egui::Color32::WHITE
+            } else {
+                egui::Color32::from_rgb(211, 214, 220)
+            };
+            painter.rect_filled(button_rect, 5.0, fill);
+            if active {
+                painter.rect_stroke(
+                    button_rect,
+                    5.0,
+                    egui::Stroke::new(1.2, egui::Color32::from_rgb(218, 175, 91)),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            paint_placement_tool_icon(&painter, button_rect, *mode, icon_color);
+            let clicked = response.clicked();
+            let _ = response.on_hover_text(*tooltip);
+            if clicked {
+                self.gizmo_mode = *mode;
+                self.placement_gizmo_drag = None;
+                self.placement_drag_piece = None;
+            }
+        }
+    }
+
     fn rotate_selected_placement(&mut self, axis: usize, degrees: f64) {
         let Some(id) = self.selected_placement_piece else { return; };
         if self.piece_is_frozen(id) { return; }
@@ -2003,7 +2548,10 @@ impl ClothEvoApp {
 
     fn new_pattern_project(&mut self) {
         if !self.confirm_discard_unsaved_changes() { return; }
+        let avatar_path = self.avatar_mesh_path.clone();
         self.pattern_project = PatternProject::new("Novo projeto");
+        self.workspace = WorkspaceMode::Pattern;
+        self.playing = false;
         self.draft_points.clear();
         self.selected_piece = 0;
         self.selected_target = None;
@@ -2014,7 +2562,39 @@ impl ClothEvoApp {
         self.dragging_before = None;
         self.drag_last_world = None;
         self.pattern_dirty = false;
+        self.reset_to_empty_environment();
+        if let Some(path) = avatar_path {
+            self.schedule_avatar_import(&path, true, false);
+        }
         self.pattern_message = "Novo projeto criado.".into();
+    }
+
+    /// Descarta a malha de tecido da sessão anterior e restaura o ambiente vazio,
+    /// mantendo o avatar/collision settings atuais e os parâmetros globais do solver.
+    fn reset_to_empty_environment(&mut self) {
+        self.using_pattern_sim = false;
+        self.placement_ranges.clear();
+        self.selected_placement_piece = None;
+        self.placement_drag_piece = None;
+        self.placement_drag_before = None;
+        self.placement_gizmo_drag = None;
+        self.placement_drag_selected_body = false;
+
+        let mut builder = ClothBuilder::new();
+        builder.add_collider(Collider::ground());
+        if let Ok(colliders) = self.avatar_body_colliders() {
+            for collider in colliders {
+                builder.add_collider(collider);
+            }
+        }
+        self.sim = builder.build(self.sim.params.clone());
+        self.seam_pairs = self.sim.seam_pairs();
+        self.normals.clear();
+        self.diverged = false;
+        self.accumulator = 0.0;
+        self.last_step_ms = 0.0;
+        self.playing = false;
+        self.upload_scene();
     }
 
     fn open_pattern_project_dialog(&mut self) {
@@ -2026,11 +2606,19 @@ impl ClothEvoApp {
         let Some(path) = dialog.pick_file() else { return; };
         let loaded = std::fs::read_to_string(&path)
             .map_err(|e| format!("Falha ao ler {}: {e}", path.display()))
-            .and_then(|json| PatternProject::from_json(&json));
+            .and_then(|json| {
+                PatternProject::from_json(&json).map(|project| {
+                    let app_state = serde_json::from_str::<serde_json::Value>(&json).ok()
+                        .and_then(|document| document.get("clothevo_app").cloned());
+                    (project, app_state)
+                })
+            });
         match loaded {
-            Ok(project) => {
+            Ok((project, app_state)) => {
                 if !self.confirm_discard_unsaved_changes() { return; }
                 self.pattern_project = project;
+                self.workspace = WorkspaceMode::Pattern;
+                self.playing = false;
                 self.draft_points.clear();
                 self.selected_piece = 0;
                 self.selected_target = None;
@@ -2041,10 +2629,57 @@ impl ClothEvoApp {
                 self.dragging_before = None;
                 self.drag_last_world = None;
                 self.pattern_dirty = false;
+                self.reset_to_empty_environment();
                 self.pattern_message = format!("Projeto carregado: {}", path.display());
+                if let Some(app_state) = app_state {
+                    self.restore_project_app_state(&app_state);
+                }
             }
             Err(error) => self.pattern_message = error,
         }
+    }
+
+    fn restore_project_app_state(&mut self, app_state: &serde_json::Value) {
+        self.avatar_visible = app_state.get("avatar_visible")
+            .and_then(serde_json::Value::as_bool).unwrap_or(true);
+        self.avatar_wireframe = app_state.get("avatar_wireframe")
+            .and_then(serde_json::Value::as_bool).unwrap_or(false);
+        self.avatar_collision_enabled = app_state.get("avatar_collision_enabled")
+            .and_then(serde_json::Value::as_bool).unwrap_or(true);
+        self.avatar_collision_spacing_m = app_state.get("avatar_collision_spacing_m")
+            .and_then(serde_json::Value::as_f64).unwrap_or(0.01)
+            .clamp(0.004, 0.03) as f32;
+        self.avatar_heading_degrees = app_state.get("avatar_heading_degrees")
+            .and_then(serde_json::Value::as_f64).unwrap_or(0.0)
+            .clamp(-180.0, 180.0) as f32;
+
+        // Uma referência presente no documento substitui o avatar da sessão atual.
+        self.avatar_import_receiver = None;
+        self.avatar_import_pending_path = None;
+        self.avatar_mesh = None;
+        self.avatar_sdf = None;
+        self.avatar_mesh_name = None;
+        self.avatar_mesh_path = None;
+        self.avatar_diagnostics = None;
+        self.avatar_imported_height_m = None;
+        self.avatar_imported_heading_degrees = None;
+        self.avatar_imported_collision_spacing_m = None;
+
+        if let Some(saved_path) = app_state.get("avatar_path").and_then(serde_json::Value::as_str) {
+            let saved_path = std::path::PathBuf::from(saved_path);
+            if saved_path.is_file() {
+                self.schedule_avatar_import(&saved_path, true, false);
+            } else {
+                self.pattern_message = format!(
+                    "Projeto carregado, mas o arquivo de avatar salvo não foi encontrado: {}. A visualização usa o manequim procedural.",
+                    saved_path.display()
+                );
+            }
+        }
+        if let Err(error) = self.sync_pattern_avatar_colliders() {
+            self.pattern_message = format!("Projeto carregado, mas não foi possível atualizar a colisão: {error}");
+        }
+        self.upload_scene();
     }
 
     fn save_pattern_project(&mut self) {
@@ -2071,9 +2706,24 @@ impl ClothEvoApp {
         if path.extension().is_none() {
             path.set_extension("clothevo");
         }
-        let result = self.pattern_project.to_json()
-            .and_then(|json| std::fs::write(&path, json)
-                .map_err(|e| format!("Falha ao salvar {}: {e}", path.display())));
+        let result = self.pattern_project.to_json().and_then(|json| {
+            let mut document = serde_json::from_str::<serde_json::Value>(&json)
+                .map_err(|e| format!("Falha ao preparar o projeto para salvar: {e}"))?;
+            document["clothevo_app"] = serde_json::json!({
+                "version": 1,
+                "avatar_path": self.avatar_mesh_path.as_ref()
+                    .map(|saved_path| saved_path.to_string_lossy().into_owned()),
+                "avatar_visible": self.avatar_visible,
+                "avatar_wireframe": self.avatar_wireframe,
+                "avatar_collision_enabled": self.avatar_collision_enabled,
+                "avatar_collision_spacing_m": self.avatar_collision_spacing_m,
+                "avatar_heading_degrees": self.avatar_heading_degrees,
+            });
+            let serialized = serde_json::to_string_pretty(&document)
+                .map_err(|e| format!("Falha ao serializar o projeto: {e}"))?;
+            std::fs::write(&path, serialized)
+                .map_err(|e| format!("Falha ao salvar {}: {e}", path.display()))
+        });
         match result {
             Ok(()) => {
                 self.pattern_saved_path = Some(path.clone());
@@ -2130,7 +2780,7 @@ impl ClothEvoApp {
     }
 
     fn pattern_controls(&mut self, ui: &mut egui::Ui) {
-        ui.heading("MOLDES 2D · GEOMETRIA VETORIAL");
+        ui.heading("2D VIEWPORT · GEOMETRIA VETORIAL");
         ui.label("Editor de moldes · medidas internas em metros");
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.pattern_tool, PatternTool::Draw, "Desenhar");
@@ -2149,14 +2799,6 @@ impl ClothEvoApp {
             if ui.add_enabled(!self.pattern_redo.is_empty(), egui::Button::new("Refazer")).clicked() {
                 self.redo_pattern_edit();
             }
-        });
-        ui.horizontal(|ui| {
-            if ui.button("Novo projeto").clicked() { self.new_pattern_project(); }
-            if ui.button("Abrir…").clicked() { self.open_pattern_project_dialog(); }
-        });
-        ui.horizontal(|ui| {
-            if ui.button("Salvar").clicked() { self.save_pattern_project(); }
-            if ui.button("Salvar como…").clicked() { self.save_pattern_project_as(); }
         });
         if self.pattern_dirty {
             ui.colored_label(egui::Color32::from_rgb(240, 180, 75), "Modificações não salvas");
@@ -2977,8 +3619,6 @@ impl ClothEvoApp {
         let avatar_before = self.pattern_project.avatar.clone();
         let mut avatar_changed = false;
         let import_pending = self.avatar_import_pending_path.is_some();
-        let mut avatar_view_changed = false;
-        let mut avatar_collision_changed = false;
         let mut reprocess_avatar = false;
         let mut remove_avatar = false;
         ui.collapsing("Avatar e colisão corporal", |ui| {
@@ -2995,33 +3635,20 @@ impl ClothEvoApp {
             avatar_changed |= ui.add(egui::Slider::new(
                 &mut self.pattern_project.avatar.hip_width_meters, 0.22..=0.70,
             ).text("Largura do quadril (m)")).changed();
-            ui.add(egui::Slider::new(
+            let heading_changed = ui.add(egui::Slider::new(
                 &mut self.avatar_heading_degrees, -180.0..=180.0,
-            ).text("Giro do avatar em Y (°)"));
+            ).text("Giro do avatar em Y (°)")).changed();
             ui.label("OBJ usa detecção automática de eixo; FBX é convertido para Y-up.");
-            ui.add(egui::Slider::new(
+            let spacing_changed = ui.add(egui::Slider::new(
                 &mut self.avatar_collision_spacing_m, 0.004..=0.03,
             ).text("Precisão da colisão (m)"))
                 .on_hover_text("Espaçamento menor preserva mais detalhes, com maior custo de memória e importação.")
                 .changed();
-
-            avatar_view_changed |= ui.checkbox(&mut self.avatar_visible, "Exibir avatar").changed();
-            avatar_view_changed |= ui.add_enabled(
-                self.avatar_mesh.is_some(),
-                egui::Checkbox::new(&mut self.avatar_wireframe, "Wireframe de inspeção"),
-            ).changed();
-            avatar_collision_changed |= ui.checkbox(
-                &mut self.avatar_collision_enabled,
-                "Usar avatar como superfície de colisão",
-            ).changed();
+            if heading_changed || spacing_changed {
+                self.pattern_dirty = true;
+            }
 
             ui.horizontal(|ui| {
-                if ui.add_enabled(
-                    !import_pending,
-                    egui::Button::new("Importar avatar OBJ/FBX…"),
-                ).clicked() {
-                    self.import_avatar_dialog();
-                }
                 if self.avatar_mesh_path.is_some() {
                     reprocess_avatar |= ui.add_enabled(
                         !import_pending,
@@ -3116,16 +3743,8 @@ impl ClothEvoApp {
                 ui.weak("Sem malha importada, a colisão usa o manequim procedural quando ativada.");
             }
         });
-        if avatar_view_changed {
-            self.upload_scene();
-        }
-        if avatar_collision_changed {
-            if let Err(error) = self.sync_pattern_avatar_colliders() {
-                self.pattern_message = format!("Não foi possível atualizar a colisão do avatar: {error}");
-            }
-            self.upload_scene();
-        }
         if remove_avatar {
+            self.pattern_dirty = true;
             self.avatar_import_receiver = None;
             self.avatar_import_pending_path = None;
             self.avatar_mesh = None;
@@ -3143,8 +3762,9 @@ impl ClothEvoApp {
             self.upload_scene();
         }
         if reprocess_avatar {
+            self.pattern_dirty = true;
             if let Some(path) = self.avatar_mesh_path.clone() {
-                self.schedule_avatar_import(&path, true);
+                self.schedule_avatar_import(&path, true, true);
             }
         }
         if avatar_changed {
@@ -5743,6 +6363,10 @@ impl ClothEvoApp {
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         let placement_mode = self.workspace == WorkspaceMode::Placement && self.using_pattern_sim;
+        let toolbar_bounds = placement_mode.then(|| placement_toolbar_bounds(rect));
+        let pointer_over_toolbar = toolbar_bounds
+            .map(|bounds| ui.input(|i| i.pointer.hover_pos().is_some_and(|pointer| bounds.contains(pointer))))
+            .unwrap_or(false);
         let aspect = rect.width() / rect.height().max(1.0);
         if response.hovered() {
             let preset = ui.input(|i| -> Option<CameraPreset> {
@@ -5758,7 +6382,7 @@ impl ClothEvoApp {
         // Isso evita que um clique no eixo seja interpretado como arraste livre do tecido.
         let pointer_delta = ui.input(|i| i.pointer.delta());
         if placement_mode {
-            if response.drag_started_by(egui::PointerButton::Primary) {
+            if response.drag_started_by(egui::PointerButton::Primary) && !pointer_over_toolbar {
                 if let Some(pointer) = response.interact_pointer_pos() {
                     let view_proj = self.camera.view_proj(aspect);
                     if let Some(gizmo) = self.hit_test_placement_gizmo(pointer, rect, view_proj) {
@@ -5780,7 +6404,7 @@ impl ClothEvoApp {
                     }
                 }
             }
-            if response.dragged_by(egui::PointerButton::Primary) {
+            if response.dragged_by(egui::PointerButton::Primary) && !pointer_over_toolbar {
                 if let Some(mut gizmo) = self.placement_gizmo_drag {
                     let pointer = response.interact_pointer_pos()
                         .unwrap_or(gizmo.last_pointer + pointer_delta);
@@ -5821,7 +6445,7 @@ impl ClothEvoApp {
                     self.camera.orbit(pointer_delta.x, pointer_delta.y);
                 }
             }
-            if response.clicked() {
+            if response.clicked() && !pointer_over_toolbar {
                 if let Some(pointer) = response.interact_pointer_pos() {
                     let view_proj = self.camera.view_proj(aspect);
                     if self.hit_test_placement_gizmo(pointer, rect, view_proj).is_none() {
@@ -5864,12 +6488,12 @@ impl ClothEvoApp {
         } else if response.dragged_by(egui::PointerButton::Primary) {
             self.camera.orbit(pointer_delta.x, pointer_delta.y);
         }
-        if response.dragged_by(egui::PointerButton::Secondary)
-            || response.dragged_by(egui::PointerButton::Middle)
+        if !pointer_over_toolbar && (response.dragged_by(egui::PointerButton::Secondary)
+            || response.dragged_by(egui::PointerButton::Middle))
         {
             self.camera.pan(pointer_delta.x, pointer_delta.y, rect.height());
         }
-        if response.hovered() {
+        if response.hovered() && !pointer_over_toolbar {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll != 0.0 {
                 self.camera.zoom(scroll);
@@ -5922,6 +6546,7 @@ impl ClothEvoApp {
                 }
             }
             self.draw_placement_gizmo(ui.painter(), rect, view_proj);
+            self.draw_placement_toolbar(ui, rect);
         }
     }
 
@@ -7291,6 +7916,10 @@ fn metrics_panel(app: &ClothEvoApp, ui: &mut egui::Ui) {
 
 impl eframe::App for ClothEvoApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.ui_theme_dirty {
+            self.apply_ui_customization(ui.ctx());
+            self.ui_theme_dirty = false;
+        }
         self.poll_avatar_import();
         if let Some(goal) = self.camera_goal {
             let camera_dt = ui.input(|i| i.stable_dt);
@@ -7315,18 +7944,33 @@ impl eframe::App for ClothEvoApp {
 
         egui::Panel::top("main_navigation")
             .frame(egui::Frame::new()
-                .fill(egui::Color32::from_rgb(18, 54, 150))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 170, 53)))
+                .fill(ui_rgb(self.ui_customization.theme.navigation_bg))
+                .stroke(egui::Stroke::new(1.0, ui_rgb(self.ui_customization.theme.border)))
                 .inner_margin(egui::Margin::symmetric(14, 8)))
             .show(ui, |ui| self.top_navigation(ui));
+
+        egui::Panel::top("global_toolbar")
+            .frame(egui::Frame::new()
+                .fill(ui_rgb(self.ui_customization.theme.toolbar_bg))
+                .stroke(egui::Stroke::new(1.0, ui_rgb(self.ui_customization.theme.border)))
+                .inner_margin(egui::Margin::symmetric(14, 5)))
+            .show(ui, |ui| self.global_toolbar(ui));
+
+        if self.ui_customization.toolbar_buttons.iter().any(|button| button.visible) {
+            egui::Panel::top("custom_command_toolbar")
+                .frame(egui::Frame::new()
+                    .fill(ui_rgb(self.ui_customization.theme.panel_bg))
+                    .inner_margin(egui::Margin::symmetric(10, 3)))
+                .show(ui, |ui| self.custom_toolbar(ui));
+        }
 
         if self.show_metrics {
             egui::Panel::bottom("view_metrics")
                 .resizable(true)
                 .default_size(155.0)
                 .frame(egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(12, 16, 29))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(54, 63, 91)))
+                    .fill(ui_rgb(self.ui_customization.theme.deep_bg))
+                    .stroke(egui::Stroke::new(1.0, ui_rgb(self.ui_customization.theme.border)))
                     .inner_margin(egui::Margin::same(10)))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -7357,12 +8001,13 @@ impl eframe::App for ClothEvoApp {
             }
         });
 
+        self.ui_customizer_window(ui.ctx());
         self.handle_capture(ui);
         if self.diverged && !diverged_before {
             // O diagnóstico foi definido após renderizar o painel de controles deste frame.
             ui.ctx().request_repaint();
         }
-        if (self.avatar_import_pending_path.is_some()) {
+        if self.avatar_import_pending_path.is_some() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         }
         if (self.playing && self.workspace.runs_simulation()) || self.capture.is_some() {
@@ -7373,11 +8018,92 @@ impl eframe::App for ClothEvoApp {
 
 
 
+fn ui_rgb(rgb: [u8; 3]) -> egui::Color32 {
+    egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+}
+
+fn edit_ui_rgb(ui: &mut egui::Ui, label: &str, rgb: &mut [u8; 3]) -> bool {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let mut color = ui_rgb(*rgb);
+        let changed = ui.color_edit_button_srgba(&mut color).changed();
+        if changed {
+            *rgb = [color.r(), color.g(), color.b()];
+        }
+        changed
+    }).inner
+}
+
 fn gizmo_axis_color(axis: usize) -> egui::Color32 {
     match axis {
         0 => egui::Color32::from_rgb(245, 86, 83),
         1 => egui::Color32::from_rgb(103, 220, 125),
         _ => egui::Color32::from_rgb(83, 164, 255),
+    }
+}
+
+fn placement_toolbar_bounds(viewport_rect: egui::Rect) -> egui::Rect {
+    const BUTTON_SIDE: f32 = 36.0;
+    const BUTTON_GAP: f32 = 7.0;
+    const PANEL_WIDTH: f32 = 50.0;
+    const PANEL_PADDING: f32 = 7.0;
+    let panel_height = PANEL_PADDING * 2.0 + BUTTON_SIDE * 4.0 + BUTTON_GAP * 3.0;
+    egui::Rect::from_min_size(
+        viewport_rect.left_top() + egui::vec2(12.0, 12.0),
+        egui::vec2(PANEL_WIDTH, panel_height),
+    )
+}
+
+fn paint_placement_tool_icon(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    mode: GizmoMode,
+    color: egui::Color32,
+) {
+    let center = rect.center();
+    let stroke = egui::Stroke::new(2.0, color);
+    let arrow = |tip: egui::Pos2, direction: egui::Vec2| {
+        let direction = direction.normalized();
+        if direction.length_sq() < 1.0e-6 { return; }
+        let base = tip - direction * 4.5;
+        let perpendicular = egui::vec2(-direction.y, direction.x) * 2.8;
+        painter.line_segment([tip, base + perpendicular], stroke);
+        painter.line_segment([tip, base - perpendicular], stroke);
+    };
+
+    match mode {
+        GizmoMode::Rotate => {
+            painter.circle_stroke(center, 8.0, stroke);
+            let tip = center + egui::vec2(6.5, -5.0);
+            arrow(tip, egui::vec2(1.0, -0.35));
+        }
+        GizmoMode::Move => {
+            painter.line_segment([center - egui::vec2(10.0, 0.0), center + egui::vec2(10.0, 0.0)], stroke);
+            painter.line_segment([center - egui::vec2(0.0, 10.0), center + egui::vec2(0.0, 10.0)], stroke);
+            arrow(center + egui::vec2(12.0, 0.0), egui::vec2(1.0, 0.0));
+            arrow(center - egui::vec2(12.0, 0.0), egui::vec2(-1.0, 0.0));
+            arrow(center + egui::vec2(0.0, 12.0), egui::vec2(0.0, 1.0));
+            arrow(center - egui::vec2(0.0, 12.0), egui::vec2(0.0, -1.0));
+        }
+        GizmoMode::Scale => {
+            let start = center + egui::vec2(-9.0, 9.0);
+            let end = center + egui::vec2(9.0, -9.0);
+            painter.line_segment([start, end], stroke);
+            arrow(start, egui::vec2(-1.0, 1.0));
+            arrow(end, egui::vec2(1.0, -1.0));
+        }
+        GizmoMode::Transform => {
+            let origin = center + egui::vec2(-6.5, 6.5);
+            let x_end = origin + egui::vec2(13.5, 0.0);
+            let y_end = origin + egui::vec2(0.0, -13.5);
+            let z_end = origin + egui::vec2(9.0, -9.0);
+            painter.line_segment([origin, x_end], stroke);
+            painter.line_segment([origin, y_end], stroke);
+            painter.line_segment([origin, z_end], stroke);
+            arrow(x_end, egui::vec2(1.0, 0.0));
+            arrow(y_end, egui::vec2(0.0, -1.0));
+            arrow(z_end, egui::vec2(1.0, -1.0));
+        }
     }
 }
 
