@@ -6298,7 +6298,7 @@ impl ClothEvoApp {
             .collect();
 
         // Fundo neutro atrás da cena (o chão desenhado pelo renderer cobre a parte de baixo).
-        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(52, 60, 74));
+        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(35, 36, 37));
         let view_proj = self.camera.view_proj(aspect);
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
