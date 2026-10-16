@@ -12,7 +12,7 @@ use cloth_render::{
 };
 use cloth_sim::{
     arrangement_points, arrangement_surface_position, build_avatar_colliders, build_scene,
-    clear_shell_radius, AvatarConfig, ClothBuilder, Collider, FabricPreset,
+    front_surface_z, AvatarConfig, ClothBuilder, Collider, FabricPreset,
     PanelMaterial, PanelMesh, Placement, SceneKind, SignedDistanceField, Simulation, SimParams,
 };
 use eframe::{egui, egui_wgpu};
@@ -294,7 +294,23 @@ fn physical_fold_edges(
     }).collect()
 }
 
-/// Raio de montagem por painel, incluindo espessura, ruído inicial e folga entre camadas.
+/// Profundidade em que um molde plano, voltado para +Z, fica em frente à superfície corporal sob sua área.
+/// Retorna `None` quando não há corpo sob o molde (por exemplo, fora da silhueta).
+fn front_projection_z(
+    colliders: &[Collider],
+    mesh_vertices: &[PatternPoint2],
+    origin_y: f32,
+    clearance: f32,
+) -> Option<f32> {
+    let stride = (mesh_vertices.len() / 160).max(1);
+    mesh_vertices
+        .iter()
+        .step_by(stride)
+        .filter_map(|p| front_surface_z(colliders, p.x as f32, origin_y + p.y as f32, clearance))
+        .fold(None, |best: Option<f32>, z| Some(best.map_or(z, |b| b.max(z))))
+}
+
+/// Raio de montagem de fallback quando não há superfície corporal sob o molde.
 fn pattern_sim_shell_radius(piece_index: usize, thickness: f32) -> f32 {
     PATTERN_SIM_BODY_RADIUS + thickness + PATTERN_SIM_PERTURBATION
         + piece_index as f32 * PATTERN_SIM_LAYER_SPACING
@@ -5355,12 +5371,6 @@ impl ClothEvoApp {
             ));
         }
 
-        let min_x = prepared.iter()
-            .flat_map(|(_, _, mesh, _, _, _, _)| mesh.vertices.iter().map(|p| p.x))
-            .fold(f64::INFINITY, f64::min);
-        let max_x = prepared.iter()
-            .flat_map(|(_, _, mesh, _, _, _, _)| mesh.vertices.iter().map(|p| p.x))
-            .fold(f64::NEG_INFINITY, f64::max);
         let min_y = prepared.iter()
             .flat_map(|(_, _, mesh, _, _, _, _)| mesh.vertices.iter().map(|p| p.y))
             .fold(f64::INFINITY, f64::min);
@@ -5391,9 +5401,9 @@ impl ClothEvoApp {
         let mut infos: Vec<PieceBuildInfo> = Vec::new();
         let mut physical_fold_edge_count = 0usize;
         let piece_count = prepared.len();
-        let x_span = (max_x - min_x).max(1.0e-6);
-        // A altura-base acompanha a altura do avatar; 1,72 m preserva o layout anterior.
-        let origin_y = (0.9 * f64::from(avatar.height_m) / 1.72 - min_y) as f32;
+        // A origem 2D (y = 0) fica a 0,80 m do chão no guia T-Pose de 1,72 m e acompanha a altura do
+        // avatar. Moldes desenhados abaixo dos pés sobem o conjunto para ficar acima do chão.
+        let origin_y = (0.80 * f64::from(avatar.height_m) / 1.72).max(0.02 - min_y) as f32;
 
         // Empilhamento: camada menor fica mais perto do corpo; empate resolve pela ordem dos moldes.
         let mut layer_order: Vec<usize> = (0..piece_count).collect();
@@ -5439,46 +5449,23 @@ impl ClothEvoApp {
             );
             physical_fold_edge_count += fold_edges.len();
             let panel_mesh = PanelMesh { uv, triangles: mesh.triangles };
-            // Distribui o layout 2D pela semicircunferência frontal do colisor corporal:
-            // moldes mais à esquerda/direita começam tangentes às laterais, e costuras os unem.
-            let angle = (((center_x - min_x) / x_span).clamp(0.0, 1.0)
-                * std::f64::consts::PI - std::f64::consts::FRAC_PI_2) as f32;
             let piece_thickness = fabric.thickness_meters as f32;
-            // Usa a geometria efetiva da colisão para que a casca dos moldes não nasça
-            // dentro de quadris, tórax ou braços. A largura tangencial ainda é aproximada.
-            let body_clear_radius = clear_shell_radius(
-                &body_colliders,
-                angle,
-                origin_y + mesh_min_y as f32,
-                origin_y + mesh_max_y as f32,
-                0.0,
-                PATTERN_SIM_BODY_RADIUS,
-            );
-            let shell_radius = pattern_sim_shell_radius(layer_rank[piece_index], piece_thickness).max(
-                body_clear_radius
-                    + piece_thickness
-                    + PATTERN_SIM_PERTURBATION
-                    + layer_rank[piece_index] as f32 * PATTERN_SIM_LAYER_SPACING,
-            );
-            // Com ponto de posicionamento, o centro do molde vai para a superfície do corpo nesse
-            // ponto, voltado para a normal dele; sem ponto, vale o layout automático frontal.
+            let clearance = piece_thickness
+                + PATTERN_SIM_PERTURBATION
+                + layer_rank[piece_index] as f32 * PATTERN_SIM_LAYER_SPACING;
+            // Com ponto de posicionamento, ele continua tendo prioridade e define a normal do painel.
+            // Sem ponto, projetamos o layout 2D diretamente para a frente do corpo.
             let arrangement_point = assembly.arrangement.as_deref()
                 .and_then(|point_id| arrangement_list.iter().find(|point| point.id == point_id));
             let (auto_origin, base_angle) = if let Some(point) = arrangement_point {
-                let clearance = piece_thickness
-                    + PATTERN_SIM_PERTURBATION
-                    + layer_rank[piece_index] as f32 * PATTERN_SIM_LAYER_SPACING;
                 let surface = arrangement_surface_position(&body_colliders, point, clearance);
                 (Vec3::new(surface.x, point.anchor.y, surface.z), point.normal.x.atan2(point.normal.z))
             } else {
-                (
-                    Vec3::new(
-                        angle.sin() * shell_radius,
-                        origin_y + center_y as f32,
-                        angle.cos() * shell_radius,
-                    ),
-                    angle,
-                )
+                // X/Y do layout 2D mapeiam diretamente para X/Y do mundo. Cada painel é independente;
+                // painéis nas costas devem usar um ponto de posicionamento explícito.
+                let front_z = front_projection_z(&body_colliders, &mesh.vertices, origin_y, clearance)
+                    .unwrap_or_else(|| pattern_sim_shell_radius(layer_rank[piece_index], piece_thickness));
+                (Vec3::new(center_x as f32, origin_y + center_y as f32, front_z), 0.0)
             };
             let translation = auto_origin + Vec3::new(
                 assembly.translation_meters[0] as f32,

@@ -23,7 +23,7 @@ pub mod solver;
 
 pub use avatar::{
     arrangement_points, arrangement_surface_position, build_avatar_colliders, clear_shell_radius,
-    ArrangementPoint, AvatarConfig,
+    front_surface_z, ArrangementPoint, AvatarConfig,
 };
 pub use builder::{ClothBuilder, PanelHandle};
 pub use collider::Collider;

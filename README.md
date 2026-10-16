@@ -288,6 +288,8 @@ O Pattern Studio usa o arquivo PNG raster da referência **T-POSE** em `assets/t
 
 Use **Posicionar moldes na cena 3D** para gerar uma prévia dos painéis em torno do manequim sem iniciar automaticamente a física. Selecione um painel e escolha no painel lateral o modo **Mover**, **Girar**, **Escalar** ou **Transformar**:
 
+**Layout automático (projeção frontal):** sem ponto de posicionamento, cada molde é colocado no 3D exatamente onde está no canvas 2D: o eixo X do molde vira o eixo X do mundo e o eixo Y 2D usa a mesma referência do guia T-Pose (origem 2D a 0,80 m do chão para um avatar de 1,72 m, proporcional à altura). O molde fica plano, voltado para +Z, na frente do ponto mais saliente do corpo sob a sua área, com a folga da espessura e da camada. A posição depende só do próprio molde, e não dos demais; para moldes nas costas use um ponto de posicionamento. Projetos que já tinham deslocamentos salvos no gizmo podem aparecer em outro lugar, porque eles são relativos a esse layout.
+
 - **Mover**: arraste as setas coloridas para deslocar o molde por eixo.
 - **Girar**: arraste os anéis para rotacionar o molde no eixo correspondente.
 - **Escalar**: arraste os quadrados nas extremidades dos eixos; como o molde é uma superfície 2D, o controle normal ao plano aplica escala uniforme no plano.

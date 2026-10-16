@@ -180,6 +180,24 @@ pub fn arrangement_surface_position(
     point.anchor + direction * MAX_DISTANCE
 }
 
+/// Profundidade frontal do corpo num ponto (x, y), para um molde plano voltado para +Z.
+/// Caminha de z = 1 m para trás, em passos de 5 mm, até encontrar a superfície com a folga pedida.
+/// Retorna `None` se não encontrar corpo naquela posição, por exemplo fora da silhueta.
+pub fn front_surface_z(colliders: &[Collider], x: f32, y: f32, clearance: f32) -> Option<f32> {
+    const STEP: f32 = 0.005;
+    const START_Z: f32 = 1.0;
+    const END_Z: f32 = -0.6;
+    let mut z = START_Z;
+    while z > END_Z {
+        let position = Vec3::new(x, y, z);
+        if colliders.iter().any(|collider| collider.sdf(position) < clearance) {
+            return Some(z + STEP);
+        }
+        z -= STEP;
+    }
+    None
+}
+
 /// Menor raio r >= min_radius para que o centro de uma faixa do molde fique fora
 /// dos colisores em alturas amostradas. É uma estimativa por linha central: não inclui
 /// a largura tangencial do molde e limita a busca a 1,5 m.
@@ -300,5 +318,32 @@ mod arrangement_tests {
             assert!((position - point.anchor).dot(point.normal) > 0.0, "{} não saiu do corpo", point.id);
             assert!((position.y - point.anchor.y).abs() < 1.0e-5 && (position.x - point.anchor.x).abs() < 1.0e-5);
         }
+    }
+}
+
+#[cfg(test)]
+mod front_projection_tests {
+    use super::*;
+
+    #[test]
+    fn front_surface_z_finds_the_chest_front_and_ignores_empty_space() {
+        let config = AvatarConfig::default();
+        let colliders = build_avatar_colliders(&config).unwrap();
+        let chest_y = config.height_m * 0.725;
+        let z = front_surface_z(&colliders, 0.0, chest_y, 0.0).expect("deve haver corpo no peito");
+        assert!(z > 0.10 && z < 0.20, "z do peito fora do esperado: {z}");
+        let with_clearance = front_surface_z(&colliders, 0.0, chest_y, 0.02).unwrap();
+        assert!(with_clearance > z, "a folga deve afastar o painel do corpo");
+        assert!(front_surface_z(&colliders, 2.0, chest_y, 0.0).is_none());
+        assert!(front_surface_z(&colliders, 0.0, config.height_m + 0.8, 0.0).is_none());
+    }
+
+    #[test]
+    fn front_surface_z_does_not_depend_on_other_positions() {
+        let config = AvatarConfig::default();
+        let colliders = build_avatar_colliders(&config).unwrap();
+        let first = front_surface_z(&colliders, 0.1, 1.2, 0.002);
+        let _other = front_surface_z(&colliders, -0.1, 1.0, 0.002);
+        assert_eq!(first, front_surface_z(&colliders, 0.1, 1.2, 0.002));
     }
 }
