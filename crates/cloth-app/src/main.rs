@@ -1154,7 +1154,7 @@ impl ClothEvoApp {
 
     fn apply_ui_customization(&self, ctx: &egui::Context) {
         let theme = &self.ui_customization.theme;
-        let mut style = (*ctx.style()).clone();
+        let mut style = (*ctx.global_style()).clone();
         let mut visuals = style.visuals.clone();
         visuals.panel_fill = ui_rgb(theme.panel_bg);
         visuals.window_fill = ui_rgb(theme.window_bg);
@@ -1168,9 +1168,10 @@ impl ClothEvoApp {
         visuals.widgets.inactive.fg_stroke.color = ui_rgb(theme.text);
         visuals.widgets.hovered.fg_stroke.color = ui_rgb(theme.text);
         visuals.widgets.active.fg_stroke.color = ui_rgb(theme.text);
-        visuals.widgets.inactive.bg_fill = ui_rgb(theme.button_bg);
-        visuals.widgets.hovered.bg_fill = ui_rgb(theme.button_hover);
-        visuals.widgets.active.bg_fill = ui_rgb(theme.selection);
+        visuals.widgets.noninteractive.bg_fill = ui_rgb(theme.panel_bg);
+        visuals.widgets.inactive.weak_bg_fill = ui_rgb(theme.button_bg);
+        visuals.widgets.hovered.weak_bg_fill = ui_rgb(theme.button_hover);
+        visuals.widgets.active.weak_bg_fill = ui_rgb(theme.selection);
         visuals.widgets.noninteractive.bg_stroke.color = ui_rgb(theme.border);
         visuals.widgets.inactive.bg_stroke.color = ui_rgb(theme.border);
         visuals.widgets.hovered.bg_stroke.color = ui_rgb(theme.accent);
@@ -1184,7 +1185,7 @@ impl ClothEvoApp {
         style.visuals = visuals;
         style.spacing.item_spacing = egui::vec2(theme.spacing, theme.spacing);
         style.spacing.button_padding = egui::vec2(theme.spacing * 0.8, theme.spacing * 0.5);
-        ctx.set_style(style);
+        ctx.set_global_style(style);
         ctx.set_zoom_factor(theme.ui_scale.clamp(0.75, 1.75));
     }
 
