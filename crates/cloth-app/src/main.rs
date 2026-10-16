@@ -319,7 +319,7 @@ fn pattern_sim_shell_radius(piece_index: usize, thickness: f32) -> f32 {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("ClothEvo — Surreal Textile Lab")
+            .with_title("ClothEvo")
             .with_inner_size([1360.0, 840.0])
             .with_min_inner_size([900.0, 600.0]),
         renderer: eframe::Renderer::Wgpu,
@@ -1023,8 +1023,6 @@ impl ClothEvoApp {
     }
 
     fn top_navigation(&mut self, ui: &mut egui::Ui) {
-        const COBALT: egui::Color32 = egui::Color32::from_rgb(18, 54, 150);
-        const MAGENTA: egui::Color32 = egui::Color32::from_rgb(220, 67, 143);
         const ORANGE: egui::Color32 = egui::Color32::from_rgb(255, 170, 53);
         const PAPER: egui::Color32 = egui::Color32::from_rgb(247, 239, 215);
 
@@ -1034,7 +1032,6 @@ impl ClothEvoApp {
             ui.add_space(2.0);
             ui.vertical(|ui| {
                 ui.label(egui::RichText::new("CLOTHEVO").size(23.0).strong().color(PAPER));
-                ui.label(egui::RichText::new("SURREAL TEXTILE LAB  /  01").size(9.5).strong().color(ORANGE));
             });
             ui.add_space(16.0);
             ui.separator();
@@ -1042,13 +1039,13 @@ impl ClothEvoApp {
 
             if ui.selectable_label(
                 self.workspace == WorkspaceMode::Simulation,
-                egui::RichText::new("Ambiente 3D").strong(),
+                egui::RichText::new("3D Viewport").strong(),
             ).clicked() {
                 self.workspace = WorkspaceMode::Simulation;
             }
             if ui.selectable_label(
                 self.workspace == WorkspaceMode::Pattern,
-                egui::RichText::new("Moldes 2D").strong(),
+                egui::RichText::new("2D Viewport").strong(),
             ).clicked() {
                 self.playing = false;
                 self.workspace = WorkspaceMode::Pattern;
@@ -1090,59 +1087,91 @@ impl ClothEvoApp {
                 },
             );
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(48.0, 40.0), egui::Sense::hover());
-                let painter = ui.painter_at(rect);
-                let center = rect.center();
-                painter.circle_filled(center, 13.0, MAGENTA);
-                painter.circle_stroke(center, 18.0, egui::Stroke::new(1.5, ORANGE));
-                painter.add(egui::Shape::convex_polygon(
-                    vec![
-                        center + egui::vec2(0.0, -22.0),
-                        center + egui::vec2(7.0, -5.0),
-                        center + egui::vec2(23.0, 1.0),
-                        center + egui::vec2(5.0, 5.0),
-                        center + egui::vec2(0.0, 22.0),
-                        center + egui::vec2(-5.0, 5.0),
-                        center + egui::vec2(-23.0, 1.0),
-                        center + egui::vec2(-7.0, -5.0),
-                    ],
-                    ORANGE,
-                    egui::Stroke::new(0.8, COBALT),
-                ));
-                ui.label(egui::RichText::new(if self.avatar_import_pending_path.is_some() {
-                    "AVATAR / IMPORTANDO"
-                } else if self.avatar_mesh.is_some() {
-                    "AVATAR / MALHA"
-                } else {
-                    "AVATAR / PROCEDURAL"
-                }).size(10.0).strong().color(PAPER));
-            });
         });
         if render_changed {
             self.upload_scene();
         }
     }
 
+    fn global_toolbar(&mut self, ui: &mut egui::Ui) {
+        let mut new_project = false;
+        let mut open_project = false;
+        let mut save_project = false;
+        let mut import_avatar = false;
+        let mut avatar_visibility_changed = false;
+        let mut wireframe_changed = false;
+        let mut collision_changed = false;
+        let import_pending = self.avatar_import_pending_path.is_some();
+        let imported_avatar_available = self.avatar_mesh.is_some();
+
+        ui.set_min_height(42.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("PROJETO").size(10.0).strong());
+            new_project = ui.button("Novo Projeto").clicked();
+            open_project = ui.button("Abrir Projeto").clicked();
+            save_project = ui.button("Salvar Projeto").clicked();
+
+            ui.separator();
+            ui.label(egui::RichText::new("AVATAR").size(10.0).strong());
+            avatar_visibility_changed |= ui.checkbox(&mut self.avatar_visible, "Exibir Avatar").changed();
+            wireframe_changed |= ui.add_enabled(
+                imported_avatar_available,
+                egui::Checkbox::new(&mut self.avatar_wireframe, "Wireframe"),
+            ).on_hover_text("Disponível após importar uma malha OBJ ou FBX.").changed();
+            collision_changed |= ui.checkbox(
+                &mut self.avatar_collision_enabled,
+                "Usar Avatar como Superfície de Colisão",
+            ).changed();
+            import_avatar = ui.add_enabled(
+                !import_pending,
+                egui::Button::new("Importar Avatar (.OBJ / .FBX)…"),
+            ).clicked();
+
+            if import_pending {
+                ui.spinner();
+                ui.label("Importando avatar…");
+            }
+        });
+
+        if new_project {
+            self.new_pattern_project();
+        }
+        if open_project {
+            self.open_pattern_project_dialog();
+        }
+        if save_project {
+            self.save_pattern_project();
+        }
+
+        if avatar_visibility_changed || wireframe_changed || collision_changed {
+            self.pattern_dirty = true;
+        }
+        if collision_changed {
+            if let Err(error) = self.sync_pattern_avatar_colliders() {
+                self.pattern_message = format!("Não foi possível atualizar a colisão do avatar: {error}");
+            }
+        }
+        if avatar_visibility_changed || wireframe_changed || collision_changed {
+            self.upload_scene();
+        }
+        if import_avatar {
+            self.import_avatar_dialog();
+        }
+    }
+
     fn environment_controls(&mut self, ui: &mut egui::Ui) {
-        ui.heading("AMBIENTE 3D");
+        ui.heading("3D VIEWPORT");
         ui.label("Espaço de trabalho pronto para receber os moldes e a simulação.");
         ui.separator();
 
-        let mut import = false;
         let mut reprocess = false;
         let mut remove = false;
-        let mut visibility_changed = false;
-        let mut collision_changed = false;
         let import_pending = self.avatar_import_pending_path.is_some();
 
         egui::CollapsingHeader::new("Avatar e colisão corporal")
             .default_open(true)
             .show(ui, |ui| {
                 ui.label("O modelo padrão é procurado automaticamente. Também é possível importar OBJ ou FBX.");
-                if ui.add_enabled(!import_pending, egui::Button::new("Importar avatar OBJ/FBX…")).clicked() {
-                    import = true;
-                }
                 if self.avatar_mesh_path.is_some() {
                     ui.horizontal(|ui| {
                         reprocess = ui.add_enabled(!import_pending, egui::Button::new("Aplicar escala / colisão")).clicked();
@@ -1170,8 +1199,6 @@ impl ClothEvoApp {
                             }
                         }
                     }
-                    visibility_changed = ui.checkbox(&mut self.avatar_visible, "Exibir avatar").changed();
-                    collision_changed = ui.checkbox(&mut self.avatar_collision_enabled, "Usar avatar como superfície de colisão").changed();
                 } else {
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 170, 53),
@@ -1179,13 +1206,12 @@ impl ClothEvoApp {
                     );
                 }
                 if self.pattern_project.pieces.is_empty() {
-                    ui.weak("Próximo passo: criar os moldes em Moldes 2D.");
+                    ui.weak("Próximo passo: criar os moldes no 2D Viewport.");
                 } else {
                     ui.weak("Use Posicionamento 3D para organizar os painéis antes de iniciar a simulação.");
                 }
             });
 
-        if import { self.import_avatar_dialog(); }
         if reprocess {
             if let Some(path) = self.avatar_mesh_path.clone() {
                 self.schedule_avatar_import(&path, true);
@@ -1205,15 +1231,6 @@ impl ClothEvoApp {
             if let Err(error) = self.sync_pattern_avatar_colliders() {
                 self.pattern_message = format!("Não foi possível restaurar a colisão procedural: {error}");
             }
-            self.upload_scene();
-        }
-        if collision_changed {
-            if let Err(error) = self.sync_pattern_avatar_colliders() {
-                self.pattern_message = format!("Não foi possível atualizar a colisão: {error}");
-            }
-            self.upload_scene();
-        }
-        if visibility_changed {
             self.upload_scene();
         }
         if !self.pattern_message.is_empty() {
@@ -1237,7 +1254,7 @@ impl ClothEvoApp {
                 ui.checkbox(&mut self.split_swapped, "Trocar lados");
                 ui.checkbox(&mut self.split_vertical, "Empilhar");
             });
-            egui::CollapsingHeader::new("Moldes 2D")
+            egui::CollapsingHeader::new("2D Viewport")
                 .default_open(true)
                 .show(ui, |ui| self.pattern_controls(ui));
             ui.separator();
@@ -1252,10 +1269,10 @@ impl ClothEvoApp {
         }
 
         if self.using_pattern_sim {
-            ui.heading("AMBIENTE 3D");
+            ui.heading("3D VIEWPORT");
             ui.label("Roupa personalizada convertida para o solver XPBD.");
         } else {
-            ui.heading("AMBIENTE 3D");
+            ui.heading("3D VIEWPORT");
         }
         ui.separator();
         ui.horizontal(|ui| {
@@ -1384,7 +1401,7 @@ impl ClothEvoApp {
         });
         ui.weak("Selecione a ferramenta pelos ícones na barra vertical da viewport.");
         ui.horizontal(|ui| {
-            if ui.button("Voltar aos moldes 2D").clicked() {
+            if ui.button("Voltar ao 2D Viewport").clicked() {
                 self.workspace = WorkspaceMode::Pattern;
                 self.playing = false;
             }
@@ -2069,6 +2086,8 @@ impl ClothEvoApp {
     fn new_pattern_project(&mut self) {
         if !self.confirm_discard_unsaved_changes() { return; }
         self.pattern_project = PatternProject::new("Novo projeto");
+        self.workspace = WorkspaceMode::Pattern;
+        self.playing = false;
         self.draft_points.clear();
         self.selected_piece = 0;
         self.selected_target = None;
@@ -2096,6 +2115,8 @@ impl ClothEvoApp {
             Ok(project) => {
                 if !self.confirm_discard_unsaved_changes() { return; }
                 self.pattern_project = project;
+                self.workspace = WorkspaceMode::Pattern;
+                self.playing = false;
                 self.draft_points.clear();
                 self.selected_piece = 0;
                 self.selected_target = None;
@@ -2195,7 +2216,7 @@ impl ClothEvoApp {
     }
 
     fn pattern_controls(&mut self, ui: &mut egui::Ui) {
-        ui.heading("MOLDES 2D · GEOMETRIA VETORIAL");
+        ui.heading("2D VIEWPORT · GEOMETRIA VETORIAL");
         ui.label("Editor de moldes · medidas internas em metros");
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.pattern_tool, PatternTool::Draw, "Desenhar");
@@ -2214,14 +2235,6 @@ impl ClothEvoApp {
             if ui.add_enabled(!self.pattern_redo.is_empty(), egui::Button::new("Refazer")).clicked() {
                 self.redo_pattern_edit();
             }
-        });
-        ui.horizontal(|ui| {
-            if ui.button("Novo projeto").clicked() { self.new_pattern_project(); }
-            if ui.button("Abrir…").clicked() { self.open_pattern_project_dialog(); }
-        });
-        ui.horizontal(|ui| {
-            if ui.button("Salvar").clicked() { self.save_pattern_project(); }
-            if ui.button("Salvar como…").clicked() { self.save_pattern_project_as(); }
         });
         if self.pattern_dirty {
             ui.colored_label(egui::Color32::from_rgb(240, 180, 75), "Modificações não salvas");
@@ -3042,8 +3055,6 @@ impl ClothEvoApp {
         let avatar_before = self.pattern_project.avatar.clone();
         let mut avatar_changed = false;
         let import_pending = self.avatar_import_pending_path.is_some();
-        let mut avatar_view_changed = false;
-        let mut avatar_collision_changed = false;
         let mut reprocess_avatar = false;
         let mut remove_avatar = false;
         ui.collapsing("Avatar e colisão corporal", |ui| {
@@ -3070,23 +3081,7 @@ impl ClothEvoApp {
                 .on_hover_text("Espaçamento menor preserva mais detalhes, com maior custo de memória e importação.")
                 .changed();
 
-            avatar_view_changed |= ui.checkbox(&mut self.avatar_visible, "Exibir avatar").changed();
-            avatar_view_changed |= ui.add_enabled(
-                self.avatar_mesh.is_some(),
-                egui::Checkbox::new(&mut self.avatar_wireframe, "Wireframe de inspeção"),
-            ).changed();
-            avatar_collision_changed |= ui.checkbox(
-                &mut self.avatar_collision_enabled,
-                "Usar avatar como superfície de colisão",
-            ).changed();
-
             ui.horizontal(|ui| {
-                if ui.add_enabled(
-                    !import_pending,
-                    egui::Button::new("Importar avatar OBJ/FBX…"),
-                ).clicked() {
-                    self.import_avatar_dialog();
-                }
                 if self.avatar_mesh_path.is_some() {
                     reprocess_avatar |= ui.add_enabled(
                         !import_pending,
@@ -3181,15 +3176,6 @@ impl ClothEvoApp {
                 ui.weak("Sem malha importada, a colisão usa o manequim procedural quando ativada.");
             }
         });
-        if avatar_view_changed {
-            self.upload_scene();
-        }
-        if avatar_collision_changed {
-            if let Err(error) = self.sync_pattern_avatar_colliders() {
-                self.pattern_message = format!("Não foi possível atualizar a colisão do avatar: {error}");
-            }
-            self.upload_scene();
-        }
         if remove_avatar {
             self.avatar_import_receiver = None;
             self.avatar_import_pending_path = None;
@@ -7389,6 +7375,13 @@ impl eframe::App for ClothEvoApp {
                 .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 170, 53)))
                 .inner_margin(egui::Margin::symmetric(14, 8)))
             .show(ui, |ui| self.top_navigation(ui));
+
+        egui::Panel::top("global_toolbar")
+            .frame(egui::Frame::new()
+                .fill(egui::Color32::from_rgb(20, 25, 39))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(54, 63, 91)))
+                .inner_margin(egui::Margin::symmetric(14, 5)))
+            .show(ui, |ui| self.global_toolbar(ui));
 
         if self.show_metrics {
             egui::Panel::bottom("view_metrics")
