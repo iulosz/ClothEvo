@@ -3898,6 +3898,62 @@ impl ClothEvoApp {
         }
     }
 
+    fn load_library_template(&mut self, template: &str, confirm_changes: bool) {
+        if confirm_changes && !self.confirm_discard_unsaved_changes() {
+            return;
+        }
+
+        let project_name = match template {
+            "Jacket" => "Techwear_Jacket",
+            "T-Shirt" => "T-Shirt",
+            other => other,
+        };
+        let shapes = built_in_garment_shapes(template);
+        if shapes.is_empty() {
+            self.pattern_message = format!("No starter shapes are available for {template} yet.");
+            return;
+        }
+
+        self.pattern_project = PatternProject::new(project_name);
+        for (index, (name, points)) in shapes.into_iter().enumerate() {
+            let id = index as u64 + 1;
+            match PatternPiece::from_polygon(id, name, &points) {
+                Ok(mut piece) => {
+                    piece.fabric.particle_distance_meters = 0.015;
+                    piece.seam_allowance_meters = 0.010;
+                    self.pattern_project.pieces.push(piece);
+                }
+                Err(error) => {
+                    self.pattern_message = format!("Could not create {template} pattern: {error}");
+                    self.pattern_project.pieces.clear();
+                    return;
+                }
+            }
+        }
+
+        self.draft_points.clear();
+        self.selected_piece = 0;
+        self.selected_target = None;
+        self.selected_material_asset = 0;
+        self.pattern_saved_path = None;
+        self.pattern_undo.clear();
+        self.pattern_redo.clear();
+        self.dragging_target = None;
+        self.dragging_before = None;
+        self.drag_last_world = None;
+        self.pattern_dirty = confirm_changes;
+        self.pattern_fit_pending = true;
+        self.pattern_tool = PatternTool::Select;
+        self.workspace = WorkspaceMode::Split;
+        self.playing = false;
+        self.reset_to_empty_environment();
+        self.pattern_message = if confirm_changes {
+            format!("{template} starter patterns loaded. Pair the seam edges before final garment simulation.")
+        } else {
+            String::new()
+        };
+    }
+
     fn set_symmetry_axis_to_min_x(&mut self) {
         let Some(piece) = self.pattern_project.pieces.get(self.selected_piece) else {
             self.pattern_message = "Crie ou selecione um molde primeiro.".into();
