@@ -7231,15 +7231,15 @@ fn sampled_edge_indices(
     Ok(indices)
 }
 
-    fn metrics_panel(&self, ui: &mut egui::Ui) {
-        let sim = &self.sim;
+fn metrics_panel(app: &ClothEvoApp, ui: &mut egui::Ui) {
+        let sim = &app.sim;
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new("MÉTRICAS / SOLVER").strong().color(egui::Color32::from_rgb(255, 170, 53)));
             ui.separator();
             ui.label(format!("{} partículas", sim.particle_count()));
             ui.label(format!("{} restrições de distância · {} de flexão",
                 sim.distance_constraint_count(), sim.bend_constraint_count()));
-            ui.label(format!("passo {:.2} ms / 16,67 ms", self.last_step_ms));
+            ui.label(format!("passo {:.2} ms / 16,67 ms", app.last_step_ms));
             ui.label(format!("deformação {:.1} %", sim.max_strain() * 100.0));
             ui.label(format!("energia {:.4} J", sim.kinetic_energy()));
             ui.label(format!("velocidade máx. {:.2} m/s", sim.max_particle_speed()));
@@ -7272,9 +7272,9 @@ fn sampled_edge_indices(
                 sim.stats.contact_friction_sliding_contacts));
             columns[2].label(format!("velocidade tangencial {:.2} m/s",
                 sim.stats.contact_max_tangential_speed_m_s));
-            if !self.seam_pairs.is_empty() {
+            if !app.seam_pairs.is_empty() {
                 columns[2].label(format!("abertura máx. {:.1} mm · tensão XPBD estimada {:.2} N",
-                    self.seam_gap_max() * 1000.0, sim.seam_tension_estimate_max_n()));
+                    app.seam_gap_max() * 1000.0, sim.seam_tension_estimate_max_n()));
             } else {
                 columns[2].label("Nenhuma costura ativa.");
             }
@@ -7332,7 +7332,7 @@ impl eframe::App for ClothEvoApp {
                             self.show_metrics = false;
                         }
                     });
-                    egui::ScrollArea::vertical().show(ui, |ui| self.metrics_panel(ui));
+                    egui::ScrollArea::vertical().show(ui, |ui| metrics_panel(self, ui));
                 });
         }
 
