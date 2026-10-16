@@ -347,7 +347,7 @@ enum WorkspaceMode {
     Pattern,
     /// Posiciona os painéis em 3D antes de liberar a simulação.
     Placement,
-    /// Viewport 3D e editor de moldes 2D visíveis ao mesmo tempo.
+    /// Viewport 3D e editor 2D visíveis ao mesmo tempo.
     Split,
 }
 
@@ -2109,6 +2109,7 @@ impl ClothEvoApp {
 
     fn new_pattern_project(&mut self) {
         if !self.confirm_discard_unsaved_changes() { return; }
+        let avatar_path = self.avatar_mesh_path.clone();
         self.pattern_project = PatternProject::new("Novo projeto");
         self.workspace = WorkspaceMode::Pattern;
         self.playing = false;
@@ -2122,7 +2123,39 @@ impl ClothEvoApp {
         self.dragging_before = None;
         self.drag_last_world = None;
         self.pattern_dirty = false;
+        self.reset_to_empty_environment();
+        if let Some(path) = avatar_path {
+            self.schedule_avatar_import(&path, true, false);
+        }
         self.pattern_message = "Novo projeto criado.".into();
+    }
+
+    /// Descarta a malha de tecido da sessão anterior e restaura o ambiente vazio,
+    /// mantendo o avatar/collision settings atuais e os parâmetros globais do solver.
+    fn reset_to_empty_environment(&mut self) {
+        self.using_pattern_sim = false;
+        self.placement_ranges.clear();
+        self.selected_placement_piece = None;
+        self.placement_drag_piece = None;
+        self.placement_drag_before = None;
+        self.placement_gizmo_drag = None;
+        self.placement_drag_selected_body = false;
+
+        let mut builder = ClothBuilder::new();
+        builder.add_collider(Collider::ground());
+        if let Ok(colliders) = self.avatar_body_colliders() {
+            for collider in colliders {
+                builder.add_collider(collider);
+            }
+        }
+        self.sim = builder.build(self.sim.params.clone());
+        self.seam_pairs = self.sim.seam_pairs();
+        self.normals.clear();
+        self.diverged = false;
+        self.accumulator = 0.0;
+        self.last_step_ms = 0.0;
+        self.playing = false;
+        self.upload_scene();
     }
 
     fn open_pattern_project_dialog(&mut self) {
@@ -2157,6 +2190,7 @@ impl ClothEvoApp {
                 self.dragging_before = None;
                 self.drag_last_world = None;
                 self.pattern_dirty = false;
+                self.reset_to_empty_environment();
                 self.pattern_message = format!("Projeto carregado: {}", path.display());
                 if let Some(app_state) = app_state {
                     self.restore_project_app_state(&app_state);
