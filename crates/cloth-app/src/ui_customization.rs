@@ -152,12 +152,103 @@ impl UiCommand {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ButtonShape {
+    Square,
+    #[default]
+    Rounded,
+    Pill,
+}
+
+impl ButtonShape {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Square => "Retangular",
+            Self::Rounded => "Arredondado",
+            Self::Pill => "Pílula",
+        }
+    }
+
+    pub fn corner_radius(self) -> u8 {
+        match self {
+            Self::Square => 0,
+            Self::Rounded => 5,
+            Self::Pill => 255,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ButtonIcon {
+    #[default]
+    None,
+    Play,
+    Step,
+    Reset,
+    Save,
+    Open,
+    New,
+    Avatar,
+    Eye,
+    Wireframe,
+    Layout,
+}
+
+impl ButtonIcon {
+    pub const ALL: &'static [(Self, &'static str)] = &[
+        (Self::None, "Sem ícone"),
+        (Self::Play, "Reproduzir"),
+        (Self::Step, "Passo"),
+        (Self::Reset, "Reiniciar"),
+        (Self::Save, "Salvar"),
+        (Self::Open, "Abrir"),
+        (Self::New, "Novo"),
+        (Self::Avatar, "Avatar"),
+        (Self::Eye, "Visibilidade"),
+        (Self::Wireframe, "Wireframe"),
+        (Self::Layout, "Layout"),
+    ];
+
+    pub fn label(self) -> &'static str {
+        Self::ALL.iter().find_map(|(icon, label)| (*icon == self).then_some(*label))
+            .unwrap_or("Sem ícone")
+    }
+
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Play => "▶",
+            Self::Step => "▸",
+            Self::Reset => "↻",
+            Self::Save => "▣",
+            Self::Open => "▰",
+            Self::New => "＋",
+            Self::Avatar => "◉",
+            Self::Eye => "◉",
+            Self::Wireframe => "◇",
+            Self::Layout => "▦",
+        }
+    }
+}
+
+fn default_button_color() -> [u8; 3] {
+    [255, 170, 53]
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CustomToolbarButton {
     pub id: u64,
     pub label: String,
     pub command: UiCommand,
     pub visible: bool,
+    #[serde(default = "default_button_color")]
+    pub color: [u8; 3],
+    #[serde(default)]
+    pub shape: ButtonShape,
+    #[serde(default)]
+    pub icon: ButtonIcon,
 }
 
 impl Default for CustomToolbarButton {
@@ -167,6 +258,9 @@ impl Default for CustomToolbarButton {
             label: "Simular".into(),
             command: UiCommand::ToggleSimulation,
             visible: true,
+            color: default_button_color(),
+            shape: ButtonShape::default(),
+            icon: ButtonIcon::default(),
         }
     }
 }
@@ -247,6 +341,9 @@ mod tests {
             label: "Alternar vista".into(),
             command: UiCommand::ShowSplitViewport,
             visible: true,
+            color: [255, 170, 53],
+            shape: ButtonShape::Pill,
+            icon: ButtonIcon::Layout,
         });
 
         let json = serde_json::to_string(&config).unwrap();
@@ -256,6 +353,9 @@ mod tests {
         assert!(loaded.split_vertical);
         assert_eq!(loaded.toolbar_buttons.len(), 1);
         assert_eq!(loaded.toolbar_buttons[0].command, UiCommand::ShowSplitViewport);
+        assert_eq!(loaded.toolbar_buttons[0].shape, ButtonShape::Pill);
+        assert_eq!(loaded.toolbar_buttons[0].icon, ButtonIcon::Layout);
+        assert_eq!(loaded.toolbar_buttons[0].color, [255, 170, 53]);
     }
 
     #[test]
