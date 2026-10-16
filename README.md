@@ -1,9 +1,10 @@
 # ClothEvo — Pattern Studio + XPBD
 
-Aplicação desktop em Rust para edição de moldes 2D e simulação de tecido XPBD em 3D. O repositório
-inclui geometria vetorial de curvas lineares/Bézier, triangulação CDT, costuras, piques, simetria,
-Cut & Sew, detalhes de dobra/prega, prévia de posicionamento 3D, colisores analíticos e renderer WGPU
-integrado ao egui.
+Aplicação desktop em Rust, organizada em seis crates, para criação de moldes 2D, montagem de roupas
+em 3D e simulação XPBD. O Pattern Studio inclui curvas lineares/Bézier, triangulação CDT, costuras,
+piques, simetria, Cut & Sew, dobras e pregas. A física integra restrições de tecido e costura, contato
+e auto-colisão entre superfícies, atrito por material e colisão corporal por SDF. Avatares estáticos
+OBJ/FBX podem ser importados para visualização e colisão; o renderer WGPU é integrado ao egui.
 
 **Estado do projeto:** protótipo em desenvolvimento. Alguns recursos são aproximados: a auto-colisão
 usa um orçamento de candidatos para proteger o desempenho; linhas de dobra mapeiam para arestas
@@ -34,6 +35,8 @@ O wgpu escolhe sozinho Vulkan, DX12 ou Metal. Para forçar um: `WGPU_BACKEND=vul
 * Arrastar com o botão esquerdo: orbitar · botão direito ou do meio: mover · roda: zoom.
 * Painel esquerdo: cena, resolução da malha, presets de tecido (algodão, seda, jeans, malha),
   rigidez de stretch/shear/flexão/costura, amortecimento, atrito, espessura, substeps e iterações.
+* O painel **Avatar e colisão corporal** importa avatares estáticos OBJ/FBX e configura a colisão
+  corporal; ela pode ser desligada sem desativar a auto-colisão do tecido.
 * Todos os parâmetros podem ser alterados com a simulação rodando.
 
 ## Cenas de teste
@@ -46,12 +49,13 @@ O wgpu escolhe sozinho Vulkan, DX12 ou Metal. Para forçar um: `WGPU_BACKEND=vul
 
 ```
 crates/
-├─ cloth-sim/     solver XPBD (sem dependência de render): partículas SoA, restrições de
-│                 distância (stretch/shear/costura) e flexão (ângulo diedral), coloração de
-│                 grafo + rayon, colisores SDF (plano, esfera, cilindro), cenas e benchmarks
-├─ cloth-render/  renderer wgpu próprio (shader WGSL, câmera orbital, malha de tecido de dois
-│                 lados, wireframe, costuras), integrado ao egui por paint callback
-└─ cloth-app/     janela (eframe) + painel de parâmetros + métricas
+├─ pattern-core/  modelo serializável de moldes, peças, costuras, piques, detalhes e materiais
+├─ pattern-geom/  geometria 2D: curvas Bézier, comprimento de arco, validação e operações de edição
+├─ pattern-mesh/  triangulação CDT dos moldes e refinamento da malha
+├─ cloth-sim/     solver XPBD sem dependência de render: partículas SoA, stretch/shear/costura,
+│                 flexão, contatos corpo-tecido e auto-colisão VV/VT/EE, cenas e benchmarks
+├─ cloth-render/  renderer wgpu: câmera orbital, tecido de dois lados, wireframe e costuras
+└─ cloth-app/     janela e interface egui: Pattern Studio, montagem 3D, avatar OBJ/FBX e métricas
 ```
 
 Decisões de projeto que valem para as próximas fases:
@@ -81,9 +85,12 @@ Medidos num ambiente de 2 vCPUs, 20 substeps por frame de 1/60 s, release:
 
 ## Limitações conhecidas da Fase 0
 
-* Sem auto-colisão tecido–tecido.
-* Colisores analíticos para o manequim procedural; avatares OBJ/FBX estáticos com SDF estão descritos na Etapa 5.
-* A malha vem de grades; a triangulação CDT de moldes reais entra na Fase 1/2.
+* Na Fase 0 ainda não havia auto-colisão tecido–tecido; ela foi incorporada posteriormente e está
+  descrita em **Estabilidade da simulação**.
+* Na Fase 0 havia apenas colisores analíticos para o manequim procedural; a importação de avatares
+  OBJ/FBX estáticos com SDF foi adicionada na Etapa 5.
+* A malha inicial vinha de grades; a triangulação CDT e o refinamento de moldes reais foram
+  desenvolvidos nas etapas do Pattern Studio.
 
 
 ## Fase 1 — base do Pattern Studio
@@ -340,6 +347,10 @@ As regressões do solver verificam os limites estático e dinâmico, o deslizame
 
 
 ## Etapa 5 — avatares estáticos OBJ/FBX
+
+No fluxo de uso, selecione OBJ ou FBX no painel e ajuste a altura, o giro em Y e a resolução
+do campo de colisão. Use a exibição sólida ou wireframe para conferir o modelo. A colisão corporal
+pode ser desligada independentemente da auto-colisão do tecido.
 
 O painel **Avatar e colisão corporal** importa arquivos OBJ e FBX fora da thread da interface. O
 FBX converte eixos/unidades para Y-up e metros; para OBJ, o importador estima o eixo vertical. A
