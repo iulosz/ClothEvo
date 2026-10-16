@@ -579,6 +579,49 @@ struct ClothEvoApp {
     pattern_fit_pending: bool,
 }
 
+fn paint_garment_thumbnail(painter: &egui::Painter, rect: egui::Rect, name: &str) {
+    let fill = egui::Color32::from_rgb(116, 121, 125);
+    let edge = egui::Stroke::new(1.2, egui::Color32::from_rgb(16, 166, 160));
+    let cx = rect.center().x;
+    let top = rect.top() + 7.0;
+    let bottom = rect.bottom() - 5.0;
+    let polygon = |points: Vec<egui::Pos2>| {
+        painter.add(egui::Shape::convex_polygon(points, fill, edge));
+    };
+
+    match name {
+        "Pants" => {
+            polygon(vec![egui::pos2(cx-14.0,top+5.0),egui::pos2(cx-1.0,top+5.0),egui::pos2(cx-3.0,bottom),egui::pos2(cx-12.0,bottom)]);
+            polygon(vec![egui::pos2(cx+1.0,top+5.0),egui::pos2(cx+14.0,top+5.0),egui::pos2(cx+12.0,bottom),egui::pos2(cx+3.0,bottom)]);
+        }
+        "Skirt" => polygon(vec![egui::pos2(cx-8.0,top+9.0),egui::pos2(cx+8.0,top+9.0),egui::pos2(cx+19.0,bottom),egui::pos2(cx-19.0,bottom)]),
+        "Dress" => polygon(vec![egui::pos2(cx-8.0,top+4.0),egui::pos2(cx+8.0,top+4.0),egui::pos2(cx+10.0,top+18.0),egui::pos2(cx+19.0,bottom),egui::pos2(cx-19.0,bottom),egui::pos2(cx-10.0,top+18.0)]),
+        "Bag" => {
+            painter.rect_stroke(egui::Rect::from_min_max(egui::pos2(cx-17.0,top+15.0),egui::pos2(cx+17.0,bottom)),4.0,edge,egui::StrokeKind::Inside);
+            painter.arc(egui::Pos2::new(cx,top+18.0), 10.0, std::f32::consts::PI, 0.0, edge);
+        }
+        "Cap" => polygon(vec![egui::pos2(cx-15.0,top+17.0),egui::pos2(cx-9.0,top+5.0),egui::pos2(cx+7.0,top+5.0),egui::pos2(cx+15.0,top+17.0),egui::pos2(cx+23.0,top+23.0),egui::pos2(cx-7.0,top+23.0)]),
+        "Shoes" => {
+            painter.rect_filled(egui::Rect::from_min_max(egui::pos2(cx-22.0,top+22.0),egui::pos2(cx-1.0,bottom)),5.0,fill);
+            painter.rect_filled(egui::Rect::from_min_max(egui::pos2(cx+1.0,top+22.0),egui::pos2(cx+22.0,bottom)),5.0,fill);
+            painter.line_segment([egui::pos2(cx-22.0,bottom),egui::pos2(cx-1.0,bottom)],edge);
+            painter.line_segment([egui::pos2(cx+1.0,bottom),egui::pos2(cx+22.0,bottom)],edge);
+        }
+        _ => {
+            // Simplified front silhouette for jackets, hoodies and shirts.
+            polygon(vec![egui::pos2(cx-8.0,top+5.0),egui::pos2(cx+8.0,top+5.0),egui::pos2(cx+12.0,top+15.0),egui::pos2(cx+9.0,bottom),egui::pos2(cx-9.0,bottom),egui::pos2(cx-12.0,top+15.0)]);
+            polygon(vec![egui::pos2(cx-8.0,top+7.0),egui::pos2(cx-15.0,top+9.0),egui::pos2(cx-24.0,top+27.0),egui::pos2(cx-18.0,top+31.0),egui::pos2(cx-8.0,top+18.0)]);
+            polygon(vec![egui::pos2(cx+8.0,top+7.0),egui::pos2(cx+15.0,top+9.0),egui::pos2(cx+24.0,top+27.0),egui::pos2(cx+18.0,top+31.0),egui::pos2(cx+8.0,top+18.0)]);
+            if name == "Jacket" || name == "Hoodie" {
+                painter.line_segment([egui::pos2(cx,top+10.0),egui::pos2(cx, bottom-1.0)], egui::Stroke::new(1.0,egui::Color32::from_rgb(32,33,34)));
+            }
+            if name == "Hoodie" {
+                painter.circle_stroke(egui::pos2(cx,top+3.0),5.0,edge);
+            }
+        }
+    }
+}
+
 fn template_shape(name: &str, coordinates: &[(f64, f64)]) -> (String, Vec<PatternPoint2>) {
     (
         name.to_owned(),
