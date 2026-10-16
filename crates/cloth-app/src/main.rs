@@ -598,7 +598,10 @@ fn paint_garment_thumbnail(painter: &egui::Painter, rect: egui::Rect, name: &str
         "Dress" => polygon(vec![egui::pos2(cx-8.0,top+4.0),egui::pos2(cx+8.0,top+4.0),egui::pos2(cx+10.0,top+18.0),egui::pos2(cx+19.0,bottom),egui::pos2(cx-19.0,bottom),egui::pos2(cx-10.0,top+18.0)]),
         "Bag" => {
             painter.rect_stroke(egui::Rect::from_min_max(egui::pos2(cx-17.0,top+15.0),egui::pos2(cx+17.0,bottom)),4.0,edge,egui::StrokeKind::Inside);
-            painter.arc(egui::Pos2::new(cx,top+18.0), 10.0, std::f32::consts::PI, 0.0, edge);
+            painter.line_segment([egui::pos2(cx-10.0, top+18.0), egui::pos2(cx-8.0, top+9.0)], edge);
+            painter.line_segment([egui::pos2(cx-8.0, top+9.0), egui::pos2(cx, top+6.0)], edge);
+            painter.line_segment([egui::pos2(cx, top+6.0), egui::pos2(cx+8.0, top+9.0)], edge);
+            painter.line_segment([egui::pos2(cx+8.0, top+9.0), egui::pos2(cx+10.0, top+18.0)], edge);
         }
         "Cap" => polygon(vec![egui::pos2(cx-15.0,top+17.0),egui::pos2(cx-9.0,top+5.0),egui::pos2(cx+7.0,top+5.0),egui::pos2(cx+15.0,top+17.0),egui::pos2(cx+23.0,top+23.0),egui::pos2(cx-7.0,top+23.0)]),
         "Shoes" => {
@@ -8109,7 +8112,7 @@ impl eframe::App for ClothEvoApp {
         egui::Panel::left("library_panel")
             .resizable(true)
             .default_size(138.0)
-            .size_range(118.0..=230.0)
+            .size_range(egui::Rangef::new(118.0, 230.0))
             .frame(egui::Frame::new()
                 .fill(egui::Color32::from_rgb(27, 28, 29))
                 .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(47, 48, 49)))
@@ -8119,7 +8122,7 @@ impl eframe::App for ClothEvoApp {
         egui::Panel::right("property_inspector")
             .resizable(true)
             .default_size(236.0)
-            .size_range(210.0..=340.0)
+            .size_range(egui::Rangef::new(210.0, 340.0))
             .frame(egui::Frame::new()
                 .fill(egui::Color32::from_rgb(27, 28, 29))
                 .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(47, 48, 49)))
