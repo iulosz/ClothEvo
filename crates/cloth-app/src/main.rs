@@ -1488,60 +1488,152 @@ impl ClothEvoApp {
     }
 
     fn inspector_panel(&mut self, ui: &mut egui::Ui) {
+        let material_assets = [
+            ("Primary_Nylon", egui::Color32::from_rgb(33, 35, 39)),
+            ("Lining_Ripstop", egui::Color32::from_rgb(117, 120, 123)),
+            ("Mesh", egui::Color32::from_rgb(65, 68, 70)),
+            ("Webbing", egui::Color32::from_rgb(77, 79, 81)),
+            ("Zipper", egui::Color32::from_rgb(93, 96, 99)),
+            ("Velcro", egui::Color32::from_rgb(14, 15, 16)),
+        ];
+
         ui.heading("Fabric");
-        ui.label(egui::RichText::new("SIMULATION PRESETS").size(9.0).color(egui::Color32::GRAY));
-        for fabric in FabricPreset::ALL {
-            if ui.selectable_label(self.preset == fabric, fabric.name()).clicked() {
-                self.preset = fabric;
-                fabric.apply(&mut self.sim.params);
-                self.pattern_dirty = true;
-            }
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("MATERIAL LAYERS").size(9.0).color(egui::Color32::GRAY));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new("6").size(9.0).color(egui::Color32::GRAY));
+            });
+        });
+
+        for (index, (name, swatch)) in material_assets.iter().enumerate() {
+            let selected = self.selected_material_asset == index;
+            ui.horizontal(|ui| {
+                let (swatch_rect, _) = ui.allocate_exact_size(egui::vec2(27.0, 22.0), egui::Sense::hover());
+                ui.painter().rect_filled(swatch_rect, 2.0, *swatch);
+                ui.painter().rect_stroke(
+                    swatch_rect,
+                    2.0,
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(77, 79, 81)),
+                    egui::StrokeKind::Inside,
+                );
+                if ui.selectable_label(selected, *name).clicked() {
+                    self.selected_material_asset = index;
+                }
+            });
         }
+        ui.weak("Material swatches are library placeholders; shader/material binding is not implemented yet.");
+
+        egui::CollapsingHeader::new("Simulation Fabric Presets")
+            .default_open(false)
+            .show(ui, |ui| {
+                for fabric in FabricPreset::ALL {
+                    if ui.selectable_label(self.preset == fabric, fabric.name()).clicked() {
+                        self.preset = fabric;
+                        fabric.apply(&mut self.sim.params);
+                        self.pattern_dirty = true;
+                    }
+                }
+            });
+
         ui.separator();
         ui.heading("Property Editor");
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.label(egui::RichText::new("Project").strong());
-            ui.label(format!("Name: {}", self.pattern_project.name));
-            ui.label(format!("Pattern pieces: {}", self.pattern_project.pieces.len()));
-            ui.label(format!("Seams: {}", self.pattern_project.seams.len()));
-            ui.label(format!("Units: {}", self.pattern_project.units.label()));
-            ui.separator();
+            egui::CollapsingHeader::new("Project")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.label(format!("Name: {}", self.pattern_project.name));
+                    ui.label(format!("Pattern pieces: {}", self.pattern_project.pieces.len()));
+                    ui.label(format!("Seams: {}", self.pattern_project.seams.len()));
+                    ui.label(format!("Units: {}", self.pattern_project.units.label()));
+                    if self.pattern_dirty {
+                        ui.colored_label(egui::Color32::from_rgb(224, 173, 68), "Unsaved changes");
+                    } else if self.pattern_saved_path.is_some() {
+                        ui.label("Project saved");
+                    } else {
+                        ui.label("Built-in template · use File > Save Project to create a file");
+                    }
+                });
+
             if let Some(piece) = self.pattern_project.pieces.get(self.selected_piece) {
-                ui.label(egui::RichText::new("Selected Pattern").strong());
-                ui.label(format!("Name: {}", piece.name));
-                ui.label(format!("Layer: {}", piece.layer));
-                ui.label(format!("Outline segments: {}", piece.outline.segments.len()));
-                ui.label(format!("Particle distance: {:.1} mm", piece.fabric.particle_distance_meters * 1000.0));
+                let selected_name = piece.name.clone();
+                let selected_id = piece.id;
+                let selected_layer = piece.layer;
+                let segment_count = piece.outline.segments.len();
                 let points = sample_curve(&piece.outline, 16);
-                if !points.is_empty() {
-                    let min_x = points.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
-                    let max_x = points.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
-                    let min_y = points.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
-                    let max_y = points.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
-                    ui.label(format!("Approx. width: {:.1} cm", (max_x - min_x) * 100.0));
-                    ui.label(format!("Approx. height: {:.1} cm", (max_y - min_y) * 100.0));
-                }
-            } else {
-                ui.weak("Select a pattern in Library or create one in 2D Pattern.");
-            }
-            ui.separator();
-            if self.pattern_dirty {
-                ui.colored_label(egui::Color32::from_rgb(230, 175, 73), "Unsaved project changes");
-            } else {
-                ui.weak("Project is saved.");
-            }
-            if let Some(name) = self.avatar_mesh_name.as_deref() {
+                let outline_length = points.windows(2)
+                    .map(|pair| pair[0].distance(pair[1]))
+                    .sum::<f64>();
+                let min_x = points.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+                let max_x = points.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+                let min_y = points.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+                let max_y = points.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
+
                 ui.separator();
-                ui.label(egui::RichText::new("Avatar").strong());
-                ui.label(name);
-                if let Some(diag) = self.avatar_diagnostics.as_ref() {
-                    ui.label(format!("{} vertices · {} triangles", diag.vertex_count, diag.triangle_count));
-                }
+                egui::CollapsingHeader::new("Selected Pattern")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.label(format!("Name: {selected_name}"));
+                        ui.label(format!("Item No.: {selected_id}"));
+                        ui.label(format!("Layer: {selected_layer}"));
+                        ui.label(format!("Outline segments: {segment_count}"));
+                        ui.label(format!("2D Outline Length: {:.2} mm", outline_length * 1000.0));
+                        if min_x.is_finite() && min_y.is_finite() {
+                            ui.label(format!("Width: {:.1} mm", (max_x - min_x) * 1000.0));
+                            ui.label(format!("Height: {:.1} mm", (max_y - min_y) * 1000.0));
+                        }
+                        let mut changed = false;
+                        if let Some(piece) = self.pattern_project.pieces.get_mut(self.selected_piece) {
+                            changed |= ui.add(
+                                egui::Slider::new(&mut piece.seam_allowance_meters, 0.0..=0.04)
+                                    .text("Seam Allowance (m)"),
+                            ).changed();
+                            changed |= ui.add(
+                                egui::Slider::new(&mut piece.fabric.particle_distance_meters, 0.005..=0.10)
+                                    .text("Particle Distance (m)"),
+                            ).changed();
+                        }
+                        if changed {
+                            self.pattern_dirty = true;
+                        }
+                    });
+            } else {
+                ui.separator();
+                ui.weak("Select a pattern in Library or load a starter garment.");
             }
-            ui.separator();
-            egui::CollapsingHeader::new("Advanced Properties")
+
+            egui::CollapsingHeader::new("Selected Line")
                 .default_open(false)
-                .show(ui, |ui| self.controls(ui));
+                .show(ui, |ui| {
+                    ui.label("Select an outline edge in the 2D Pattern viewport to inspect its geometry.");
+                    ui.label("Line-specific elastic and seam-taping controls are not implemented yet.");
+                });
+
+            egui::CollapsingHeader::new("Simulation Properties")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label(format!("Solver: XPBD"));
+                    ui.label(format!("Steps: {}", self.sim.stats.steps));
+                    ui.label(format!("Last step: {:.2} ms", self.last_step_ms));
+                    ui.label(format!("Fabric preset: {}", self.preset.name()));
+                    ui.label("Per-pattern material bindings are not implemented yet.");
+                });
+
+            if let Some(name) = self.avatar_mesh_name.as_deref() {
+                egui::CollapsingHeader::new("Avatar")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.label(name);
+                        if let Some(diag) = self.avatar_diagnostics.as_ref() {
+                            ui.label(format!("{} vertices · {} triangles", diag.vertex_count, diag.triangle_count));
+                            ui.label(format!(
+                                "Dimensions: {:.2} × {:.2} × {:.2} m",
+                                diag.dimensions_meters[0],
+                                diag.dimensions_meters[1],
+                                diag.dimensions_meters[2],
+                            ));
+                        }
+                    });
+            }
         });
     }
 
