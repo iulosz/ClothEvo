@@ -1070,6 +1070,7 @@ impl ClothEvoApp {
 
         ui.set_min_height(58.0);
         let mut render_changed = false;
+        let mut open_ui_customizer = false;
         ui.horizontal(|ui| {
             ui.add_space(2.0);
             ui.vertical(|ui| {
@@ -1129,7 +1130,23 @@ impl ClothEvoApp {
                 },
             );
 
+            ui.menu_button(
+                egui::RichText::new("Preferences  ↘").strong().color(ORANGE),
+                |ui| {
+                    if ui.button("Personalizar interface…").clicked() {
+                        open_ui_customizer = true;
+                        ui.close();
+                    }
+                    if ui.button("Salvar preferências da interface").clicked() {
+                        self.save_ui_customization();
+                        ui.close();
+                    }
+                },
+            );
         });
+        if open_ui_customizer {
+            self.show_ui_customizer = true;
+        }
         if render_changed {
             self.upload_scene();
         }
