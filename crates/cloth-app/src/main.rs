@@ -1152,6 +1152,344 @@ impl ClothEvoApp {
         }
     }
 
+    fn apply_ui_customization(&self, ctx: &egui::Context) {
+        let theme = &self.ui_customization.theme;
+        let mut style = (*ctx.style()).clone();
+        let mut visuals = style.visuals.clone();
+        visuals.panel_fill = ui_rgb(theme.panel_bg);
+        visuals.window_fill = ui_rgb(theme.window_bg);
+        visuals.extreme_bg_color = ui_rgb(theme.deep_bg);
+        visuals.faint_bg_color = ui_rgb(theme.muted_bg);
+        visuals.code_bg_color = ui_rgb(theme.deep_bg);
+        visuals.hyperlink_color = ui_rgb(theme.accent);
+        visuals.selection.bg_fill = ui_rgb(theme.selection);
+        visuals.selection.stroke = egui::Stroke::new(1.0, ui_rgb(theme.accent));
+        visuals.widgets.noninteractive.fg_stroke.color = ui_rgb(theme.text);
+        visuals.widgets.inactive.fg_stroke.color = ui_rgb(theme.text);
+        visuals.widgets.hovered.fg_stroke.color = ui_rgb(theme.text);
+        visuals.widgets.active.fg_stroke.color = ui_rgb(theme.text);
+        visuals.widgets.inactive.bg_fill = ui_rgb(theme.button_bg);
+        visuals.widgets.hovered.bg_fill = ui_rgb(theme.button_hover);
+        visuals.widgets.active.bg_fill = ui_rgb(theme.selection);
+        visuals.widgets.noninteractive.bg_stroke.color = ui_rgb(theme.border);
+        visuals.widgets.inactive.bg_stroke.color = ui_rgb(theme.border);
+        visuals.widgets.hovered.bg_stroke.color = ui_rgb(theme.accent);
+        visuals.widgets.active.bg_stroke.color = ui_rgb(theme.accent);
+        let radius = egui::CornerRadius::same(theme.corner_radius);
+        visuals.window_corner_radius = radius;
+        visuals.widgets.noninteractive.corner_radius = radius;
+        visuals.widgets.inactive.corner_radius = radius;
+        visuals.widgets.hovered.corner_radius = radius;
+        visuals.widgets.active.corner_radius = radius;
+        style.visuals = visuals;
+        style.spacing.item_spacing = egui::vec2(theme.spacing, theme.spacing);
+        style.spacing.button_padding = egui::vec2(theme.spacing * 0.8, theme.spacing * 0.5);
+        ctx.set_style(style);
+        ctx.set_zoom_factor(theme.ui_scale.clamp(0.75, 1.75));
+    }
+
+    fn save_ui_customization(&mut self) {
+        self.ui_customization.split_vertical = self.split_vertical;
+        self.ui_customization.split_swapped = self.split_swapped;
+        match self.ui_customization.save() {
+            Ok(()) => {
+                let path = UiCustomization::configuration_path()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|_| "pasta de configurações do usuário".into());
+                self.ui_customization_message = format!("Preferências salvas em: {path}");
+            }
+            Err(error) => self.ui_customization_message = error,
+        }
+    }
+
+    fn custom_toolbar(&mut self, ui: &mut egui::Ui) {
+        let buttons: Vec<(u64, String, UiCommand)> = self.ui_customization.toolbar_buttons
+            .iter()
+            .filter(|button| button.visible)
+            .map(|button| (button.id, button.label.clone(), button.command))
+            .collect();
+        if buttons.is_empty() {
+            return;
+        }
+
+        let mut actions = Vec::new();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("MINHA BARRA").size(9.0).strong());
+            for (id, label, command) in buttons {
+                if ui.push_id(("custom_ui_command", id), |ui| ui.button(label)).inner.clicked() {
+                    actions.push(command);
+                }
+            }
+            if ui.small_button("＋ Personalizar").clicked() {
+                self.show_ui_customizer = true;
+            }
+        });
+        for command in actions {
+            self.execute_ui_command(command);
+        }
+    }
+
+    fn execute_ui_command(&mut self, command: UiCommand) {
+        match command {
+            UiCommand::ToggleSimulation => {
+                if self.diverged {
+                    self.sim.reset();
+                    self.accumulator = 0.0;
+                    self.diverged = false;
+                    self.playing = true;
+                } else {
+                    self.playing = !self.playing;
+                }
+            }
+            UiCommand::SingleStep => {
+                self.playing = false;
+                self.accumulator = 0.0;
+                self.sim.step(FIXED_DT);
+                self.last_step_ms = self.sim.stats.step_ms;
+                if !self.sim.is_finite() {
+                    self.sim.reset();
+                    self.last_step_ms = 0.0;
+                    self.diverged = true;
+                }
+            }
+            UiCommand::ResetSimulation => {
+                self.sim.reset();
+                self.last_step_ms = 0.0;
+                self.playing = false;
+                self.diverged = false;
+                self.accumulator = 0.0;
+            }
+            UiCommand::NewProject => self.new_pattern_project(),
+            UiCommand::OpenProject => self.open_pattern_project_dialog(),
+            UiCommand::SaveProject => self.save_pattern_project(),
+            UiCommand::ImportAvatar => self.import_avatar_dialog(),
+            UiCommand::ToggleAvatar => {
+                self.avatar_visible = !self.avatar_visible;
+                self.pattern_dirty = true;
+                self.upload_scene();
+            }
+            UiCommand::ToggleAvatarWireframe => {
+                self.avatar_wireframe = !self.avatar_wireframe;
+                self.pattern_dirty = true;
+                self.upload_scene();
+            }
+            UiCommand::ToggleAvatarCollision => {
+                self.avatar_collision_enabled = !self.avatar_collision_enabled;
+                self.pattern_dirty = true;
+                if let Err(error) = self.sync_pattern_avatar_colliders() {
+                    self.pattern_message = format!("Não foi possível atualizar a colisão: {error}");
+                }
+                self.upload_scene();
+            }
+            UiCommand::Show3dViewport => self.workspace = WorkspaceMode::Simulation,
+            UiCommand::Show2dViewport => {
+                self.playing = false;
+                self.workspace = WorkspaceMode::Pattern;
+            }
+            UiCommand::ShowSplitViewport => {
+                self.workspace = WorkspaceMode::Split;
+                self.pattern_fit_pending = true;
+            }
+            UiCommand::ToggleMetrics => self.show_metrics = !self.show_metrics,
+        }
+    }
+
+    fn ui_customizer_window(&mut self, ctx: &egui::Context) {
+        if !self.show_ui_customizer {
+            return;
+        }
+
+        let mut save_clicked = false;
+        let mut reset_theme_clicked = false;
+        let mut reset_all_clicked = false;
+        let mut theme_changed = false;
+        let mut layout_changed = false;
+        let mut remove_button_id = None;
+        let mut add_button: Option<(UiCommand, String)> = None;
+
+        egui::Window::new("Personalizar interface")
+            .open(&mut self.show_ui_customizer)
+            .resizable(true)
+            .default_size(egui::vec2(620.0, 700.0))
+            .show(ctx, |ui| {
+                ui.label("Personalize cores, formas, organização dos viewports e comandos. As preferências ficam separadas dos arquivos de vestuário.");
+                ui.separator();
+
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    egui::CollapsingHeader::new("Tema e cores")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button("ClothEvo original").clicked() {
+                                    reset_theme_clicked = true;
+                                }
+                                if ui.button("Graphite").clicked() {
+                                    self.ui_customization.theme = ThemeSettings::graphite();
+                                    theme_changed = true;
+                                }
+                                if ui.button("Amethyst").clicked() {
+                                    self.ui_customization.theme = ThemeSettings::amethyst();
+                                    theme_changed = true;
+                                }
+                            });
+                            ui.label("Cada cor pode ser alterada individualmente.");
+                            theme_changed |= edit_ui_rgb(ui, "Fundo dos painéis", &mut self.ui_customization.theme.panel_bg);
+                            theme_changed |= edit_ui_rgb(ui, "Fundo das janelas", &mut self.ui_customization.theme.window_bg);
+                            theme_changed |= edit_ui_rgb(ui, "Fundo profundo", &mut self.ui_customization.theme.deep_bg);
+                            theme_changed |= edit_ui_rgb(ui, "Fundo secundário", &mut self.ui_customization.theme.muted_bg);
+                            theme_changed |= edit_ui_rgb(ui, "Texto", &mut self.ui_customization.theme.text);
+                            theme_changed |= edit_ui_rgb(ui, "Cor de destaque", &mut self.ui_customization.theme.accent);
+                            theme_changed |= edit_ui_rgb(ui, "Seleção / estado ativo", &mut self.ui_customization.theme.selection);
+                            theme_changed |= edit_ui_rgb(ui, "Botão", &mut self.ui_customization.theme.button_bg);
+                            theme_changed |= edit_ui_rgb(ui, "Botão ao passar o mouse", &mut self.ui_customization.theme.button_hover);
+                            theme_changed |= edit_ui_rgb(ui, "Contornos", &mut self.ui_customization.theme.border);
+                        });
+
+                    egui::CollapsingHeader::new("Formas e densidade")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            theme_changed |= ui.add(
+                                egui::Slider::new(&mut self.ui_customization.theme.corner_radius, 0..=16)
+                                    .text("Arredondamento dos cantos"),
+                            ).changed();
+                            theme_changed |= ui.add(
+                                egui::Slider::new(&mut self.ui_customization.theme.spacing, 2.0..=20.0)
+                                    .text("Espaçamento dos componentes"),
+                            ).changed();
+                            theme_changed |= ui.add(
+                                egui::Slider::new(&mut self.ui_customization.theme.ui_scale, 0.75..=1.75)
+                                    .text("Escala global da interface"),
+                            ).changed();
+                        });
+
+                    egui::CollapsingHeader::new("Organização dos viewports")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.label("Estas opções controlam a área dividida 3D + 2D.");
+                            layout_changed |= ui.checkbox(
+                                &mut self.ui_customization.split_vertical,
+                                "Empilhar viewports verticalmente",
+                            ).changed();
+                            layout_changed |= ui.checkbox(
+                                &mut self.ui_customization.split_swapped,
+                                "Colocar 2D Pattern primeiro",
+                            ).changed();
+                            if ui.button("Abrir layout 3D + 2D").clicked() {
+                                self.workspace = WorkspaceMode::Split;
+                                self.pattern_fit_pending = true;
+                            }
+                        });
+
+                    egui::CollapsingHeader::new("Minha barra de comandos")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.label("Adicione comandos existentes à sua própria barra. Cada botão pode ser renomeado, ocultado, reordenado ou removido.");
+                            let mut previous_order = None;
+                            for index in 0..self.ui_customization.toolbar_buttons.len() {
+                                let button = &mut self.ui_customization.toolbar_buttons[index];
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut button.visible, "");
+                                    ui.text_edit_singleline(&mut button.label);
+                                    egui::ComboBox::from_id_salt(("toolbar_command", button.id))
+                                        .selected_text(button.command.label())
+                                        .width(170.0)
+                                        .show_ui(ui, |ui| {
+                                            for (command, label) in UiCommand::ALL {
+                                                ui.selectable_value(&mut button.command, *command, *label);
+                                            }
+                                        });
+                                    if ui.small_button("↑").clicked() {
+                                        previous_order = Some((index, index.saturating_sub(1)));
+                                    }
+                                    if ui.small_button("↓").clicked() && index + 1 < self.ui_customization.toolbar_buttons.len() {
+                                        previous_order = Some((index, index + 1));
+                                    }
+                                    if ui.small_button("×").on_hover_text("Remover botão").clicked() {
+                                        remove_button_id = Some(button.id);
+                                    }
+                                });
+                            }
+                            if let Some((from, to)) = previous_order {
+                                self.ui_customization.toolbar_buttons.swap(from, to);
+                            }
+                            ui.separator();
+                            ui.label("Adicionar um comando");
+                            ui.horizontal(|ui| {
+                                egui::ComboBox::from_id_salt("new_custom_toolbar_command")
+                                    .selected_text(self.ui_customizer_new_command.label())
+                                    .width(220.0)
+                                    .show_ui(ui, |ui| {
+                                        for (command, label) in UiCommand::ALL {
+                                            ui.selectable_value(&mut self.ui_customizer_new_command, *command, *label);
+                                        }
+                                    });
+                                ui.text_edit_singleline(&mut self.ui_customizer_new_label);
+                            });
+                            if ui.button("＋ Adicionar botão").clicked() {
+                                add_button = Some((
+                                    self.ui_customizer_new_command,
+                                    self.ui_customizer_new_label.trim().to_owned(),
+                                ));
+                            }
+                        });
+                });
+
+                if !self.ui_customization_message.is_empty() {
+                    ui.separator();
+                    ui.label(egui::RichText::new(&self.ui_customization_message).size(11.0));
+                }
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Salvar preferências").clicked() {
+                        save_clicked = true;
+                    }
+                    if ui.button("Restaurar todas as preferências").clicked() {
+                        reset_all_clicked = true;
+                    }
+                    if ui.button("Fechar").clicked() {
+                        self.show_ui_customizer = false;
+                    }
+                });
+            });
+
+        if reset_theme_clicked {
+            self.ui_customization.theme = ThemeSettings::default();
+            theme_changed = true;
+        }
+        if reset_all_clicked {
+            self.ui_customization = UiCustomization::default();
+            self.split_vertical = false;
+            self.split_swapped = false;
+            self.workspace = WorkspaceMode::Split;
+            theme_changed = true;
+            layout_changed = false;
+        }
+        if layout_changed {
+            self.split_vertical = self.ui_customization.split_vertical;
+            self.split_swapped = self.ui_customization.split_swapped;
+        }
+        if let Some(id) = remove_button_id {
+            self.ui_customization.toolbar_buttons.retain(|button| button.id != id);
+        }
+        if let Some((command, label)) = add_button {
+            let id = self.ui_customization.toolbar_buttons.iter().map(|button| button.id).max().unwrap_or(0) + 1;
+            let label = if label.is_empty() { command.label().to_owned() } else { label };
+            self.ui_customization.toolbar_buttons.push(CustomToolbarButton {
+                id,
+                label,
+                command,
+                visible: true,
+            });
+            self.ui_customization_message = "Botão adicionado. Salve as preferências para mantê-lo.".into();
+        }
+        if theme_changed {
+            self.ui_theme_dirty = true;
+        }
+        if save_clicked {
+            self.save_ui_customization();
+        }
+    }
+
     fn global_toolbar(&mut self, ui: &mut egui::Ui) {
         let mut new_project = false;
         let mut open_project = false;
