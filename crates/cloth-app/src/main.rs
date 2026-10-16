@@ -1299,6 +1299,7 @@ impl ClothEvoApp {
             return;
         }
 
+        let mut window_open = self.show_ui_customizer;
         let mut save_clicked = false;
         let mut reset_theme_clicked = false;
         let mut reset_all_clicked = false;
@@ -1309,7 +1310,7 @@ impl ClothEvoApp {
         let mut close_clicked = false;
 
         egui::Window::new("Personalizar interface")
-            .open(&mut self.show_ui_customizer)
+            .open(&mut window_open)
             .resizable(true)
             .default_size(egui::vec2(620.0, 700.0))
             .show(ctx, |ui| {
@@ -1454,9 +1455,7 @@ impl ClothEvoApp {
                 });
             });
 
-        if close_clicked {
-            self.show_ui_customizer = false;
-        }
+        self.show_ui_customizer = window_open && !close_clicked;
         if reset_theme_clicked {
             self.ui_customization.theme = ThemeSettings::default();
             theme_changed = true;
