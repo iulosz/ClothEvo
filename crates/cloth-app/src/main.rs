@@ -7555,7 +7555,7 @@ impl eframe::App for ClothEvoApp {
             // O diagnóstico foi definido após renderizar o painel de controles deste frame.
             ui.ctx().request_repaint();
         }
-        if (self.avatar_import_pending_path.is_some()) {
+        if self.avatar_import_pending_path.is_some() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         }
         if (self.playing && self.workspace.runs_simulation()) || self.capture.is_some() {
