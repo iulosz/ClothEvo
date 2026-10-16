@@ -1045,140 +1045,318 @@ impl ClothEvoApp {
     }
 
     fn top_navigation(&mut self, ui: &mut egui::Ui) {
-        const ORANGE: egui::Color32 = egui::Color32::from_rgb(255, 170, 53);
-        const PAPER: egui::Color32 = egui::Color32::from_rgb(247, 239, 215);
+        const ACCENT: egui::Color32 = egui::Color32::from_rgb(16, 166, 160);
+        const TEXT: egui::Color32 = egui::Color32::from_rgb(226, 228, 230);
 
-        ui.set_min_height(58.0);
-        let mut render_changed = false;
-        ui.horizontal(|ui| {
-            ui.add_space(2.0);
-            ui.vertical(|ui| {
-                ui.label(egui::RichText::new("CLOTHEVO").size(23.0).strong().color(PAPER));
-            });
-            ui.add_space(16.0);
-            ui.separator();
-            ui.add_space(8.0);
+        let can_undo = !self.pattern_undo.is_empty();
+        let can_redo = !self.pattern_redo.is_empty();
+        let avatar_available = self.avatar_mesh.is_some();
+        let import_pending = self.avatar_import_pending_path.is_some();
 
-            if ui.selectable_label(
-                self.workspace == WorkspaceMode::Simulation,
-                egui::RichText::new("3D Viewport").strong(),
-            ).clicked() {
-                self.workspace = WorkspaceMode::Simulation;
-            }
-            if ui.selectable_label(
-                self.workspace == WorkspaceMode::Pattern,
-                egui::RichText::new("2D Viewport").strong(),
-            ).clicked() {
-                self.playing = false;
-                self.workspace = WorkspaceMode::Pattern;
-            }
-            if ui.selectable_label(
-                self.workspace == WorkspaceMode::Placement,
-                egui::RichText::new("Posicionamento 3D").strong(),
-            ).clicked() {
-                self.playing = false;
-                let already_prepared = self.workspace == WorkspaceMode::Placement
-                    && self.using_pattern_sim
-                    && !self.placement_ranges.is_empty();
-                if !already_prepared {
-                    if self.pattern_project.pieces.is_empty() {
-                        self.workspace = WorkspaceMode::Pattern;
-                        self.pattern_message = "Crie pelo menos um molde antes de entrar no posicionamento 3D.".into();
-                    } else if let Err(error) = self.start_pattern_simulation() {
-                        self.pattern_message = error;
-                        self.workspace = WorkspaceMode::Pattern;
-                    }
-                } else {
-                    self.workspace = WorkspaceMode::Placement;
-                }
-            }
-
-            ui.menu_button(
-                egui::RichText::new("View  ↘").strong().color(ORANGE),
-                |ui| {
-                    if ui.selectable_label(self.workspace == WorkspaceMode::Split, "3D + 2D").clicked() {
-                        self.workspace = WorkspaceMode::Split;
-                        self.pattern_fit_pending = true;
-                    }
-                    ui.menu_button("Visualização de malhas e costura", |ui| {
-                        render_changed |= ui.checkbox(&mut self.style.wireframe, "Mostrar malha / wireframe").changed();
-                        render_changed |= ui.checkbox(&mut self.style.seams, "Mostrar linhas de costura").changed();
-                    });
-                    ui.separator();
-                    ui.checkbox(&mut self.show_metrics, "Métricas");
-                },
-            );
-
-        });
-        if render_changed {
-            self.upload_scene();
-        }
-    }
-
-    fn global_toolbar(&mut self, ui: &mut egui::Ui) {
         let mut new_project = false;
         let mut open_project = false;
         let mut save_project = false;
+        let mut save_project_as = false;
+        let mut undo = false;
+        let mut redo = false;
+        let mut toggle_simulation = false;
+        let mut step_simulation = false;
+        let mut reset_simulation = false;
+        let mut enter_placement = false;
+        let mut add_rectangle = false;
+        let mut add_polygon = false;
+        let mut fit_patterns = false;
         let mut import_avatar = false;
         let mut avatar_visibility_changed = false;
-        let mut wireframe_changed = false;
-        let mut collision_changed = false;
-        let import_pending = self.avatar_import_pending_path.is_some();
-        let imported_avatar_available = self.avatar_mesh.is_some();
+        let mut avatar_wireframe_changed = false;
+        let mut avatar_collision_changed = false;
+        let mut display_changed = false;
+        let mut selected_fabric: Option<FabricPreset> = None;
 
-        ui.set_min_height(42.0);
+        ui.set_min_height(34.0);
         ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new("PROJETO").size(10.0).strong());
-            new_project = ui.button("Novo Projeto").clicked();
-            open_project = ui.button("Abrir Projeto").clicked();
-            save_project = ui.button("Salvar Projeto").clicked();
-
+            ui.add_space(3.0);
+            ui.label(egui::RichText::new("C").size(23.0).strong().color(ACCENT));
+            ui.label(egui::RichText::new("CLOTHEVO").size(15.0).strong().color(TEXT));
+            ui.add_space(8.0);
             ui.separator();
-            ui.label(egui::RichText::new("AVATAR").size(10.0).strong());
-            avatar_visibility_changed |= ui.checkbox(&mut self.avatar_visible, "Exibir Avatar").changed();
-            wireframe_changed |= ui.add_enabled(
-                imported_avatar_available,
-                egui::Checkbox::new(&mut self.avatar_wireframe, "Wireframe"),
-            ).on_hover_text("Disponível após importar uma malha OBJ ou FBX.").changed();
-            collision_changed |= ui.checkbox(
-                &mut self.avatar_collision_enabled,
-                "Usar Avatar como Superfície de Colisão",
-            ).changed();
-            import_avatar = ui.add_enabled(
-                !import_pending,
-                egui::Button::new("Importar Avatar (.OBJ / .FBX)…"),
-            ).clicked();
 
-            if import_pending {
-                ui.spinner();
-                ui.label("Importando avatar…");
-            }
+            ui.menu_button("File", |ui| {
+                if ui.button("New Project").clicked() { new_project = true; }
+                if ui.button("Open Project…").clicked() { open_project = true; }
+                ui.separator();
+                if ui.button("Save Project").clicked() { save_project = true; }
+                if ui.button("Save Project As…").clicked() { save_project_as = true; }
+            });
+            ui.menu_button("Edit", |ui| {
+                if ui.add_enabled(can_undo, egui::Button::new("Undo  Ctrl+Z")).clicked() { undo = true; }
+                if ui.add_enabled(can_redo, egui::Button::new("Redo  Ctrl+Y")).clicked() { redo = true; }
+            });
+            ui.menu_button("3D Garment", |ui| {
+                if ui.button(if self.playing { "Pause Simulation" } else { "Start Simulation" }).clicked() {
+                    toggle_simulation = true;
+                }
+                if ui.button("Single Step").clicked() { step_simulation = true; }
+                if ui.button("Reset Simulation").clicked() { reset_simulation = true; }
+                ui.separator();
+                if ui.button("3D Positioning Mode…").clicked() { enter_placement = true; }
+            });
+            ui.menu_button("2D Pattern", |ui| {
+                ui.label("Pattern tools");
+                ui.selectable_value(&mut self.pattern_tool, PatternTool::Draw, "Draw");
+                ui.selectable_value(&mut self.pattern_tool, PatternTool::Select, "Select / Edit");
+                ui.checkbox(&mut self.pattern_snap, "Snap to 1 cm grid");
+                ui.separator();
+                if ui.button("Add Rectangle").clicked() { add_rectangle = true; }
+                if ui.button("Add Regular Polygon").clicked() { add_polygon = true; }
+                if ui.button("Fit All Patterns").clicked() { fit_patterns = true; }
+            });
+            ui.menu_button("Sewing", |ui| {
+                ui.label("Sewing tools are available in the 2D Pattern editor.");
+                ui.label("Create Seam — not yet available in this menu.");
+                ui.label("Unpick Seam — not yet available in this menu.");
+                ui.label("Automatic Sewing — not yet available in this menu.");
+            });
+            ui.menu_button("Materials", |ui| {
+                ui.label("Simulation fabric presets");
+                for fabric in FabricPreset::ALL {
+                    if ui.selectable_label(self.preset == fabric, fabric.name()).clicked() {
+                        selected_fabric = Some(fabric);
+                    }
+                }
+                ui.separator();
+                ui.label("Full material library — not yet implemented.");
+            });
+            ui.menu_button("Avatar", |ui| {
+                avatar_visibility_changed = ui.checkbox(&mut self.avatar_visible, "Show Avatar").changed();
+                avatar_wireframe_changed = ui.add_enabled(
+                    avatar_available,
+                    egui::Checkbox::new(&mut self.avatar_wireframe, "Wireframe"),
+                ).on_hover_text("Available after importing an OBJ or FBX avatar mesh.").changed();
+                avatar_collision_changed = ui.checkbox(
+                    &mut self.avatar_collision_enabled,
+                    "Use Avatar as Collision Surface",
+                ).changed();
+                ui.separator();
+                if ui.add_enabled(!import_pending, egui::Button::new("Import Avatar (.OBJ / .FBX)…")).clicked() {
+                    import_avatar = true;
+                }
+                if import_pending {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Importing avatar…");
+                    });
+                }
+            });
+            ui.menu_button("Display", |ui| {
+                display_changed |= ui.checkbox(&mut self.style.wireframe, "Show Mesh Wireframe").changed();
+                display_changed |= ui.checkbox(&mut self.style.seams, "Show Seam Lines").changed();
+                ui.checkbox(&mut self.show_metrics, "Metrics Panel");
+                ui.separator();
+                if ui.button("3D + 2D Viewports").clicked() {
+                    self.workspace = WorkspaceMode::Split;
+                }
+            });
+            ui.menu_button("Preferences", |ui| {
+                ui.label("Preferences");
+                ui.label("Interface themes and shortcuts are not yet implemented.");
+            });
+            ui.menu_button("Settings", |ui| {
+                ui.label("Application Settings");
+                ui.label("General and simulation defaults are not yet implemented.");
+            });
+            ui.menu_button("Help", |ui| {
+                ui.label("Documentation and About are not yet implemented.");
+            });
+            ui.menu_button(if self.playing { "Ⅱ SIMULATION" } else { "▶ SIMULATION" }, |ui| {
+                if ui.button(if self.playing { "Pause" } else { "Start" }).clicked() { toggle_simulation = true; }
+                if ui.button("Single Step").clicked() { step_simulation = true; }
+                if ui.button("Reset").clicked() { reset_simulation = true; }
+            });
         });
 
-        if new_project {
-            self.new_pattern_project();
-        }
-        if open_project {
-            self.open_pattern_project_dialog();
-        }
-        if save_project {
-            self.save_pattern_project();
-        }
+        if new_project { self.new_pattern_project(); }
+        if open_project { self.open_pattern_project_dialog(); }
+        if save_project { self.save_pattern_project(); }
+        if save_project_as { self.save_pattern_project_as(); }
+        if undo { self.undo_pattern_edit(); }
+        if redo { self.redo_pattern_edit(); }
 
-        if avatar_visibility_changed || wireframe_changed || collision_changed {
-            self.pattern_dirty = true;
-        }
-        if collision_changed {
-            if let Err(error) = self.sync_pattern_avatar_colliders() {
-                self.pattern_message = format!("Não foi possível atualizar a colisão do avatar: {error}");
+        if toggle_simulation {
+            if self.diverged {
+                self.sim.reset();
+                self.accumulator = 0.0;
+                self.diverged = false;
+                self.playing = true;
+            } else {
+                self.playing = !self.playing;
             }
         }
-        if avatar_visibility_changed || wireframe_changed || collision_changed {
+        if step_simulation {
+            self.playing = false;
+            self.accumulator = 0.0;
+            self.sim.step(FIXED_DT);
+            self.last_step_ms = self.sim.stats.step_ms;
+            if !self.sim.is_finite() {
+                self.sim.reset();
+                self.last_step_ms = 0.0;
+                self.diverged = true;
+            }
+        }
+        if reset_simulation {
+            self.sim.reset();
+            self.last_step_ms = 0.0;
+            self.playing = false;
+            self.diverged = false;
+            self.accumulator = 0.0;
+        }
+        if enter_placement {
+            self.playing = false;
+            if self.pattern_project.pieces.is_empty() {
+                self.pattern_message = "Create at least one pattern in 2D Pattern before entering positioning mode.".into();
+                self.workspace = WorkspaceMode::Split;
+            } else if let Err(error) = self.start_pattern_simulation() {
+                self.pattern_message = error;
+                self.workspace = WorkspaceMode::Split;
+            } else {
+                self.workspace = WorkspaceMode::Placement;
+            }
+        }
+        if add_rectangle { self.create_rectangle_primitive(); }
+        if add_polygon { self.create_regular_polygon_primitive(); }
+        if fit_patterns { self.pattern_fit_pending = true; }
+        if let Some(fabric) = selected_fabric {
+            self.preset = fabric;
+            fabric.apply(&mut self.sim.params);
+            self.pattern_dirty = true;
+        }
+        if avatar_visibility_changed || avatar_wireframe_changed || avatar_collision_changed {
+            self.pattern_dirty = true;
+        }
+        if avatar_collision_changed {
+            if let Err(error) = self.sync_pattern_avatar_colliders() {
+                self.pattern_message = format!("Could not update avatar collision: {error}");
+            }
+        }
+        if avatar_visibility_changed || avatar_wireframe_changed || avatar_collision_changed || display_changed {
             self.upload_scene();
         }
-        if import_avatar {
-            self.import_avatar_dialog();
+        if import_avatar { self.import_avatar_dialog(); }
+    }
+
+    fn library_panel(&mut self, ui: &mut egui::Ui) {
+        let mut import_avatar = false;
+        ui.horizontal(|ui| {
+            ui.heading("Library");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new("ASSETS").size(9.0).color(egui::Color32::GRAY));
+            });
+        });
+        ui.separator();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::CollapsingHeader::new("Garment")
+                .default_open(true)
+                .show(ui, |ui| {
+                    let pieces: Vec<(usize, String)> = self.pattern_project.pieces.iter()
+                        .enumerate()
+                        .map(|(index, piece)| (index, piece.name.clone()))
+                        .collect();
+                    if pieces.is_empty() {
+                        ui.weak("No garment presets installed.");
+                        ui.label("Create a pattern using 2D Pattern → Add Rectangle.");
+                    } else {
+                        for (index, name) in pieces {
+                            if ui.selectable_label(self.selected_piece == index, name).clicked() {
+                                self.selected_piece = index;
+                                self.selected_target = Some(PatternEditTarget::Piece { piece: index });
+                            }
+                        }
+                    }
+                });
+            egui::CollapsingHeader::new("Avatar")
+                .default_open(false)
+                .show(ui, |ui| {
+                    if let Some(name) = self.avatar_mesh_name.as_deref() {
+                        ui.label(name);
+                    } else {
+                        ui.weak("Procedural mannequin");
+                    }
+                    if ui.button("Import OBJ / FBX…").clicked() { import_avatar = true; }
+                });
+            for category in ["Hanger", "Fabric", "Hardware", "Material", "Stage"] {
+                egui::CollapsingHeader::new(category)
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        let message = match category {
+                            "Fabric" => "Choose a simulation preset in the Fabric panel.",
+                            "Material" => "Material asset library is not implemented yet.",
+                            "Hanger" => "Hanger asset library is not implemented yet.",
+                            "Hardware" => "Hardware asset library is not implemented yet.",
+                            _ => "Stage asset library is not implemented yet.",
+                        };
+                        ui.weak(message);
+                    });
+            }
+            if import_avatar { self.import_avatar_dialog(); }
+            ui.separator();
+            egui::CollapsingHeader::new("Workspace Controls")
+                .default_open(false)
+                .show(ui, |ui| self.controls(ui));
+        });
+    }
+
+    fn inspector_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Fabric");
+        ui.label(egui::RichText::new("SIMULATION PRESETS").size(9.0).color(egui::Color32::GRAY));
+        for fabric in FabricPreset::ALL {
+            if ui.selectable_label(self.preset == fabric, fabric.name()).clicked() {
+                self.preset = fabric;
+                fabric.apply(&mut self.sim.params);
+                self.pattern_dirty = true;
+            }
         }
+        ui.separator();
+        ui.heading("Property Editor");
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.label(egui::RichText::new("Project").strong());
+            ui.label(format!("Name: {}", self.pattern_project.name));
+            ui.label(format!("Pattern pieces: {}", self.pattern_project.pieces.len()));
+            ui.label(format!("Seams: {}", self.pattern_project.seams.len()));
+            ui.label(format!("Units: {}", self.pattern_project.units.label()));
+            ui.separator();
+            if let Some(piece) = self.pattern_project.pieces.get(self.selected_piece) {
+                ui.label(egui::RichText::new("Selected Pattern").strong());
+                ui.label(format!("Name: {}", piece.name));
+                ui.label(format!("Layer: {}", piece.layer));
+                ui.label(format!("Outline segments: {}", piece.outline.segments.len()));
+                ui.label(format!("Particle distance: {:.1} mm", piece.fabric.particle_distance_meters * 1000.0));
+                let points = sample_curve(&piece.outline, 16);
+                if !points.is_empty() {
+                    let min_x = points.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+                    let max_x = points.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+                    let min_y = points.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+                    let max_y = points.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
+                    ui.label(format!("Approx. width: {:.1} cm", (max_x - min_x) * 100.0));
+                    ui.label(format!("Approx. height: {:.1} cm", (max_y - min_y) * 100.0));
+                }
+            } else {
+                ui.weak("Select a pattern in Library or create one in 2D Pattern.");
+            }
+            ui.separator();
+            if self.pattern_dirty {
+                ui.colored_label(egui::Color32::from_rgb(230, 175, 73), "Unsaved project changes");
+            } else {
+                ui.weak("Project is saved.");
+            }
+            if let Some(name) = self.avatar_mesh_name.as_deref() {
+                ui.separator();
+                ui.label(egui::RichText::new("Avatar").strong());
+                ui.label(name);
+                if let Some(diag) = self.avatar_diagnostics.as_ref() {
+                    ui.label(format!("{} vertices · {} triangles", diag.vertex_count, diag.triangle_count));
+                }
+            }
+        });
     }
 
     fn environment_controls(&mut self, ui: &mut egui::Ui) {
