@@ -32,7 +32,9 @@ O wgpu escolhe sozinho Vulkan, DX12 ou Metal. Para forçar um: `WGPU_BACKEND=vul
 
 ## Interface de trabalho
 
-A interface usa uma identidade editorial surrealista com azul-cobalto, magenta e acentos ocre. A navegação superior organiza **Ambiente 3D**, **Moldes 2D**, **Posicionamento 3D** e o menu **View**. O painel Moldes 2D identifica diretamente o editor de geometria vetorial, e o estado do avatar padrão é destacado quando o arquivo externo não está disponível. Em View, **3D + 2D** abre as duas viewports, **Visualização de malhas e costura** controla wireframe e costuras, e **Métricas** mostra os diagnósticos do solver num painel inferior redimensionável.
+A interface usa uma identidade editorial surrealista com azul-cobalto, magenta e acentos ocre. Acima da navegação há uma **barra de menus** com File, Edit, 3D Garment, 2D Pattern, Sewing, Materials, Avatar, Display, Preferences, Settings e Help, ligados às funções existentes (projetos, desfazer/refazer, moldes, costuras, avatar, tecidos, visualização, solver e ajuda). Itens de recursos ainda inexistentes aparecem desabilitados. Atalhos: Ctrl+N/O/S/Shift+S para projeto e Ctrl+Z/Y para desfazer/refazer no editor de moldes.
+
+A navegação superior organiza **Ambiente 3D**, **Moldes 2D** e **Posicionamento 3D**. O painel Moldes 2D identifica diretamente o editor de geometria vetorial, e o estado do avatar padrão é destacado quando o arquivo externo não está disponível. Em Display, **3D + 2D** abre as duas viewports, wireframe e linhas de costura controlam a malha, e **Métricas do solver** mostra os diagnósticos num painel inferior redimensionável.
 
 Uma sessão comum inicia no Ambiente 3D com chão e avatar procedural; se um arquivo padrão `Sarah.fbx` estiver num dos caminhos de recursos examinados, ele é carregado automaticamente. A cena de benchmark/demonstração não é carregada como a experiência normal; as cenas internas permanecem disponíveis para testes e captura por `CLOTHEVO_SCENE`.
 

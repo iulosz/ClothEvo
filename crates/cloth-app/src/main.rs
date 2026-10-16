@@ -5,6 +5,7 @@
 //! `CLOTHEVO_SCREENSHOT=<arquivo.ppm>` — salva o viewport e fecha o app.
 
 mod avatar_import;
+mod menu_bar;
 
 use cloth_render::{
     primitives, CameraGoal, CameraPreset, ClothTopology, MeshKind, OrbitCamera, SceneRenderer,
@@ -575,6 +576,11 @@ struct ClothEvoApp {
     pattern_saved_path: Option<std::path::PathBuf>,
     pattern_dirty: bool,
     pattern_fit_pending: bool,
+    /// Janelas abertas pelo menu Help.
+    show_shortcuts_window: bool,
+    show_about_window: bool,
+    /// Escala da interface (Settings); 1.0 = 100 %.
+    ui_scale: f32,
 }
 
 fn statics_from(colliders: &[Collider]) -> Vec<StaticMeshData> {
@@ -772,6 +778,9 @@ impl ClothEvoApp {
             pattern_saved_path: None,
             pattern_dirty: false,
             pattern_fit_pending: false,
+            show_shortcuts_window: false,
+            show_about_window: false,
+            ui_scale: 1.0,
         };
         app.try_load_default_avatar();
         if !app.validation_scene {
@@ -1029,7 +1038,6 @@ impl ClothEvoApp {
         const PAPER: egui::Color32 = egui::Color32::from_rgb(247, 239, 215);
 
         ui.set_min_height(58.0);
-        let mut render_changed = false;
         ui.horizontal(|ui| {
             ui.add_space(2.0);
             ui.vertical(|ui| {
@@ -1057,38 +1065,8 @@ impl ClothEvoApp {
                 self.workspace == WorkspaceMode::Placement,
                 egui::RichText::new("Posicionamento 3D").strong(),
             ).clicked() {
-                self.playing = false;
-                let already_prepared = self.workspace == WorkspaceMode::Placement
-                    && self.using_pattern_sim
-                    && !self.placement_ranges.is_empty();
-                if !already_prepared {
-                    if self.pattern_project.pieces.is_empty() {
-                        self.workspace = WorkspaceMode::Pattern;
-                        self.pattern_message = "Crie pelo menos um molde antes de entrar no posicionamento 3D.".into();
-                    } else if let Err(error) = self.start_pattern_simulation() {
-                        self.pattern_message = error;
-                        self.workspace = WorkspaceMode::Pattern;
-                    }
-                } else {
-                    self.workspace = WorkspaceMode::Placement;
-                }
+                self.enter_placement_workspace();
             }
-
-            ui.menu_button(
-                egui::RichText::new("View  ↘").strong().color(ORANGE),
-                |ui| {
-                    if ui.selectable_label(self.workspace == WorkspaceMode::Split, "3D + 2D").clicked() {
-                        self.workspace = WorkspaceMode::Split;
-                        self.pattern_fit_pending = true;
-                    }
-                    ui.menu_button("Visualização de malhas e costura", |ui| {
-                        render_changed |= ui.checkbox(&mut self.style.wireframe, "Mostrar malha / wireframe").changed();
-                        render_changed |= ui.checkbox(&mut self.style.seams, "Mostrar linhas de costura").changed();
-                    });
-                    ui.separator();
-                    ui.checkbox(&mut self.show_metrics, "Métricas");
-                },
-            );
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(48.0, 40.0), egui::Sense::hover());
@@ -1119,9 +1097,39 @@ impl ClothEvoApp {
                 }).size(10.0).strong().color(PAPER));
             });
         });
-        if render_changed {
-            self.upload_scene();
+    }
+
+    /// Entra no posicionamento 3D, preparando a simulação de moldes quando necessário.
+    fn enter_placement_workspace(&mut self) {
+        self.playing = false;
+        let already_prepared = self.using_pattern_sim && !self.placement_ranges.is_empty();
+        if already_prepared {
+            self.workspace = WorkspaceMode::Placement;
+        } else if self.pattern_project.pieces.is_empty() {
+            self.workspace = WorkspaceMode::Pattern;
+            self.pattern_message = "Crie pelo menos um molde antes de entrar no posicionamento 3D.".into();
+        } else if let Err(error) = self.start_pattern_simulation() {
+            self.pattern_message = error;
+            self.workspace = WorkspaceMode::Pattern;
         }
+    }
+
+    /// Remove o avatar importado e volta ao avatar/colisão procedurais.
+    fn remove_avatar_model(&mut self) {
+        self.avatar_import_receiver = None;
+        self.avatar_import_pending_path = None;
+        self.avatar_mesh = None;
+        self.avatar_sdf = None;
+        self.avatar_mesh_name = None;
+        self.avatar_mesh_path = None;
+        self.avatar_diagnostics = None;
+        self.avatar_imported_height_m = None;
+        self.avatar_imported_heading_degrees = None;
+        self.avatar_imported_collision_spacing_m = None;
+        if let Err(error) = self.sync_pattern_avatar_colliders() {
+            self.pattern_message = format!("Não foi possível restaurar a colisão procedural: {error}");
+        }
+        self.upload_scene();
     }
 
     fn environment_controls(&mut self, ui: &mut egui::Ui) {
@@ -1192,20 +1200,7 @@ impl ClothEvoApp {
             }
         }
         if remove {
-            self.avatar_import_receiver = None;
-            self.avatar_import_pending_path = None;
-            self.avatar_mesh = None;
-            self.avatar_sdf = None;
-            self.avatar_mesh_name = None;
-            self.avatar_mesh_path = None;
-            self.avatar_diagnostics = None;
-            self.avatar_imported_height_m = None;
-            self.avatar_imported_heading_degrees = None;
-            self.avatar_imported_collision_spacing_m = None;
-            if let Err(error) = self.sync_pattern_avatar_colliders() {
-                self.pattern_message = format!("Não foi possível restaurar a colisão procedural: {error}");
-            }
-            self.upload_scene();
+            self.remove_avatar_model();
         }
         if collision_changed {
             if let Err(error) = self.sync_pattern_avatar_colliders() {
@@ -7312,6 +7307,15 @@ impl eframe::App for ClothEvoApp {
         let was_simulation_workspace = self.workspace.runs_simulation();
         let diverged_before = self.diverged;
         let steps_before = self.sim.stats.steps;
+
+        self.handle_menu_shortcuts(ui);
+        egui::Panel::top("menu_bar")
+            .frame(egui::Frame::new()
+                .fill(egui::Color32::from_rgb(10, 13, 25))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(54, 63, 91)))
+                .inner_margin(egui::Margin::symmetric(8, 2)))
+            .show(ui, |ui| self.menu_bar(ui));
+        self.menu_windows(ui.ctx());
 
         egui::Panel::top("main_navigation")
             .frame(egui::Frame::new()
