@@ -5,6 +5,9 @@
 //! `CLOTHEVO_SCREENSHOT=<arquivo.ppm>` — salva o viewport e fecha o app.
 
 mod avatar_import;
+mod ui_customization;
+
+use ui_customization::{CustomToolbarButton, ThemeSettings, UiCommand, UiCustomization};
 
 use cloth_render::{
     primitives, CameraGoal, CameraPreset, ClothTopology, MeshKind, OrbitCamera, SceneRenderer,
@@ -471,6 +474,13 @@ struct ClothEvoApp {
     validation_scene: bool,
     /// Painel de métricas é aberto pelo menu View.
     show_metrics: bool,
+    /// Preferências da interface, salvas fora dos arquivos de projeto de vestuário.
+    ui_customization: UiCustomization,
+    show_ui_customizer: bool,
+    ui_customizer_new_command: UiCommand,
+    ui_customizer_new_label: String,
+    ui_customization_message: String,
+    ui_theme_dirty: bool,
     workspace: WorkspaceMode,
     /// No modo dividido: o editor 2D fica no primeiro painel (esquerda ou topo).
     split_swapped: bool,
@@ -610,6 +620,9 @@ fn statics_from(colliders: &[Collider]) -> Vec<StaticMeshData> {
 
 impl ClothEvoApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let (ui_customization, ui_load_message) = UiCustomization::load();
+        let startup_split_vertical = ui_customization.split_vertical;
+        let startup_split_swapped = ui_customization.split_swapped;
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = egui::Color32::from_rgb(15, 19, 35);
         visuals.window_fill = egui::Color32::from_rgb(23, 27, 45);
@@ -678,9 +691,15 @@ impl ClothEvoApp {
             capture,
             validation_scene,
             show_metrics: false,
+            ui_customization,
+            show_ui_customizer: false,
+            ui_customizer_new_command: UiCommand::ToggleSimulation,
+            ui_customizer_new_label: String::new(),
+            ui_customization_message: ui_load_message.unwrap_or_default(),
+            ui_theme_dirty: false,
             workspace: WorkspaceMode::Simulation,
-            split_swapped: false,
-            split_vertical: false,
+            split_swapped: startup_split_swapped,
+            split_vertical: startup_split_vertical,
             pattern_project: PatternProject::new("Novo projeto"),
             draft_points: Vec::new(),
             pattern_spacing: 0.08,
@@ -778,6 +797,7 @@ impl ClothEvoApp {
         if !app.validation_scene {
             app.focus_camera_preset(CameraPreset::Front, 1360.0 / 840.0);
         }
+        app.apply_ui_customization(&cc.egui_ctx);
         app.upload_scene();
         app
     }
