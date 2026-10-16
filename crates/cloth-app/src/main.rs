@@ -820,7 +820,7 @@ impl ClothEvoApp {
             pattern_spacing: 0.08,
             pattern_polygon_sides: 6,
             pattern_symmetry_axis_x: 0.0,
-            pattern_show_mesh: true,
+            pattern_show_mesh: false,
             selected_piece: 0,
             selected_material_asset: 0,
             seam_a_piece: 0,
@@ -5292,31 +5292,38 @@ impl ClothEvoApp {
             let outline_color = if selected_piece {
                 egui::Color32::from_rgb(108, 205, 255)
             } else {
-                egui::Color32::from_rgb(91, 183, 245)
+                egui::Color32::from_rgb(204, 207, 209)
             };
 
-            // Contorno de corte em azul; margem de costura independente em verde.
+            // Preenchimento por triângulos mantém contornos côncavos corretos; a grade da
+            // triangulação fica opcional para que a folha de moldes abra limpa como na referência.
+            if let Ok(mesh) = triangulate_outline(points, self.pattern_spacing) {
+                for triangle in &mesh.triangles {
+                    let a = to_screen(mesh.vertices[triangle[0] as usize]);
+                    let b = to_screen(mesh.vertices[triangle[1] as usize]);
+                    let c = to_screen(mesh.vertices[triangle[2] as usize]);
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![a, b, c],
+                        egui::Color32::from_rgb(69, 71, 72),
+                        egui::Stroke::NONE,
+                    ));
+                    if self.pattern_show_mesh {
+                        let stroke = egui::Stroke::new(0.7, egui::Color32::from_rgb(89, 99, 103));
+                        painter.line_segment([a, b], stroke);
+                        painter.line_segment([b, c], stroke);
+                        painter.line_segment([c, a], stroke);
+                    }
+                }
+            }
+
+            // Margem de costura em verde, separada do contorno de corte.
             if piece.seam_allowance_meters > 0.0 {
                 if let Ok(margin) = offset_polygon(points, piece.seam_allowance_meters) {
                     for i in 0..margin.len() {
                         painter.line_segment(
                             [to_screen(margin[i]), to_screen(margin[(i + 1) % margin.len()])],
-                            egui::Stroke::new(1.5, egui::Color32::from_rgb(104, 196, 131)),
+                            egui::Stroke::new(1.2, egui::Color32::from_rgb(104, 156, 121)),
                         );
-                    }
-                }
-            }
-
-            if self.pattern_show_mesh {
-                if let Ok(mesh) = triangulate_outline(points, self.pattern_spacing) {
-                    for triangle in &mesh.triangles {
-                        let a = to_screen(mesh.vertices[triangle[0] as usize]);
-                        let b = to_screen(mesh.vertices[triangle[1] as usize]);
-                        let c = to_screen(mesh.vertices[triangle[2] as usize]);
-                        let stroke = egui::Stroke::new(0.7, egui::Color32::from_rgb(63, 91, 105));
-                        painter.line_segment([a, b], stroke);
-                        painter.line_segment([b, c], stroke);
-                        painter.line_segment([c, a], stroke);
                     }
                 }
             }
