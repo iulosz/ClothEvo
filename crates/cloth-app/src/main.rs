@@ -1604,7 +1604,7 @@ impl ClothEvoApp {
         ui.weak("Selecione a ferramenta pelos ícones na barra vertical da viewport.");
         ui.horizontal(|ui| {
             if ui.button("Voltar ao 2D Viewport").clicked() {
-                self.workspace = WorkspaceMode::Pattern;
+                self.workspace = WorkspaceMode::Split;
                 self.playing = false;
             }
             if ui.button("Atualizar prévia").clicked() {
@@ -2289,7 +2289,7 @@ impl ClothEvoApp {
         if !self.confirm_discard_unsaved_changes() { return; }
         let avatar_path = self.avatar_mesh_path.clone();
         self.pattern_project = PatternProject::new("Novo projeto");
-        self.workspace = WorkspaceMode::Pattern;
+        self.workspace = WorkspaceMode::Split;
         self.playing = false;
         self.draft_points.clear();
         self.selected_piece = 0;
@@ -2356,7 +2356,7 @@ impl ClothEvoApp {
             Ok((project, app_state)) => {
                 if !self.confirm_discard_unsaved_changes() { return; }
                 self.pattern_project = project;
-                self.workspace = WorkspaceMode::Pattern;
+                self.workspace = WorkspaceMode::Split;
                 self.playing = false;
                 self.draft_points.clear();
                 self.selected_piece = 0;
