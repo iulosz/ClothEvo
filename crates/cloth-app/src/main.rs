@@ -1193,7 +1193,7 @@ impl ClothEvoApp {
         self.ui_customization.split_swapped = self.split_swapped;
         match self.ui_customization.save() {
             Ok(()) => {
-                let path = UiCustomization::configuration_path()
+                let path = ui_customization::configuration_path()
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|_| "pasta de configurações do usuário".into());
                 self.ui_customization_message = format!("Preferências salvas em: {path}");
