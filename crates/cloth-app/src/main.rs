@@ -7,7 +7,7 @@
 mod avatar_import;
 mod ui_customization;
 
-use ui_customization::{CustomToolbarButton, ThemeSettings, UiCommand, UiCustomization};
+use ui_customization::{ButtonIcon, ButtonShape, CustomToolbarButton, ThemeSettings, UiCommand, UiCustomization};
 
 use cloth_render::{
     primitives, CameraGoal, CameraPreset, ClothTopology, MeshKind, OrbitCamera, SceneRenderer,
@@ -1204,10 +1204,18 @@ impl ClothEvoApp {
     }
 
     fn custom_toolbar(&mut self, ui: &mut egui::Ui) {
-        let buttons: Vec<(u64, String, UiCommand)> = self.ui_customization.toolbar_buttons
+        let text_color = ui_rgb(self.ui_customization.theme.text);
+        let buttons: Vec<(u64, String, UiCommand, [u8; 3], ButtonShape, ButtonIcon)> = self.ui_customization.toolbar_buttons
             .iter()
             .filter(|button| button.visible)
-            .map(|button| (button.id, button.label.clone(), button.command))
+            .map(|button| (
+                button.id,
+                button.label.clone(),
+                button.command,
+                button.color,
+                button.shape,
+                button.icon,
+            ))
             .collect();
         if buttons.is_empty() {
             return;
@@ -1216,8 +1224,16 @@ impl ClothEvoApp {
         let mut actions = Vec::new();
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new("MINHA BARRA").size(9.0).strong());
-            for (id, label, command) in buttons {
-                if ui.push_id(("custom_ui_command", id), |ui| ui.button(label)).inner.clicked() {
+            for (id, label, command, color, shape, icon) in buttons {
+                let text = if icon.glyph().is_empty() {
+                    label
+                } else {
+                    format!("{} {}", icon.glyph(), label)
+                };
+                let button = egui::Button::new(egui::RichText::new(text).color(text_color))
+                    .fill(ui_rgb(color))
+                    .corner_radius(egui::CornerRadius::same(shape.corner_radius()));
+                if ui.push_id(("custom_ui_command", id), |ui| ui.add(button)).inner.clicked() {
                     actions.push(command);
                 }
             }
@@ -1412,6 +1428,31 @@ impl ClothEvoApp {
                                         remove_button_id = Some(button.id);
                                     }
                                 });
+                                egui::CollapsingHeader::new(format!("Aparência: {}", button.label))
+                                    .default_open(false)
+                                    .show(ui, |ui| {
+                                        edit_ui_rgb(ui, "Cor do botão", &mut button.color);
+                                        ui.horizontal(|ui| {
+                                            ui.label("Formato");
+                                            egui::ComboBox::from_id_salt(("toolbar_button_shape", button.id))
+                                                .selected_text(button.shape.label())
+                                                .show_ui(ui, |ui| {
+                                                    for shape in [ButtonShape::Square, ButtonShape::Rounded, ButtonShape::Pill] {
+                                                        ui.selectable_value(&mut button.shape, shape, shape.label());
+                                                    }
+                                                });
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Ícone");
+                                            egui::ComboBox::from_id_salt(("toolbar_button_icon", button.id))
+                                                .selected_text(button.icon.label())
+                                                .show_ui(ui, |ui| {
+                                                    for (icon, label) in ButtonIcon::ALL {
+                                                        ui.selectable_value(&mut button.icon, *icon, *label);
+                                                    }
+                                                });
+                                        });
+                                    });
                             }
                             if let Some((from, to)) = previous_order {
                                 self.ui_customization.toolbar_buttons.swap(from, to);
@@ -1484,6 +1525,9 @@ impl ClothEvoApp {
                 label,
                 command,
                 visible: true,
+                color: self.ui_customization.theme.accent,
+                shape: ButtonShape::Rounded,
+                icon: ButtonIcon::None,
             });
             self.ui_customization_message = "Botão adicionado. Salve as preferências para mantê-lo.".into();
         }
