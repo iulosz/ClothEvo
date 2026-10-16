@@ -480,6 +480,7 @@ struct ClothEvoApp {
     ui_customizer_new_command: UiCommand,
     ui_customizer_new_label: String,
     ui_customization_message: String,
+    ui_customization_dirty: bool,
     ui_theme_dirty: bool,
     workspace: WorkspaceMode,
     /// No modo dividido: o editor 2D fica no primeiro painel (esquerda ou topo).
@@ -696,6 +697,7 @@ impl ClothEvoApp {
             ui_customizer_new_command: UiCommand::ToggleSimulation,
             ui_customizer_new_label: String::new(),
             ui_customization_message: ui_load_message.unwrap_or_default(),
+            ui_customization_dirty: false,
             ui_theme_dirty: false,
             workspace: WorkspaceMode::Simulation,
             split_swapped: startup_split_swapped,
@@ -1197,6 +1199,7 @@ impl ClothEvoApp {
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|_| "pasta de configurações do usuário".into());
                 self.ui_customization_message = format!("Preferências salvas em: {path}");
+                self.ui_customization_dirty = false;
             }
             Err(error) => self.ui_customization_message = error,
         }
@@ -1324,6 +1327,7 @@ impl ClothEvoApp {
         let mut remove_button_id = None;
         let mut add_button: Option<(UiCommand, String)> = None;
         let mut close_clicked = false;
+        let mut buttons_changed = false;
 
         egui::Window::new("Personalizar interface")
             .open(&mut window_open)
@@ -1407,37 +1411,40 @@ impl ClothEvoApp {
                             for index in 0..button_count {
                                 let button = &mut self.ui_customization.toolbar_buttons[index];
                                 ui.horizontal(|ui| {
-                                    ui.checkbox(&mut button.visible, "");
-                                    ui.text_edit_singleline(&mut button.label);
+                                    buttons_changed |= ui.checkbox(&mut button.visible, "").changed();
+                                    buttons_changed |= ui.text_edit_singleline(&mut button.label).changed();
                                     egui::ComboBox::from_id_salt(("toolbar_command", button.id))
                                         .selected_text(button.command.label())
                                         .width(170.0)
                                         .show_ui(ui, |ui| {
                                             for (command, label) in UiCommand::ALL {
-                                                ui.selectable_value(&mut button.command, *command, *label);
+                                                buttons_changed |= ui.selectable_value(&mut button.command, *command, *label).changed();
                                             }
                                         });
                                     if ui.small_button("↑").clicked() {
                                         previous_order = Some((index, index.saturating_sub(1)));
+                                        buttons_changed = true;
                                     }
                                     if ui.small_button("↓").clicked() && index + 1 < button_count {
                                         previous_order = Some((index, index + 1));
+                                        buttons_changed = true;
                                     }
                                     if ui.small_button("×").on_hover_text("Remover botão").clicked() {
                                         remove_button_id = Some(button.id);
+                                        buttons_changed = true;
                                     }
                                 });
                                 egui::CollapsingHeader::new(format!("Aparência: {}", button.label))
                                     .default_open(false)
                                     .show(ui, |ui| {
-                                        edit_ui_rgb(ui, "Cor do botão", &mut button.color);
+                                        buttons_changed |= edit_ui_rgb(ui, "Cor do botão", &mut button.color);
                                         ui.horizontal(|ui| {
                                             ui.label("Formato");
                                             egui::ComboBox::from_id_salt(("toolbar_button_shape", button.id))
                                                 .selected_text(button.shape.label())
                                                 .show_ui(ui, |ui| {
                                                     for shape in [ButtonShape::Square, ButtonShape::Rounded, ButtonShape::Pill] {
-                                                        ui.selectable_value(&mut button.shape, shape, shape.label());
+                                                        buttons_changed |= ui.selectable_value(&mut button.shape, shape, shape.label()).changed();
                                                     }
                                                 });
                                         });
@@ -1447,7 +1454,7 @@ impl ClothEvoApp {
                                                 .selected_text(button.icon.label())
                                                 .show_ui(ui, |ui| {
                                                     for (icon, label) in ButtonIcon::ALL {
-                                                        ui.selectable_value(&mut button.icon, *icon, *label);
+                                                        buttons_changed |= ui.selectable_value(&mut button.icon, *icon, *label).changed();
                                                     }
                                                 });
                                         });
@@ -1478,7 +1485,10 @@ impl ClothEvoApp {
                         });
                 });
 
-                if !self.ui_customization_message.is_empty() {
+                if self.ui_customization_dirty {
+                    ui.separator();
+                    ui.colored_label(ui_rgb(self.ui_customization.theme.accent), "Há alterações de interface não salvas.");
+                } else if !self.ui_customization_message.is_empty() {
                     ui.separator();
                     ui.label(egui::RichText::new(&self.ui_customization_message).size(11.0));
                 }
@@ -1517,7 +1527,8 @@ impl ClothEvoApp {
             self.ui_customization.toolbar_buttons.retain(|button| button.id != id);
         }
         if let Some((command, label)) = add_button {
-            let id = self.ui_customization.toolbar_buttons.iter().map(|button| button.id).max().unwrap_or(0) + 1;
+            buttons_changed = true;
+            let id = self.ui_customization.toolbar_buttons.iter().map(|button| button.id).max().unwrap_or(0).saturating_add(1);
             let label = if label.is_empty() { command.label().to_owned() } else { label };
             self.ui_customization.toolbar_buttons.push(CustomToolbarButton {
                 id,
@@ -1532,6 +1543,9 @@ impl ClothEvoApp {
         }
         if theme_changed {
             self.ui_theme_dirty = true;
+        }
+        if theme_changed || layout_changed || buttons_changed || reset_theme_clicked || reset_all_clicked {
+            self.ui_customization_dirty = true;
         }
         if save_clicked {
             self.save_ui_customization();
