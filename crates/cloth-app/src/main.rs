@@ -1180,8 +1180,12 @@ impl ClothEvoApp {
     }
 
     fn top_navigation(&mut self, ui: &mut egui::Ui) {
-        const ACCENT: egui::Color32 = egui::Color32::from_rgb(16, 166, 160);
+        const ACCENT: egui::Color32 = egui::Color32::from_rgb(230, 190, 57);
         const TEXT: egui::Color32 = egui::Color32::from_rgb(226, 228, 230);
+        ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+        ui.style_mut().visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(44, 45, 46);
+        ui.style_mut().visuals.widgets.active.bg_fill = egui::Color32::from_rgb(37, 68, 67);
+        ui.style_mut().spacing.item_spacing = egui::vec2(5.0, 2.0);
 
         let can_undo = !self.pattern_undo.is_empty();
         let can_redo = !self.pattern_redo.is_empty();
@@ -1211,8 +1215,8 @@ impl ClothEvoApp {
         ui.set_min_height(34.0);
         ui.horizontal_wrapped(|ui| {
             ui.add_space(3.0);
-            ui.label(egui::RichText::new("C").size(23.0).strong().color(ACCENT));
-            ui.label(egui::RichText::new("CLOTHEVO").size(15.0).strong().color(TEXT));
+            ui.label(egui::RichText::new("M").size(24.0).strong().color(ACCENT));
+            ui.label(egui::RichText::new("CLOTHEVO").size(14.0).strong().color(TEXT));
             ui.add_space(8.0);
             ui.separator();
 
@@ -6395,7 +6399,7 @@ impl ClothEvoApp {
         first
             .resizable(true)
             .frame(egui::Frame::NONE)
-            .default_size(total * 0.5)
+            .default_size(total * 0.48)
             .size_range(egui::Rangef::new(MIN_PANE, max_first))
             .show(ui, |ui| self.split_pane(ui, pattern_first));
         egui::CentralPanel::default()
@@ -8104,8 +8108,8 @@ impl eframe::App for ClothEvoApp {
 
         egui::Panel::left("library_panel")
             .resizable(true)
-            .default_size(158.0)
-            .size_range(egui::Rangef::new(125.0, 260.0))
+            .default_size(138.0)
+            .size_range(118.0..=230.0)
             .frame(egui::Frame::new()
                 .fill(egui::Color32::from_rgb(27, 28, 29))
                 .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(47, 48, 49)))
@@ -8114,8 +8118,8 @@ impl eframe::App for ClothEvoApp {
 
         egui::Panel::right("property_inspector")
             .resizable(true)
-            .default_size(268.0)
-            .size_range(egui::Rangef::new(220.0, 380.0))
+            .default_size(236.0)
+            .size_range(210.0..=340.0)
             .frame(egui::Frame::new()
                 .fill(egui::Color32::from_rgb(27, 28, 29))
                 .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(47, 48, 49)))
