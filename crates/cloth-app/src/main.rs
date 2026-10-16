@@ -1298,10 +1298,6 @@ impl ClothEvoApp {
                     });
             }
             if import_avatar { self.import_avatar_dialog(); }
-            ui.separator();
-            egui::CollapsingHeader::new("Workspace Controls")
-                .default_open(false)
-                .show(ui, |ui| self.controls(ui));
         });
     }
 
@@ -1356,6 +1352,10 @@ impl ClothEvoApp {
                     ui.label(format!("{} vertices · {} triangles", diag.vertex_count, diag.triangle_count));
                 }
             }
+            ui.separator();
+            egui::CollapsingHeader::new("Advanced Properties")
+                .default_open(false)
+                .show(ui, |ui| self.controls(ui));
         });
     }
 
