@@ -445,6 +445,7 @@ impl PatternEditTarget {
 struct AvatarImportJobResult {
     path: std::path::PathBuf,
     refresh_viewport: bool,
+    mark_project_dirty: bool,
     target_height_m: f32,
     collision_spacing_m: f32,
     heading_degrees: f32,
@@ -781,7 +782,12 @@ impl ClothEvoApp {
         app
     }
 
-    fn schedule_avatar_import(&mut self, path: &std::path::Path, refresh_viewport: bool) {
+    fn schedule_avatar_import(
+        &mut self,
+        path: &std::path::Path,
+        refresh_viewport: bool,
+        mark_project_dirty: bool,
+    ) {
         let path = path.to_path_buf();
         let target_height_m = self.pattern_project.avatar.height_meters as f32;
         let collision_spacing_m = self.avatar_collision_spacing_m;
@@ -800,6 +806,7 @@ impl ClothEvoApp {
                 let _ = sender.send(AvatarImportJobResult {
                     path: worker_path,
                     refresh_viewport,
+                    mark_project_dirty,
                     target_height_m,
                     collision_spacing_m,
                     heading_degrees,
@@ -834,6 +841,9 @@ impl ClothEvoApp {
                         let warning = imported.collision_warning.clone();
                         self.avatar_mesh = Some(imported.mesh);
                         self.avatar_sdf = imported.collision_sdf;
+                        if job.mark_project_dirty {
+                            self.pattern_dirty = true;
+                        }
                         self.avatar_mesh_name = Some(display_name.clone());
                         self.avatar_mesh_path = Some(job.path);
                         self.avatar_diagnostics = Some(imported.diagnostics);
@@ -929,7 +939,7 @@ impl ClothEvoApp {
         }
         for candidate in candidates {
             if candidate.is_file() {
-                self.schedule_avatar_import(&candidate, true);
+                self.schedule_avatar_import(&candidate, true, false);
                 break;
             }
         }
@@ -943,8 +953,7 @@ impl ClothEvoApp {
             .add_filter("Autodesk FBX", &["fbx"])
             .pick_file();
         let Some(path) = selected else { return; };
-        self.pattern_dirty = true;
-        self.schedule_avatar_import(&path, true);
+        self.schedule_avatar_import(&path, true, true);
     }
 
     /// Reconstrói a cena preservando os parâmetros atuais.
@@ -1228,7 +1237,7 @@ impl ClothEvoApp {
         if reprocess {
             self.pattern_dirty = true;
             if let Some(path) = self.avatar_mesh_path.clone() {
-                self.schedule_avatar_import(&path, true);
+                self.schedule_avatar_import(&path, true, true);
             }
         }
         if remove {
@@ -2186,7 +2195,7 @@ impl ClothEvoApp {
         if let Some(saved_path) = app_state.get("avatar_path").and_then(serde_json::Value::as_str) {
             let saved_path = std::path::PathBuf::from(saved_path);
             if saved_path.is_file() {
-                self.schedule_avatar_import(&saved_path, true);
+                self.schedule_avatar_import(&saved_path, true, false);
             } else {
                 self.pattern_message = format!(
                     "Projeto carregado, mas o arquivo de avatar salvo não foi encontrado: {}. A visualização usa o manequim procedural.",
@@ -3282,7 +3291,7 @@ impl ClothEvoApp {
         if reprocess_avatar {
             self.pattern_dirty = true;
             if let Some(path) = self.avatar_mesh_path.clone() {
-                self.schedule_avatar_import(&path, true);
+                self.schedule_avatar_import(&path, true, true);
             }
         }
         if avatar_changed {
