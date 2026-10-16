@@ -319,7 +319,7 @@ fn pattern_sim_shell_radius(piece_index: usize, thickness: f32) -> f32 {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("ClothEvo — Pattern Studio + XPBD")
+            .with_title("ClothEvo — Surreal Textile Lab")
             .with_inner_size([1360.0, 840.0])
             .with_min_inner_size([900.0, 600.0]),
         renderer: eframe::Renderer::Wgpu,
@@ -466,6 +466,10 @@ struct ClothEvoApp {
     diverged: bool,
     last_step_ms: f32,
     capture: Option<Capture>,
+    /// Cenas de validação só são usadas quando pedidas explicitamente por CLOTHEVO_SCENE/captura.
+    validation_scene: bool,
+    /// Painel de métricas é aberto pelo menu View.
+    show_metrics: bool,
     workspace: WorkspaceMode,
     /// No modo dividido: o editor 2D fica no primeiro painel (esquerda ou topo).
     split_swapped: bool,
@@ -605,6 +609,21 @@ fn statics_from(colliders: &[Collider]) -> Vec<StaticMeshData> {
 
 impl ClothEvoApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let mut visuals = egui::Visuals::dark();
+        visuals.panel_fill = egui::Color32::from_rgb(15, 19, 35);
+        visuals.window_fill = egui::Color32::from_rgb(23, 27, 45);
+        visuals.extreme_bg_color = egui::Color32::from_rgb(8, 12, 25);
+        visuals.faint_bg_color = egui::Color32::from_rgb(28, 33, 54);
+        visuals.code_bg_color = egui::Color32::from_rgb(11, 16, 31);
+        visuals.hyperlink_color = egui::Color32::from_rgb(255, 180, 65);
+        visuals.selection.bg_fill = egui::Color32::from_rgb(205, 57, 135);
+        visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 193, 80));
+        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(31, 39, 65);
+        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(53, 61, 98);
+        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(205, 57, 135);
+        visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_rgb(236, 232, 219);
+        cc.egui_ctx.set_visuals(visuals);
+
         let render_state = cc.wgpu_render_state.clone();
         if let Some(rs) = &render_state {
             let depth = egui_wgpu::depth_format_from_bits(32, 0)
@@ -619,6 +638,7 @@ impl ClothEvoApp {
             frames: std::env::var("CLOTHEVO_FRAMES").ok().and_then(|s| s.parse().ok()).unwrap_or(120),
             requested: false,
         });
+        let validation_scene = capture.is_some() || std::env::var("CLOTHEVO_SCENE").is_ok();
         let kind = std::env::var("CLOTHEVO_SCENE")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
@@ -626,14 +646,27 @@ impl ClothEvoApp {
             .unwrap_or(SceneKind::HangingCloth);
 
         let params = SimParams::default();
-        let sim = build_scene(kind, DEFAULT_RES, params);
+        let sim = if validation_scene {
+            // Cenas de benchmark/captura continuam disponíveis para CI, mas não são a experiência padrão.
+            build_scene(kind, DEFAULT_RES, params.clone())
+        } else {
+            // Uma sessão nova começa sem pano de demonstração: chão e avatar prontos para receber moldes.
+            let mut builder = ClothBuilder::new();
+            builder.add_collider(Collider::ground());
+            if let Ok(colliders) = build_avatar_colliders(&AvatarConfig::default()) {
+                for collider in colliders {
+                    builder.add_collider(collider);
+                }
+            }
+            builder.build(params.clone())
+        };
         let mut app = Self {
             seam_pairs: sim.seam_pairs(),
             sim,
             kind,
             res: DEFAULT_RES,
             preset: FabricPreset::Cotton,
-            playing: true,
+            playing: validation_scene,
             accumulator: 0.0,
             camera: OrbitCamera::default(),
             style: ViewStyle::default(),
@@ -642,7 +675,9 @@ impl ClothEvoApp {
             diverged: false,
             last_step_ms: 0.0,
             capture,
-            workspace: WorkspaceMode::Split,
+            validation_scene,
+            show_metrics: false,
+            workspace: WorkspaceMode::Simulation,
             split_swapped: false,
             split_vertical: false,
             pattern_project: PatternProject::new("Novo projeto"),
@@ -739,6 +774,9 @@ impl ClothEvoApp {
             pattern_fit_pending: false,
         };
         app.try_load_default_avatar();
+        if !app.validation_scene {
+            app.focus_camera_preset(CameraPreset::Front, 1360.0 / 840.0);
+        }
         app.upload_scene();
         app
     }
@@ -815,6 +853,9 @@ impl ClothEvoApp {
                         }
                         if job.refresh_viewport {
                             self.upload_scene();
+                            if !self.validation_scene && !self.using_pattern_sim {
+                                self.focus_camera_preset(CameraPreset::Front, 1360.0 / 840.0);
+                            }
                         }
                     }
                     Err(error) => {
@@ -863,7 +904,9 @@ impl ClothEvoApp {
     }
 
     fn sync_pattern_avatar_colliders(&mut self) -> Result<(), String> {
-        if !self.using_pattern_sim {
+        // Preserve explicit validation scenes. In the normal editor and custom-pattern simulation,
+        // the exact imported SDF (or the procedural mannequin fallback) is the physical avatar.
+        if self.validation_scene && !self.using_pattern_sim {
             return Ok(());
         }
         let mut colliders = vec![Collider::ground()];
@@ -923,10 +966,10 @@ impl ClothEvoApp {
         };
         let edges = self.sim.mesh_edges();
         let mut statics = statics_from(&self.sim.colliders);
-        if self.using_pattern_sim
-            && (self.avatar_sdf.is_some() || !self.avatar_visible)
+        if (!self.avatar_visible && !self.validation_scene)
+            || (self.using_pattern_sim && self.avatar_sdf.is_some())
         {
-            // O corpo usado pelo solver não precisa ser desenhado como volumes analíticos.
+            // A representação física pode continuar ativa sem duplicar o desenho do corpo.
             statics.retain(|mesh| mesh.kind == MeshKind::Ground);
         }
         if self.avatar_visible {
@@ -979,25 +1022,46 @@ impl ClothEvoApp {
             .fold(0.0, f32::max)
     }
 
-    fn controls(&mut self, ui: &mut egui::Ui) {
-        let mut new_scene: Option<(SceneKind, u32)> = None;
+    fn top_navigation(&mut self, ui: &mut egui::Ui) {
+        const COBALT: egui::Color32 = egui::Color32::from_rgb(18, 54, 150);
+        const MAGENTA: egui::Color32 = egui::Color32::from_rgb(220, 67, 143);
+        const ORANGE: egui::Color32 = egui::Color32::from_rgb(255, 170, 53);
+        const PAPER: egui::Color32 = egui::Color32::from_rgb(247, 239, 215);
 
-        ui.heading("ClothEvo");
+        ui.set_min_height(58.0);
+        let mut render_changed = false;
         ui.horizontal(|ui| {
-            if ui.selectable_label(self.workspace == WorkspaceMode::Simulation, "Simulação 3D").clicked() {
+            ui.add_space(2.0);
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("CLOTHEVO").size(23.0).strong().color(PAPER));
+                ui.label(egui::RichText::new("SURREAL TEXTILE LAB  /  01").size(9.5).strong().color(ORANGE));
+            });
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            if ui.selectable_label(
+                self.workspace == WorkspaceMode::Simulation,
+                egui::RichText::new("Ambiente 3D").strong(),
+            ).clicked() {
                 self.workspace = WorkspaceMode::Simulation;
             }
-            if ui.selectable_label(self.workspace == WorkspaceMode::Pattern, "Moldes 2D").clicked() {
+            if ui.selectable_label(
+                self.workspace == WorkspaceMode::Pattern,
+                egui::RichText::new("Moldes 2D").strong(),
+            ).clicked() {
+                self.playing = false;
                 self.workspace = WorkspaceMode::Pattern;
             }
-            if ui.selectable_label(self.workspace == WorkspaceMode::Placement, "Posicionamento 3D").clicked() {
+            if ui.selectable_label(
+                self.workspace == WorkspaceMode::Placement,
+                egui::RichText::new("Posicionamento 3D").strong(),
+            ).clicked() {
                 self.playing = false;
-                // Recria a prévia ao voltar do editor/simulação, para refletir Undo/Redo e
-                // transformações persistidas no projeto. Clicar na aba já ativa não reinicia o painel.
-                if self.workspace != WorkspaceMode::Placement
-                    || !self.using_pattern_sim
-                    || self.placement_ranges.is_empty()
-                {
+                let already_prepared = self.workspace == WorkspaceMode::Placement
+                    && self.using_pattern_sim
+                    && !self.placement_ranges.is_empty();
+                if !already_prepared {
                     if self.pattern_project.pieces.is_empty() {
                         self.workspace = WorkspaceMode::Pattern;
                         self.pattern_message = "Crie pelo menos um molde antes de entrar no posicionamento 3D.".into();
@@ -1005,15 +1069,157 @@ impl ClothEvoApp {
                         self.pattern_message = error;
                         self.workspace = WorkspaceMode::Pattern;
                     }
+                } else {
+                    self.workspace = WorkspaceMode::Placement;
                 }
             }
-            if ui.selectable_label(self.workspace == WorkspaceMode::Split, "3D + 2D").clicked() {
-                self.workspace = WorkspaceMode::Split;
-                // O editor 2D agora ocupa só metade da área; reenquadra os moldes.
-                self.pattern_fit_pending = true;
-            }
+
+            ui.menu_button(
+                egui::RichText::new("VIEW  ↘").strong().color(ORANGE),
+                |ui| {
+                    if ui.selectable_label(self.workspace == WorkspaceMode::Split, "3D + 2D").clicked() {
+                        self.workspace = WorkspaceMode::Split;
+                        self.pattern_fit_pending = true;
+                    }
+                    ui.menu_button("Visualização de malhas e costura", |ui| {
+                        render_changed |= ui.checkbox(&mut self.style.wireframe, "Mostrar malha / wireframe").changed();
+                        render_changed |= ui.checkbox(&mut self.style.seams, "Mostrar linhas de costura").changed();
+                    });
+                    ui.separator();
+                    ui.checkbox(&mut self.show_metrics, "Métricas");
+                },
+            );
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(48.0, 40.0), egui::Sense::hover());
+                let painter = ui.painter_at(rect);
+                let center = rect.center();
+                painter.circle_filled(center, 13.0, MAGENTA);
+                painter.circle_stroke(center, 18.0, egui::Stroke::new(1.5, ORANGE));
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        center + egui::vec2(0.0, -22.0),
+                        center + egui::vec2(7.0, -5.0),
+                        center + egui::vec2(23.0, 1.0),
+                        center + egui::vec2(5.0, 5.0),
+                        center + egui::vec2(0.0, 22.0),
+                        center + egui::vec2(-5.0, 5.0),
+                        center + egui::vec2(-23.0, 1.0),
+                        center + egui::vec2(-7.0, -5.0),
+                    ],
+                    ORANGE,
+                    egui::Stroke::new(0.8, COBALT),
+                ));
+                ui.label(egui::RichText::new(if self.avatar_import_pending_path.is_some() {
+                    "AVATAR / IMPORTANDO"
+                } else if self.avatar_mesh.is_some() {
+                    "AVATAR / MALHA"
+                } else {
+                    "AVATAR / PROCEDURAL"
+                }).size(10.0).strong().color(PAPER));
+            });
         });
+        if render_changed {
+            self.upload_scene();
+        }
+    }
+
+    fn environment_controls(&mut self, ui: &mut egui::Ui) {
+        ui.heading("AMBIENTE 3D");
+        ui.label("Espaço de trabalho pronto para receber os moldes e a simulação.");
         ui.separator();
+
+        let mut import = false;
+        let mut reprocess = false;
+        let mut remove = false;
+        let mut visibility_changed = false;
+        let mut collision_changed = false;
+        let import_pending = self.avatar_import_pending_path.is_some();
+
+        egui::CollapsingHeader::new("Avatar e colisão corporal")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label("O modelo padrão é procurado automaticamente. Também é possível importar OBJ ou FBX.");
+                if ui.add_enabled(!import_pending, egui::Button::new("Importar avatar OBJ/FBX…")).clicked() {
+                    import = true;
+                }
+                if self.avatar_mesh_path.is_some() {
+                    ui.horizontal(|ui| {
+                        reprocess = ui.add_enabled(!import_pending, egui::Button::new("Aplicar escala / colisão")).clicked();
+                        remove = ui.add_enabled(!import_pending, egui::Button::new("Remover modelo")).clicked();
+                    });
+                }
+                if import_pending {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Preparando geometria e colisão em segundo plano…");
+                    });
+                }
+                if let Some(name) = self.avatar_mesh_name.as_ref() {
+                    ui.label(format!("Arquivo: {name}"));
+                    if let Some(diag) = self.avatar_diagnostics.as_ref() {
+                        ui.label(format!("{} vértices · {} triângulos", diag.vertex_count, diag.triangle_count));
+                        ui.label(format!("Dimensões: {:.2} × {:.2} × {:.2} m",
+                            diag.dimensions_meters[0], diag.dimensions_meters[1], diag.dimensions_meters[2]));
+                        if let Some(warning) = diag.topology {
+                            if !warning.has_reliable_inside_outside() {
+                                ui.colored_label(egui::Color32::from_rgb(255, 170, 53), format!(
+                                    "Aviso de topologia: {} arestas abertas; a colisão por volume pode ser imprecisa.",
+                                    warning.boundary_edges
+                                ));
+                            }
+                        }
+                    }
+                    visibility_changed = ui.checkbox(&mut self.avatar_visible, "Exibir avatar").changed();
+                    collision_changed = ui.checkbox(&mut self.avatar_collision_enabled, "Usar avatar como superfície de colisão").changed();
+                } else {
+                    ui.weak("Manequim procedural ativo; nenhum arquivo externo foi encontrado no caminho padrão.");
+                }
+                if self.pattern_project.pieces.is_empty() {
+                    ui.weak("Próximo passo: criar os moldes em Moldes 2D.");
+                } else {
+                    ui.weak("Use Posicionamento 3D para organizar os painéis antes de iniciar a simulação.");
+                }
+            });
+
+        if import { self.import_avatar_dialog(); }
+        if reprocess {
+            if let Some(path) = self.avatar_mesh_path.clone() {
+                self.schedule_avatar_import(&path, true);
+            }
+        }
+        if remove {
+            self.avatar_import_receiver = None;
+            self.avatar_import_pending_path = None;
+            self.avatar_mesh = None;
+            self.avatar_sdf = None;
+            self.avatar_mesh_name = None;
+            self.avatar_mesh_path = None;
+            self.avatar_diagnostics = None;
+            self.avatar_imported_height_m = None;
+            self.avatar_imported_heading_degrees = None;
+            self.avatar_imported_collision_spacing_m = None;
+            if let Err(error) = self.sync_pattern_avatar_colliders() {
+                self.pattern_message = format!("Não foi possível restaurar a colisão procedural: {error}");
+            }
+            self.upload_scene();
+        }
+        if collision_changed {
+            if let Err(error) = self.sync_pattern_avatar_colliders() {
+                self.pattern_message = format!("Não foi possível atualizar a colisão: {error}");
+            }
+            self.upload_scene();
+        }
+        if visibility_changed {
+            self.upload_scene();
+        }
+        if !self.pattern_message.is_empty() {
+            ui.separator();
+            ui.label(&self.pattern_message);
+        }
+    }
+
+    fn controls(&mut self, ui: &mut egui::Ui) {
         if self.workspace == WorkspaceMode::Pattern {
             self.pattern_controls(ui);
             return;
@@ -1023,6 +1229,7 @@ impl ClothEvoApp {
             return;
         }
         if self.workspace == WorkspaceMode::Split {
+            ui.weak("VIEW  /  3D + 2D");
             ui.horizontal(|ui| {
                 ui.checkbox(&mut self.split_swapped, "Trocar lados");
                 ui.checkbox(&mut self.split_vertical, "Empilhar");
@@ -1031,39 +1238,23 @@ impl ClothEvoApp {
                 .default_open(true)
                 .show(ui, |ui| self.pattern_controls(ui));
             ui.separator();
-            ui.strong("Simulação 3D");
-        }
-        if self.using_pattern_sim {
-            ui.strong("Cena atual: moldes personalizados");
-            ui.label("A malha 2D foi convertida para o solver XPBD.");
-            if ui.button("Restaurar cena de teste").clicked() {
-                self.load_scene(self.kind, self.res);
-            }
-            ui.separator();
-        } else {
-            ui.label("Simulação XPBD · cenas de validação");
-            ui.separator();
         }
 
-        // ----- Cena
-        ui.strong("Cena");
-        egui::ComboBox::from_id_salt("scene")
-            .selected_text(self.kind.name())
-            .width(240.0)
-            .show_ui(ui, |ui| {
-                for k in SceneKind::ALL {
-                    if ui.selectable_label(self.kind == k, k.name()).clicked() && self.kind != k {
-                        new_scene = Some((k, self.res));
-                    }
-                }
-            });
-        let mut res = self.res;
-        let slider = ui.add(egui::Slider::new(&mut res, 16..=141).text("células/m"));
-        if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
-            new_scene = Some((self.kind, res));
-        } else if slider.changed() {
-            self.res = res; // só atualiza o valor; a malha é refeita ao soltar
+        // Uma sessão normal começa como ambiente de trabalho vazio, com avatar e chão,
+        // nunca com um pano de demonstração. A cena de benchmark só aparece quando solicitada
+        // explicitamente por variável de ambiente/captura.
+        if !self.validation_scene && !self.using_pattern_sim {
+            self.environment_controls(ui);
+            return;
         }
+
+        if self.using_pattern_sim {
+            ui.heading("AMBIENTE 3D");
+            ui.label("Roupa personalizada convertida para o solver XPBD.");
+        } else {
+            ui.heading("AMBIENTE 3D");
+        }
+        ui.separator();
         ui.horizontal(|ui| {
             let label = if self.playing { "⏸ Pausar" } else { "▶ Continuar" };
             if ui.button(label).clicked() {
@@ -1169,127 +1360,9 @@ impl ClothEvoApp {
         ui.checkbox(&mut p.parallel, "paralelo (rayon)");
             });
 
-        // ----- Visualização
-        ui.separator();
-        egui::CollapsingHeader::new(egui::RichText::new("Visualização").strong())
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.checkbox(&mut self.style.wireframe, "malha (wireframe)");
-                ui.checkbox(&mut self.style.seams, "costuras");
-            });
-
-        // ----- Métricas
-        ui.separator();
-        egui::CollapsingHeader::new(egui::RichText::new("Métricas").strong())
-            .default_open(true)
-            .show(ui, |ui| {
-        let sim = &self.sim;
-        ui.label(format!("partículas: {}", sim.particle_count()));
-        ui.label(format!(
-            "restrições: {} dist. · {} flexão",
-            sim.distance_constraint_count(),
-            sim.bend_constraint_count()
-        ));
-        let budget = 1000.0 / 60.0;
-        let ms = self.last_step_ms;
-        let color = if ms <= budget { egui::Color32::LIGHT_GREEN } else { egui::Color32::YELLOW };
-        ui.colored_label(color, format!("passo: {ms:.2} ms (orçamento {budget:.1} ms a 60 Hz)"));
-        ui.label(format!("deformação máx.: {:.1} %", sim.max_strain() * 100.0));
-        ui.label(format!("energia cinética: {:.4} J", sim.kinetic_energy()));
-        ui.label(format!("velocidade máx.: {:.2} m/s · deslocamento do substep: {:.1} mm",
-            sim.max_particle_speed(), sim.max_particle_displacement() * 1000.0));
-        ui.label(format!(
-            "colisão corpo: {} projeções · {} trajetórias CCD · {} contatos CCD · penetração máx. {:.2} mm · {:.2} ms",
-            sim.stats.body_contact_projections,
-            sim.stats.body_sweep_tests,
-            sim.stats.body_swept_contacts,
-            sim.stats.body_max_penetration_m * 1000.0,
-            sim.stats.body_collision_ms,
-        ));
-        ui.label(format!(
-            "auto-colisão: VV {} cand/{} contatos · VT {} cand/{} verif/{} contatos · CCD VT {}/{} · EE {} cand/{} verif/{} contatos · CCD EE {}/{}",
-            sim.stats.self_collision_vv_candidates,
-            sim.stats.self_collision_vv_contacts,
-            sim.stats.self_collision_vt_candidates,
-            sim.stats.self_collision_vt_verified,
-            sim.stats.self_collision_vt_contacts,
-            sim.stats.self_collision_vt_sweep_tests,
-            sim.stats.self_collision_vt_swept_contacts,
-            sim.stats.self_collision_ee_candidates,
-            sim.stats.self_collision_ee_verified,
-            sim.stats.self_collision_ee_contacts,
-            sim.stats.self_collision_ee_sweep_tests,
-            sim.stats.self_collision_ee_swept_contacts,
-        ));
-        ui.label(format!(
-            "contato tangencial: {} contatos · {} estáticos · {} deslizando · v relativa máx. {:.2} m/s · resposta normal posicional máx. {:.2} mm",
-            sim.stats.contact_friction_contacts,
-            sim.stats.contact_friction_static_contacts,
-            sim.stats.contact_friction_sliding_contacts,
-            sim.stats.contact_max_tangential_speed_m_s,
-            sim.stats.contact_max_normal_correction_m * 1000.0,
-        ));
-        ui.weak("A resposta normal mostrada é um multiplicador posicional XPBD, não uma força experimental calibrada.");
-        ui.label(format!(
-            "auto-colisão: {} candidatos descartados · {} primitivas sobrecarregadas · penetração {:.2} → {:.2} mm · broadphase {:.2} ms · resolução {:.2} ms · total {:.2} ms",
-            sim.stats.self_collision_dropped_candidates,
-            sim.stats.self_collision_overflowed_primitives,
-            sim.stats.self_collision_penetration_before_m * 1000.0,
-            sim.stats.self_collision_penetration_after_m * 1000.0,
-            sim.stats.self_collision_broadphase_ms,
-            sim.stats.self_collision_solve_ms,
-            sim.stats.self_collision_ms,
-        ));
-        let speed_limit = self.sim.params.max_particle_speed.clamp(1.0, 100.0);
-        let unstable = sim.unstable_particle_count(speed_limit);
-        if sim.stability_corrections() > 0 {
-            ui.colored_label(
-                egui::Color32::from_rgb(255, 180, 80),
-                format!("Correções de estabilidade no último passo: {}", sim.stability_corrections()),
-            );
-        }
-        if unstable > 0 {
-            ui.colored_label(
-                egui::Color32::from_rgb(255, 92, 92),
-                format!("Partículas instáveis: {} acima de {:.1} m/s ou com dados inválidos", unstable, speed_limit),
-            );
-        } else {
-            ui.colored_label(
-                egui::Color32::LIGHT_GREEN,
-                format!("Partículas dentro do limite de estabilidade ({:.1} m/s)", speed_limit),
-            );
-        }
-        if self.sim.params.self_collision {
-            ui.label(format!(
-                "auto-colisão: {} contatos · penetração máxima {:.2} mm",
-                sim.self_collision_contacts(),
-                sim.self_collision_max_penetration() * 1000.0
-            ));
-        }
-        if !self.seam_pairs.is_empty() {
-            ui.label(format!("abertura máx. das costuras: {:.1} mm", self.seam_gap_max() * 1000.0));
-            let seam_load = sim.seam_tension_estimate_max_n();
-            let load_color = if seam_load > 100.0 { egui::Color32::from_rgb(255, 92, 92) } else { egui::Color32::LIGHT_GREEN };
-            ui.colored_label(load_color, format!("carga XPBD estimada máx. da costura: {:.2} N", seam_load));
-            ui.weak("Estimativa do multiplicador XPBD; indicador comparativo, não força experimental calibrada.");
-        }
-        let critical_seams = self.sim.seam_warning_pairs(0.015).len();
-        if critical_seams > 0 {
-            ui.colored_label(
-                egui::Color32::from_rgb(255, 92, 92),
-                format!("Abertura crítica: {} ligações de costura acima de 15 mm", critical_seams),
-            );
-        } else if !self.seam_pairs.is_empty() {
-            ui.colored_label(egui::Color32::LIGHT_GREEN, "Costuras sem abertura crítica (> 15 mm)");
-        }
-            });
-
         ui.separator();
         ui.weak("Arraste: orbitar · botão direito/meio: mover · roda: zoom");
 
-        if let Some((k, r)) = new_scene {
-            self.load_scene(k, r);
-        }
     }
 
 
@@ -5648,14 +5721,12 @@ impl ClothEvoApp {
         let mut include = |p: Vec3| {
             if p.is_finite() { min = min.min(p); max = max.max(p); }
         };
-        if self.using_pattern_sim {
-            if let Some(mesh) = self.avatar_mesh.as_ref() {
-                for vertex in &mesh.vertices { include(Vec3::from_array(vertex.pos)); }
-            } else {
-                let height = self.pattern_project.avatar.height_meters as f32;
-                include(Vec3::new(-0.16 * height, 0.0, -0.09 * height));
-                include(Vec3::new(0.16 * height, height, 0.09 * height));
-            }
+        if let Some(mesh) = self.avatar_mesh.as_ref() {
+            for vertex in &mesh.vertices { include(Vec3::from_array(vertex.pos)); }
+        } else if !self.validation_scene || self.using_pattern_sim {
+            let height = self.pattern_project.avatar.height_meters as f32;
+            include(Vec3::new(-0.30 * height, 0.0, -0.18 * height));
+            include(Vec3::new(0.30 * height, height, 0.18 * height));
         }
         for &position in &self.sim.pos { include(position); }
         if min.x > max.x { return None; }
@@ -7160,6 +7231,61 @@ fn sampled_edge_indices(
     Ok(indices)
 }
 
+    fn metrics_panel(&self, ui: &mut egui::Ui) {
+        let sim = &self.sim;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("MÉTRICAS / SOLVER").strong().color(egui::Color32::from_rgb(255, 170, 53)));
+            ui.separator();
+            ui.label(format!("{} partículas", sim.particle_count()));
+            ui.label(format!("{} restrições de distância · {} de flexão",
+                sim.distance_constraint_count(), sim.bend_constraint_count()));
+            ui.label(format!("passo {:.2} ms / 16,67 ms", self.last_step_ms));
+            ui.label(format!("deformação {:.1} %", sim.max_strain() * 100.0));
+            ui.label(format!("energia {:.4} J", sim.kinetic_energy()));
+            ui.label(format!("velocidade máx. {:.2} m/s", sim.max_particle_speed()));
+        });
+        ui.separator();
+        ui.columns(3, |columns| {
+            columns[0].strong("CORPO");
+            columns[0].label(format!("{} projeções · {} testes de trajetória · {} contatos CCD",
+                sim.stats.body_contact_projections, sim.stats.body_sweep_tests, sim.stats.body_swept_contacts));
+            columns[0].label(format!("penetração máx. {:.2} mm · {:.2} ms",
+                sim.stats.body_max_penetration_m * 1000.0, sim.stats.body_collision_ms));
+
+            columns[1].strong("AUTO-COLISÃO");
+            columns[1].label(format!("VV {}/{} · VT {}/{} · EE {}/{} contatos/candidatos",
+                sim.stats.self_collision_vv_contacts, sim.stats.self_collision_vv_candidates,
+                sim.stats.self_collision_vt_contacts, sim.stats.self_collision_vt_candidates,
+                sim.stats.self_collision_ee_contacts, sim.stats.self_collision_ee_candidates));
+            columns[1].label(format!("CCD VT {}/{} · EE {}/{}",
+                sim.stats.self_collision_vt_swept_contacts, sim.stats.self_collision_vt_sweep_tests,
+                sim.stats.self_collision_ee_swept_contacts, sim.stats.self_collision_ee_sweep_tests));
+            columns[1].label(format!("candidatos descartados {} · penetração {:.2} → {:.2} mm",
+                sim.stats.self_collision_dropped_candidates,
+                sim.stats.self_collision_penetration_before_m * 1000.0,
+                sim.stats.self_collision_penetration_after_m * 1000.0));
+
+            columns[2].strong("ATRITO E COSTURAS");
+            columns[2].label(format!("{} contatos · {} estáticos · {} deslizando",
+                sim.stats.contact_friction_contacts,
+                sim.stats.contact_friction_static_contacts,
+                sim.stats.contact_friction_sliding_contacts));
+            columns[2].label(format!("velocidade tangencial {:.2} m/s",
+                sim.stats.contact_max_tangential_speed_m_s));
+            if !self.seam_pairs.is_empty() {
+                columns[2].label(format!("abertura máx. {:.1} mm · tensão XPBD estimada {:.2} N",
+                    self.seam_gap_max() * 1000.0, sim.seam_tension_estimate_max_n()));
+            } else {
+                columns[2].label("Nenhuma costura ativa.");
+            }
+            let unstable = sim.unstable_particle_count(sim.params.max_particle_speed.clamp(1.0, 100.0));
+            if unstable > 0 {
+                columns[2].colored_label(egui::Color32::from_rgb(255, 92, 92), format!("Partículas instáveis: {unstable}"));
+            }
+        });
+        ui.weak("A carga de costura é uma estimativa do multiplicador XPBD, não uma força experimental calibrada.");
+    }
+
 impl eframe::App for ClothEvoApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_avatar_import();
@@ -7183,6 +7309,32 @@ impl eframe::App for ClothEvoApp {
         let was_simulation_workspace = self.workspace.runs_simulation();
         let diverged_before = self.diverged;
         let steps_before = self.sim.stats.steps;
+
+        egui::Panel::top("main_navigation")
+            .frame(egui::Frame::new()
+                .fill(egui::Color32::from_rgb(18, 54, 150))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 170, 53)))
+                .inner_margin(egui::Margin::symmetric(14, 8)))
+            .show(ui, |ui| self.top_navigation(ui));
+
+        if self.show_metrics {
+            egui::Panel::bottom("view_metrics")
+                .resizable(true)
+                .default_size(155.0)
+                .frame(egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(12, 16, 29))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(54, 63, 91)))
+                    .inner_margin(egui::Margin::same(10)))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Métricas").strong());
+                        if ui.small_button("Fechar ×").clicked() {
+                            self.show_metrics = false;
+                        }
+                    });
+                    egui::ScrollArea::vertical().show(ui, |ui| self.metrics_panel(ui));
+                });
+        }
 
         egui::Panel::left("controls").default_size(310.0).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui));

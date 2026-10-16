@@ -30,6 +30,12 @@ cargo run --release -p cloth-sim --example diag -- 1 24 20 1 10   # diagnóstico
 
 O wgpu escolhe sozinho Vulkan, DX12 ou Metal. Para forçar um: `WGPU_BACKEND=vulkan|dx12|metal|gl`.
 
+## Interface de trabalho
+
+A interface usa uma identidade editorial surrealista com azul-cobalto, magenta e acentos ocre. A navegação superior organiza **Ambiente 3D**, **Moldes 2D**, **Posicionamento 3D** e o menu **View**. Em View, **3D + 2D** abre as duas viewports, **Visualização de malhas e costura** controla wireframe e costuras, e **Métricas** mostra os diagnósticos do solver num painel inferior redimensionável.
+
+Uma sessão comum inicia no Ambiente 3D com chão e avatar procedural; se um arquivo padrão `Sarah.fbx` estiver num dos caminhos de recursos examinados, ele é carregado automaticamente. A cena de benchmark/demonstração não é carregada como a experiência normal; as cenas internas permanecem disponíveis para testes e captura por `CLOTHEVO_SCENE`.
+
 ## Controles
 
 * Arrastar com o botão esquerdo: orbitar · botão direito ou do meio: mover · roda: zoom.
