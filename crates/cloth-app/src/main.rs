@@ -7726,30 +7726,23 @@ impl eframe::App for ClothEvoApp {
 
         egui::Panel::top("main_navigation")
             .frame(egui::Frame::new()
-                .fill(egui::Color32::from_rgb(18, 54, 150))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 170, 53)))
-                .inner_margin(egui::Margin::symmetric(14, 8)))
+                .fill(egui::Color32::from_rgb(23, 24, 25))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(43, 44, 45)))
+                .inner_margin(egui::Margin::symmetric(10, 4)))
             .show(ui, |ui| self.top_navigation(ui));
-
-        egui::Panel::top("global_toolbar")
-            .frame(egui::Frame::new()
-                .fill(egui::Color32::from_rgb(20, 25, 39))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(54, 63, 91)))
-                .inner_margin(egui::Margin::symmetric(14, 5)))
-            .show(ui, |ui| self.global_toolbar(ui));
 
         if self.show_metrics {
             egui::Panel::bottom("view_metrics")
                 .resizable(true)
                 .default_size(155.0)
                 .frame(egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(12, 16, 29))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(54, 63, 91)))
+                    .fill(egui::Color32::from_rgb(22, 23, 24))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(56, 58, 60)))
                     .inner_margin(egui::Margin::same(10)))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Métricas").strong());
-                        if ui.small_button("Fechar ×").clicked() {
+                        ui.label(egui::RichText::new("Metrics").strong());
+                        if ui.small_button("Close ×").clicked() {
                             self.show_metrics = false;
                         }
                     });
@@ -7757,9 +7750,43 @@ impl eframe::App for ClothEvoApp {
                 });
         }
 
-        egui::Panel::left("controls").default_size(310.0).show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui));
-        });
+        egui::Panel::bottom("status_bar")
+            .frame(egui::Frame::new()
+                .fill(egui::Color32::from_rgb(22, 23, 24))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(43, 44, 45)))
+                .inner_margin(egui::Margin::symmetric(8, 3)))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let status = if self.playing { "Simulation Running" } else { "Simulation Ready" };
+                    ui.label(egui::RichText::new(status).size(10.0).color(egui::Color32::GRAY));
+                    if self.pattern_dirty {
+                        ui.label(egui::RichText::new("· Unsaved Changes").size(10.0).color(egui::Color32::from_rgb(224, 173, 68)));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new(self.pattern_project.units.label().to_uppercase()).size(10.0).color(egui::Color32::GRAY));
+                    });
+                });
+            });
+
+        egui::Panel::left("library_panel")
+            .resizable(true)
+            .default_size(158.0)
+            .size_range(egui::Rangef::new(125.0, 260.0))
+            .frame(egui::Frame::new()
+                .fill(egui::Color32::from_rgb(27, 28, 29))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(47, 48, 49)))
+                .inner_margin(egui::Margin::same(7)))
+            .show(ui, |ui| self.library_panel(ui));
+
+        egui::Panel::right("property_inspector")
+            .resizable(true)
+            .default_size(268.0)
+            .size_range(egui::Rangef::new(220.0, 380.0))
+            .frame(egui::Frame::new()
+                .fill(egui::Color32::from_rgb(27, 28, 29))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(47, 48, 49)))
+                .inner_margin(egui::Margin::same(7)))
+            .show(ui, |ui| self.inspector_panel(ui));
         if was_simulation_workspace {
             self.advance(dt);
         }
