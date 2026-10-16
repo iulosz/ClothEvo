@@ -611,18 +611,18 @@ fn statics_from(colliders: &[Collider]) -> Vec<StaticMeshData> {
 impl ClothEvoApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = egui::Color32::from_rgb(15, 19, 35);
-        visuals.window_fill = egui::Color32::from_rgb(23, 27, 45);
-        visuals.extreme_bg_color = egui::Color32::from_rgb(8, 12, 25);
-        visuals.faint_bg_color = egui::Color32::from_rgb(28, 33, 54);
-        visuals.code_bg_color = egui::Color32::from_rgb(11, 16, 31);
-        visuals.hyperlink_color = egui::Color32::from_rgb(255, 180, 65);
-        visuals.selection.bg_fill = egui::Color32::from_rgb(205, 57, 135);
-        visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 193, 80));
-        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(31, 39, 65);
-        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(53, 61, 98);
-        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(205, 57, 135);
-        visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_rgb(236, 232, 219);
+        visuals.panel_fill = egui::Color32::from_rgb(26, 27, 28);
+        visuals.window_fill = egui::Color32::from_rgb(31, 32, 33);
+        visuals.extreme_bg_color = egui::Color32::from_rgb(17, 18, 19);
+        visuals.faint_bg_color = egui::Color32::from_rgb(39, 40, 41);
+        visuals.code_bg_color = egui::Color32::from_rgb(20, 21, 22);
+        visuals.hyperlink_color = egui::Color32::from_rgb(16, 166, 160);
+        visuals.selection.bg_fill = egui::Color32::from_rgb(16, 102, 100);
+        visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(16, 166, 160));
+        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(34, 35, 36);
+        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(48, 49, 50);
+        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(16, 102, 100);
+        visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_rgb(219, 221, 223);
         cc.egui_ctx.set_visuals(visuals);
 
         let render_state = cc.wgpu_render_state.clone();
@@ -678,7 +678,7 @@ impl ClothEvoApp {
             capture,
             validation_scene,
             show_metrics: false,
-            workspace: WorkspaceMode::Simulation,
+            workspace: if validation_scene { WorkspaceMode::Simulation } else { WorkspaceMode::Split },
             split_swapped: false,
             split_vertical: false,
             pattern_project: PatternProject::new("Novo projeto"),
@@ -7708,7 +7708,7 @@ impl eframe::App for ClothEvoApp {
             if self.camera.approach(&goal, camera_dt) { self.camera_goal = None; }
             else { ui.ctx().request_repaint(); }
         }
-        if self.workspace == WorkspaceMode::Pattern {
+        if matches!(self.workspace, WorkspaceMode::Pattern | WorkspaceMode::Split) {
             let (undo, redo) = ui.input(|i| (
                 i.modifiers.ctrl && i.key_pressed(egui::Key::Z) && !i.modifiers.shift,
                 (i.modifiers.ctrl && i.key_pressed(egui::Key::Y))
