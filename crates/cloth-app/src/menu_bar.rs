@@ -94,6 +94,7 @@ impl ClothEvoApp {
                 ui.heading("ClothEvo");
                 ui.label(format!("Versão {}", env!("CARGO_PKG_VERSION")));
                 ui.label("Editor de moldes 2D e simulação de tecido XPBD 3D, em Rust (egui + wgpu).");
+                ui.label("Os projetos são armazenados em JSON no formato nativo .clothevo.");
                 ui.hyperlink_to("Repositório no GitHub", REPOSITORY_URL);
             });
     }
@@ -403,7 +404,6 @@ impl ClothEvoApp {
             ui.separator();
             ui.label("Editor de moldes");
             ui.add(egui::Slider::new(&mut self.seam_snap_tolerance_px, 4.0..=32.0).text("tolerância de snap (px)"));
-            ui.add(egui::Slider::new(&mut self.pattern_spacing, 0.025..=0.20).text("espaçamento visual (m)"));
             ui.add(egui::Slider::new(&mut self.avatar_guide_backdrop, 0.0..=0.6).text("fundo do guia"));
             ui.separator();
             coming_soon(ui, "Atalhos personalizados");

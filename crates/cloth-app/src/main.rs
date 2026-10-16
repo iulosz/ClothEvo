@@ -6,6 +6,7 @@
 
 mod avatar_import;
 mod menu_bar;
+mod mesh_preview;
 
 use cloth_render::{
     primitives, CameraGoal, CameraPreset, ClothTopology, MeshKind, OrbitCamera, SceneRenderer,
@@ -32,7 +33,7 @@ use pattern_geom::{
     sample_pattern_outlines_with_seam_sync, validate_simple_polygon, CutAndSewResult,
     SourceSegmentFragment,
 };
-use pattern_mesh::{triangulate_outline, triangulate_outline_with_forced_vertices};
+use pattern_mesh::triangulate_outline_with_forced_vertices;
 
 const FIXED_DT: f32 = 1.0 / 60.0;
 const DEFAULT_RES: u32 = 40;
@@ -478,7 +479,10 @@ struct ClothEvoApp {
     split_vertical: bool,
     pattern_project: PatternProject,
     draft_points: Vec<PatternPoint2>,
-    pattern_spacing: f64,
+    /// Malha 2D em cache, idêntica à usada pela simulação 3D.
+    mesh_preview: mesh_preview::MeshPreview,
+    /// Pinta a triangulação pelo menor ângulo de cada triângulo.
+    mesh_quality_colors: bool,
     pattern_polygon_sides: usize,
     pattern_symmetry_axis_x: f64,
     pattern_show_mesh: bool,
@@ -688,7 +692,8 @@ impl ClothEvoApp {
             split_vertical: false,
             pattern_project: PatternProject::new("Novo projeto"),
             draft_points: Vec::new(),
-            pattern_spacing: 0.08,
+            mesh_preview: mesh_preview::MeshPreview::default(),
+            mesh_quality_colors: false,
             pattern_polygon_sides: 6,
             pattern_symmetry_axis_x: 0.0,
             pattern_show_mesh: true,
@@ -2287,14 +2292,7 @@ impl ClothEvoApp {
         }
 
         ui.separator();
-        egui::CollapsingHeader::new(egui::RichText::new("Pré-visualização da malha 2D").strong())
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.add(egui::Slider::new(&mut self.pattern_spacing, 0.025..=0.20).text("espaçamento visual (m)"));
-                ui.checkbox(&mut self.pattern_show_mesh, "Mostrar triangulação");
-                ui.weak("A resolução da simulação 3D é definida separadamente em Física e montagem 3D por molde.");
-                ui.label("Os projetos são armazenados em JSON no formato nativo .clothevo.");
-            });
+        self.mesh_preview_panel(ui);
 
         ui.separator();
         ui.strong(format!("Peças ({})", self.pattern_project.pieces.len()));
@@ -4578,6 +4576,9 @@ impl ClothEvoApp {
             egui::Color32::from_gray(205),
         );
 
+        if self.pattern_show_mesh {
+            self.mesh_preview.refresh(&self.pattern_project);
+        }
         for (piece_index, piece) in self.pattern_project.pieces.iter().enumerate() {
             let sampled = sample_curve_with_ranges(&piece.outline, 12);
             let points = &sampled.points;
@@ -4603,17 +4604,7 @@ impl ClothEvoApp {
             }
 
             if self.pattern_show_mesh {
-                if let Ok(mesh) = triangulate_outline(points, self.pattern_spacing) {
-                    for triangle in &mesh.triangles {
-                        let a = to_screen(mesh.vertices[triangle[0] as usize]);
-                        let b = to_screen(mesh.vertices[triangle[1] as usize]);
-                        let c = to_screen(mesh.vertices[triangle[2] as usize]);
-                        let stroke = egui::Stroke::new(0.7, egui::Color32::from_rgb(63, 91, 105));
-                        painter.line_segment([a, b], stroke);
-                        painter.line_segment([b, c], stroke);
-                        painter.line_segment([c, a], stroke);
-                    }
-                }
+                self.draw_piece_mesh_preview(&painter, piece, &to_screen);
             }
 
             for i in 0..points.len() {
@@ -5359,26 +5350,7 @@ impl ClothEvoApp {
 
         // Força todos os piques e extremos de costura para dentro da amostragem de contorno
         // antes da triangulação. As extremidades não são aproximadas ao vértice vizinho.
-        let mut forced_by_piece: std::collections::HashMap<u64, Vec<(u32, f64)>> =
-            std::collections::HashMap::new();
-        for piece in &self.pattern_project.pieces {
-            forced_by_piece.entry(piece.id).or_default()
-                .extend(piece.notches.iter().map(|notch| (notch.segment_index, notch.t)));
-        }
-        for seam in &self.pattern_project.seams {
-            for edge in seam.sides_a.iter().chain(seam.sides_b.iter()) {
-                if edge.curve != BoundaryCurve::Outline { continue; }
-                let points = forced_by_piece.entry(edge.piece_id).or_default();
-                points.push((edge.start.segment, edge.start.t));
-                points.push((edge.end.segment, edge.end.t));
-            }
-        }
-        for params in forced_by_piece.values_mut() {
-            params.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| {
-                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-            }));
-            params.dedup_by(|a, b| a.0 == b.0 && (a.1 - b.1).abs() <= 1.0e-9);
-        }
+        let forced_by_piece = mesh_preview::forced_parameters_by_piece(&self.pattern_project);
 
         // Cada molde usa a sua própria distância entre partículas. As coordenadas da malha
         // são recentradas por peça, para que a transformação 3D gire em torno do centro do painel.
@@ -5406,23 +5378,11 @@ impl ClothEvoApp {
                     return Err(format!("O eixo da prega de '{}' sai do contorno ou possui geometria inválida.", piece.name));
                 }
             }
-            let particle_distance = piece.fabric.particle_distance_meters;
-            if !particle_distance.is_finite() || particle_distance <= 0.0 {
-                return Err(format!("Distância entre partículas inválida em '{}'.", piece.name));
-            }
             let sampled = synchronized_samples.remove(&piece.id)
                 .ok_or_else(|| format!("A amostragem do molde '{}' não foi gerada.", piece.name))?;
             let params = forced_by_piece.get(&piece.id).cloned().unwrap_or_default();
-            let forced_indices = forced_parameter_indices(piece, &sampled, &params)
-                .map_err(|error| format!("Não foi possível mapear os piques/extremos de '{}': {error}", piece.name))?;
-            validate_simple_polygon(&sampled.points)
-                .map_err(|e| format!("Contorno inválido em '{}': {e}", piece.name))?;
-            let mesh = triangulate_outline_with_forced_vertices(
-                &sampled.points, particle_distance, &forced_indices,
-            ).map_err(|e| format!("Não foi possível triangular '{}': {e}", piece.name))?;
-            if mesh.boundary_vertex_count != sampled.points.len() {
-                return Err(format!("Mapeamento de contorno inválido na peça '{}'.", piece.name));
-            }
+            // Mesmo caminho da pré-visualização 2D: o que o usuário vê é o que é simulado.
+            let (mesh, forced_indices) = mesh_preview::triangulate_piece(piece, &sampled, &params)?;
             let mapping = PieceSampleMapping {
                 ranges: sampled.segment_vertex_ranges,
                 forced_vertices: params.iter().copied().zip(forced_indices.iter().copied())
@@ -7483,6 +7443,7 @@ fn point_in_triangle(point: egui::Pos2, a: egui::Pos2, b: egui::Pos2, c: egui::P
 #[cfg(test)]
 mod pattern_editor_tests {
     use super::*;
+    use pattern_mesh::triangulate_outline;
 
     fn square_project() -> PatternProject {
         let mut project = PatternProject::new("Teste de edição");
