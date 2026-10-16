@@ -7731,6 +7731,24 @@ impl eframe::App for ClothEvoApp {
                 .inner_margin(egui::Margin::symmetric(10, 4)))
             .show(ui, |ui| self.top_navigation(ui));
 
+        egui::Panel::bottom("status_bar")
+            .frame(egui::Frame::new()
+                .fill(egui::Color32::from_rgb(22, 23, 24))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(43, 44, 45)))
+                .inner_margin(egui::Margin::symmetric(8, 3)))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let status = if self.playing { "Simulation Running" } else { "Simulation Ready" };
+                    ui.label(egui::RichText::new(status).size(10.0).color(egui::Color32::GRAY));
+                    if self.pattern_dirty {
+                        ui.label(egui::RichText::new("· Unsaved Changes").size(10.0).color(egui::Color32::from_rgb(224, 173, 68)));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new(self.pattern_project.units.label().to_uppercase()).size(10.0).color(egui::Color32::GRAY));
+                    });
+                });
+            });
+
         if self.show_metrics {
             egui::Panel::bottom("view_metrics")
                 .resizable(true)
@@ -7749,24 +7767,6 @@ impl eframe::App for ClothEvoApp {
                     egui::ScrollArea::vertical().show(ui, |ui| metrics_panel(self, ui));
                 });
         }
-
-        egui::Panel::bottom("status_bar")
-            .frame(egui::Frame::new()
-                .fill(egui::Color32::from_rgb(22, 23, 24))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(43, 44, 45)))
-                .inner_margin(egui::Margin::symmetric(8, 3)))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let status = if self.playing { "Simulation Running" } else { "Simulation Ready" };
-                    ui.label(egui::RichText::new(status).size(10.0).color(egui::Color32::GRAY));
-                    if self.pattern_dirty {
-                        ui.label(egui::RichText::new("· Unsaved Changes").size(10.0).color(egui::Color32::from_rgb(224, 173, 68)));
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new(self.pattern_project.units.label().to_uppercase()).size(10.0).color(egui::Color32::GRAY));
-                    });
-                });
-            });
 
         egui::Panel::left("library_panel")
             .resizable(true)
