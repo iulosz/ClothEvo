@@ -1357,6 +1357,8 @@ impl ClothEvoApp {
                             ui.label("Cada cor pode ser alterada individualmente.");
                             theme_changed |= edit_ui_rgb(ui, "Fundo dos painéis", &mut self.ui_customization.theme.panel_bg);
                             theme_changed |= edit_ui_rgb(ui, "Fundo das janelas", &mut self.ui_customization.theme.window_bg);
+                            theme_changed |= edit_ui_rgb(ui, "Fundo da navegação", &mut self.ui_customization.theme.navigation_bg);
+                            theme_changed |= edit_ui_rgb(ui, "Fundo da barra de ferramentas", &mut self.ui_customization.theme.toolbar_bg);
                             theme_changed |= edit_ui_rgb(ui, "Fundo profundo", &mut self.ui_customization.theme.deep_bg);
                             theme_changed |= edit_ui_rgb(ui, "Fundo secundário", &mut self.ui_customization.theme.muted_bg);
                             theme_changed |= edit_ui_rgb(ui, "Texto", &mut self.ui_customization.theme.text);
@@ -7942,14 +7944,14 @@ impl eframe::App for ClothEvoApp {
 
         egui::Panel::top("main_navigation")
             .frame(egui::Frame::new()
-                .fill(ui_rgb(self.ui_customization.theme.window_bg))
+                .fill(ui_rgb(self.ui_customization.theme.navigation_bg))
                 .stroke(egui::Stroke::new(1.0, ui_rgb(self.ui_customization.theme.border)))
                 .inner_margin(egui::Margin::symmetric(14, 8)))
             .show(ui, |ui| self.top_navigation(ui));
 
         egui::Panel::top("global_toolbar")
             .frame(egui::Frame::new()
-                .fill(ui_rgb(self.ui_customization.theme.panel_bg))
+                .fill(ui_rgb(self.ui_customization.theme.toolbar_bg))
                 .stroke(egui::Stroke::new(1.0, ui_rgb(self.ui_customization.theme.border)))
                 .inner_margin(egui::Margin::symmetric(14, 5)))
             .show(ui, |ui| self.global_toolbar(ui));
