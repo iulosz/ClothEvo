@@ -6070,11 +6070,58 @@ impl ClothEvoApp {
     }
 
     fn split_pane(&mut self, ui: &mut egui::Ui, pattern: bool) {
-        if pattern {
-            self.pattern_viewport(ui);
-        } else {
-            self.viewport(ui);
-        }
+        egui::Frame::new()
+            .fill(egui::Color32::from_rgb(25, 26, 27))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(65, 67, 69)))
+            .inner_margin(egui::Margin::same(3))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if pattern {
+                        ui.label(egui::RichText::new("2D Pattern Window").strong());
+                        ui.separator();
+                        if ui.selectable_label(self.pattern_tool == PatternTool::Draw, "Draw").clicked() {
+                            self.pattern_tool = PatternTool::Draw;
+                        }
+                        if ui.selectable_label(self.pattern_tool == PatternTool::Select, "Select").clicked() {
+                            self.pattern_tool = PatternTool::Select;
+                        }
+                        if ui.small_button("Fit").clicked() {
+                            self.pattern_fit_pending = true;
+                        }
+                    } else {
+                        ui.label(egui::RichText::new("3D Garment").strong());
+                        ui.separator();
+                        ui.label(egui::RichText::new("Perspective").color(egui::Color32::GRAY));
+                        if ui.small_button("Front").clicked() {
+                            let aspect = ui.available_width() / ui.available_height().max(1.0);
+                            self.focus_camera_preset(CameraPreset::Front, aspect);
+                        }
+                        if ui.small_button("Side").clicked() {
+                            let aspect = ui.available_width() / ui.available_height().max(1.0);
+                            self.focus_camera_preset(CameraPreset::Side, aspect);
+                        }
+                        if ui.small_button("Top").clicked() {
+                            let aspect = ui.available_width() / ui.available_height().max(1.0);
+                            self.focus_camera_preset(CameraPreset::Top, aspect);
+                        }
+                        ui.menu_button("Show", |ui| {
+                            let mut changed = false;
+                            changed |= ui.checkbox(&mut self.style.wireframe, "Mesh Wireframe").changed();
+                            changed |= ui.checkbox(&mut self.style.seams, "Seam Lines").changed();
+                            changed |= ui.checkbox(&mut self.avatar_visible, "Avatar").changed();
+                            if changed {
+                                self.upload_scene();
+                            }
+                        });
+                    }
+                });
+                ui.separator();
+                if pattern {
+                    self.pattern_viewport(ui);
+                } else {
+                    self.viewport(ui);
+                }
+            });
     }
 
     fn camera_focus_bounds(&self) -> Option<(Vec3, f32)> {
