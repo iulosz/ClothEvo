@@ -1306,6 +1306,7 @@ impl ClothEvoApp {
         let mut layout_changed = false;
         let mut remove_button_id = None;
         let mut add_button: Option<(UiCommand, String)> = None;
+        let mut close_clicked = false;
 
         egui::Window::new("Personalizar interface")
             .open(&mut self.show_ui_customizer)
@@ -1385,7 +1386,8 @@ impl ClothEvoApp {
                         .show(ui, |ui| {
                             ui.label("Adicione comandos existentes à sua própria barra. Cada botão pode ser renomeado, ocultado, reordenado ou removido.");
                             let mut previous_order = None;
-                            for index in 0..self.ui_customization.toolbar_buttons.len() {
+                            let button_count = self.ui_customization.toolbar_buttons.len();
+                            for index in 0..button_count {
                                 let button = &mut self.ui_customization.toolbar_buttons[index];
                                 ui.horizontal(|ui| {
                                     ui.checkbox(&mut button.visible, "");
@@ -1401,7 +1403,7 @@ impl ClothEvoApp {
                                     if ui.small_button("↑").clicked() {
                                         previous_order = Some((index, index.saturating_sub(1)));
                                     }
-                                    if ui.small_button("↓").clicked() && index + 1 < self.ui_customization.toolbar_buttons.len() {
+                                    if ui.small_button("↓").clicked() && index + 1 < button_count {
                                         previous_order = Some((index, index + 1));
                                     }
                                     if ui.small_button("×").on_hover_text("Remover botão").clicked() {
@@ -1447,11 +1449,14 @@ impl ClothEvoApp {
                         reset_all_clicked = true;
                     }
                     if ui.button("Fechar").clicked() {
-                        self.show_ui_customizer = false;
+                        close_clicked = true;
                     }
                 });
             });
 
+        if close_clicked {
+            self.show_ui_customizer = false;
+        }
         if reset_theme_clicked {
             self.ui_customization.theme = ThemeSettings::default();
             theme_changed = true;
