@@ -1168,7 +1168,6 @@ impl ClothEvoApp {
         visuals.widgets.inactive.fg_stroke.color = ui_rgb(theme.text);
         visuals.widgets.hovered.fg_stroke.color = ui_rgb(theme.text);
         visuals.widgets.active.fg_stroke.color = ui_rgb(theme.text);
-        visuals.widgets.noninteractive.bg_fill = ui_rgb(theme.panel_bg);
         visuals.widgets.inactive.weak_bg_fill = ui_rgb(theme.button_bg);
         visuals.widgets.hovered.weak_bg_fill = ui_rgb(theme.button_hover);
         visuals.widgets.active.weak_bg_fill = ui_rgb(theme.selection);
